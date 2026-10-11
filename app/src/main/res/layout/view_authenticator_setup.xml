@@ -10,12 +10,12 @@
             android:textColor="@color/accent_hot" android:textStyle="bold" android:importantForAccessibility="no" />
         <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
             android:layout_marginStart="12dp" android:text="@string/keyholder_scan_title"
-            android:textSize="18sp" android:textStyle="bold" android:textColor="@color/text_primary" />
+            android:textSize="@dimen/ui_text_section" android:textStyle="bold" android:textColor="@color/text_primary" />
     </LinearLayout>
     <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:layout_marginTop="10dp" android:layout_marginBottom="18dp"
+        android:layout_marginTop="@dimen/ui_gap_group" android:layout_marginBottom="@dimen/ui_gap_section"
         android:text="@string/authenticator_setup_help" android:textColor="@color/text_secondary"
-        android:textSize="13sp" android:lineSpacingExtra="3dp" />
+        android:textSize="@dimen/ui_text_body" android:lineSpacingExtra="3dp" />
 
     <ImageView android:id="@+id/authenticator_pairing_qr"
         android:layout_width="224dp" android:layout_height="224dp" android:layout_gravity="center_horizontal"
@@ -23,17 +23,17 @@
         android:scaleType="fitCenter" android:contentDescription="@string/authenticator_qr" />
     <TextView android:id="@+id/authenticator_manual_toggle"
         android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp"
-        android:layout_marginTop="8dp" android:gravity="center" android:padding="10dp"
-        android:text="@string/keyholder_manual" android:textColor="@color/accent_hot" android:textSize="13sp"
+        android:layout_marginTop="@dimen/ui_gap_control" android:gravity="center" android:padding="@dimen/ui_tile_padding"
+        android:text="@string/keyholder_manual" android:textColor="@color/accent_hot" android:textSize="@dimen/ui_text_body"
         android:clickable="true" android:focusable="true" android:background="?attr/selectableItemBackground" />
     <TextView android:id="@+id/authenticator_manual_key" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:padding="12dp" android:layout_marginBottom="12dp"
+        android:layout_height="wrap_content" android:padding="12dp" android:layout_marginBottom="@dimen/ui_gap_group"
         android:background="@drawable/bg_input" android:fontFamily="monospace" android:gravity="center"
-        android:textSize="15sp" android:textColor="@color/text_primary" android:textIsSelectable="true"
+        android:textSize="@dimen/ui_text_section" android:textColor="@color/text_primary" android:textIsSelectable="true"
         android:saveEnabled="false" android:importantForAutofill="no" android:visibility="gone" />
 
     <View android:layout_width="match_parent" android:layout_height="1dp"
-        android:layout_marginTop="4dp" android:layout_marginBottom="20dp" android:background="@color/outline_subtle" />
+        android:layout_marginTop="@dimen/ui_gap_inline" android:layout_marginBottom="20dp" android:background="@color/outline_subtle" />
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
         android:orientation="horizontal" android:gravity="center_vertical">
         <TextView android:layout_width="32dp" android:layout_height="32dp"
@@ -41,11 +41,11 @@
             android:textColor="@color/accent_hot" android:textStyle="bold" android:importantForAccessibility="no" />
         <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
             android:layout_marginStart="12dp" android:text="@string/keyholder_confirm_title"
-            android:textSize="18sp" android:textStyle="bold" android:textColor="@color/text_primary"
+            android:textSize="@dimen/ui_text_section" android:textStyle="bold" android:textColor="@color/text_primary"
             android:labelFor="@id/authenticator_confirmation" />
     </LinearLayout>
     <androidx.appcompat.widget.AppCompatEditText android:id="@id/authenticator_confirmation"
-        android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="64dp" android:padding="12dp" android:layout_marginTop="16dp"
+        android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="64dp" android:padding="12dp" android:layout_marginTop="@dimen/ui_gap_section"
         android:background="@drawable/bg_input" android:inputType="number" android:maxLength="6"
         android:singleLine="true" android:imeOptions="actionDone" android:gravity="center"
         android:hint="000000" android:contentDescription="@string/authenticator_code"
@@ -54,10 +54,10 @@
         android:saveEnabled="false" android:importantForAutofill="no" />
     <androidx.appcompat.widget.AppCompatButton android:id="@id/authenticator_confirm_button"
         style="@style/Widget.SubHub.PrimaryButton" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:minHeight="52dp" android:layout_marginTop="16dp"
+        android:layout_height="wrap_content" android:minHeight="52dp" android:layout_marginTop="@dimen/ui_gap_section"
         android:text="@string/authenticator_confirm" android:textAllCaps="false" />
     <androidx.appcompat.widget.AppCompatButton android:id="@+id/authenticator_pairing_cancel"
         style="@style/Widget.SubHub.DefaultButton" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginTop="6dp"
+        android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginTop="@dimen/ui_gap_control"
         android:text="@android:string/cancel" android:textAllCaps="false" />
 </LinearLayout>

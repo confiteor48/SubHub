@@ -18,6 +18,8 @@ public final class OnboardingState {
         return true;
     }
     public static void complete(Context context) {
+        context.getSharedPreferences("subhub_onboarding",0).edit()
+                .remove("draft_flow_version").remove("draft_wallet_rules").apply();
         context.getSharedPreferences("subhub_onboarding",0).edit().putBoolean("completed",true).remove("in_progress").remove("draft_step").remove("draft_censor").remove("draft_limits").remove("draft_wallet").remove("draft_whispers").remove("draft_style").remove("draft_appearance_changed").commit();
         context.getSharedPreferences(SettingsRepository.PREFERENCES_NAME,0).edit().putBoolean("has_seen_onboarding",true).apply();
         new GlobalNoticeState(context).dismiss(GlobalNoticeState.Kind.KEYHOLDER,"");

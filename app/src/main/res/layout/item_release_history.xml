@@ -3,7 +3,7 @@
     android:id="@+id/release_item"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginTop="7dp"
+    android:layout_marginTop="@dimen/ui_gap_control"
     android:background="@drawable/bg_home_module"
     android:clickable="true"
     android:focusable="true"
@@ -30,17 +30,17 @@
                 android:layout_height="wrap_content"
                 android:includeFontPadding="false"
                 android:textColor="@color/text_primary"
-                android:textSize="13sp"
+                android:textSize="@dimen/ui_text_body"
                 android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/release_meta"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
+                android:layout_marginTop="@dimen/ui_gap_inline"
                 android:includeFontPadding="false"
                 android:textColor="@color/text_muted"
-                android:textSize="9sp" />
+                android:textSize="@dimen/ui_text_caption" />
         </LinearLayout>
 
         <TextView
@@ -50,14 +50,14 @@
             android:gravity="center"
             android:includeFontPadding="false"
             android:text="›"
-            android:textColor="@color/accent_mid"
-            android:textSize="22sp" />
+            android:textColor="@color/accent_text"
+            android:textSize="@dimen/ui_icon_text" />
     </LinearLayout>
 
     <TextView
         android:id="@+id/release_details"
         style="@style/Widget.SubHub.FieldHelp"
-        android:layout_marginTop="9dp"
-        android:paddingBottom="2dp"
+        android:layout_marginTop="@dimen/ui_gap_control"
+        android:paddingBottom="@dimen/ui_gap_inline"
         android:visibility="gone" />
 </LinearLayout>

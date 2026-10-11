@@ -9,7 +9,7 @@
     <color name="surface_high">#EC241832</color>
     <!-- Near-black surfaces keep contrast high while the violet tint stays quiet. -->
     <color name="surface_deep">#EA0D0B12</color>
-    <color name="surface_card">#E815131C</color>
+    <color name="surface_card">#FC131019</color>
     <color name="surface_card_raised">#EE1D1927</color>
     <color name="surface_pressed">#2A1734</color>
     <color name="surface_disabled">#17131D</color>

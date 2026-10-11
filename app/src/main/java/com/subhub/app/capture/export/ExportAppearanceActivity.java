@@ -30,7 +30,7 @@ public final class ExportAppearanceActivity extends PreferencePage {
         if (isDestroyed() || isFinishing()) return;
         settings = SettingsRepository.forPreferences(ExportSettings.preferences(this));
         page(R.string.export_appearance_title);
-        text(page, getString(R.string.export_independent_help), 14, true);
+        fieldHelp(page, getString(R.string.export_independent_help));
         CensorAppearance appearance = settings.loadAppearance();
         LinearLayout style = card(page);
         button(style, getString(R.string.export_style_value, label(appearance.getType().getPreferenceValue())), () -> {
@@ -56,7 +56,7 @@ public final class ExportAppearanceActivity extends PreferencePage {
         button(categories, getString(R.string.export_categories), this::categories);
         slider(categories, R.string.export_confidence, Math.round(settings.loadDetectorConfig().getConfidenceThreshold() * 100), 100, value ->
                 settings.preferences().edit().putInt(SettingsRepository.KEY_CONFIDENCE, Math.max(1, value)).apply());
-        text(categories, getString(R.string.export_custom_assets_help), 13, true);
+        fieldHelp(categories, getString(R.string.export_custom_assets_help));
         button(page, getString(R.string.export_reset_live), () -> {
             if (!ControllerPinManager.isDomModeActive()) return;
             ThemedDialogs.builder(this).setTitle(R.string.export_reset_live).setMessage(R.string.export_reset_help)
@@ -100,7 +100,7 @@ public final class ExportAppearanceActivity extends PreferencePage {
                 }).show();
     }
     private void slider(LinearLayout parent, int label, int value, int max, java.util.function.IntConsumer change) {
-        TextView caption = text(parent, getString(label) + " · " + value + "%", 14, false);
+        TextView caption = fieldLabel(parent, getString(label) + " · " + value + "%");
         SeekBar slider = new SeekBar(this); slider.setMax(max); slider.setProgress(value); slider.setContentDescription(getString(label));
         parent.addView(slider, new LinearLayout.LayoutParams(-1, dp(48)));
         slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {

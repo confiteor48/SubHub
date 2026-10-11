@@ -28,7 +28,7 @@ public final class IncludedAppRow extends LinearLayout {
         addView(icon, new LayoutParams(dp(28), dp(28)));
         name = new TextView(context);
         name.setTextColor(context.getColor(R.color.text_primary));
-        name.setTextSize(13);
+        com.subhub.app.util.UiIdentity.textSize(name, R.dimen.ui_text_body);
         name.setMaxLines(3);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
         name.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);

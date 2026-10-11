@@ -141,7 +141,7 @@ public final class HelpActivity extends AppCompatActivity {
         TextView header = new TextView(this);
         header.setText(title);
         header.setTextColor(getColor(R.color.text_primary));
-        header.setTextSize(15);
+        com.subhub.app.util.UiIdentity.textSize(header, R.dimen.ui_text_section);
         header.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         header.setGravity(Gravity.CENTER_VERTICAL);
         header.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -156,7 +156,7 @@ public final class HelpActivity extends AppCompatActivity {
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         TextView indicator = new TextView(this);
         indicator.setTextColor(getColor(R.color.accent));
-        indicator.setTextSize(22);
+        com.subhub.app.util.UiIdentity.textSize(indicator, R.dimen.ui_icon_text);
         indicator.setGravity(Gravity.CENTER);
         indicator.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         headerRow.addView(indicator, new LinearLayout.LayoutParams(dp(28),
@@ -164,7 +164,7 @@ public final class HelpActivity extends AppCompatActivity {
         TextView content = new TextView(this);
         content.setText(body);
         content.setTextColor(getColor(R.color.text_secondary));
-        content.setTextSize(14);
+        com.subhub.app.util.UiIdentity.textSize(content, R.dimen.ui_text_row_title);
         content.setLineSpacing(dp(4), 1f);
         content.setPadding(0, 0, 0, dp(16));
         content.setVisibility(View.GONE);
@@ -305,8 +305,8 @@ public final class HelpActivity extends AppCompatActivity {
 
     private void renderUpdates() {
         UpdateCandidate candidate = new UpdateStateStore(this).candidate();
-        binding.updateSummary.setText(candidate == null
-                ? getString(R.string.help_rework_installed)
+        binding.updateSummary.setVisibility(candidate == null ? View.GONE : View.VISIBLE);
+        binding.updateSummary.setText(candidate == null ? ""
                 : getString(R.string.update_help_available, candidate.manifest.versionName));
     }
 

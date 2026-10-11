@@ -18,8 +18,8 @@
             android:layout_height="wrap_content" />
 
         <TextView style="@style/Widget.SubHub.FieldHelp"
-            android:layout_marginTop="8dp"
-            android:layout_marginBottom="14dp"
+            android:layout_marginTop="@dimen/ui_gap_control"
+            android:layout_marginBottom="@dimen/ui_gap_group"
             android:text="@string/export_desc" />
 
         <LinearLayout
@@ -27,34 +27,34 @@
             android:layout_height="wrap_content"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="@dimen/ui_card_padding">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:letterSpacing="0.12"
+
                 android:text="@string/export_current_settings"
-                android:textColor="@color/accent"
-                android:textSize="11sp"
+                android:textColor="@color/accent_text"
+                android:textSize="@dimen/ui_text_caption"
                 android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/export_settings_summary"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
+                android:layout_marginTop="@dimen/ui_gap_control"
                 android:textColor="@color/text_primary"
-                android:textSize="13sp" />
+                android:textSize="@dimen/ui_text_body" />
         </LinearLayout>
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="@dimen/ui_gap_group"
             android:background="@drawable/bg_card"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:padding="16dp">
+            android:padding="@dimen/ui_card_padding">
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -67,16 +67,16 @@
                     android:layout_height="wrap_content"
                     android:text="@string/export_delete_originals_title"
                     android:textColor="@color/text_primary"
-                    android:textSize="12sp"
+                    android:textSize="@dimen/ui_text_label"
                     android:textStyle="bold" />
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    android:layout_marginTop="@dimen/ui_gap_inline"
                     android:text="@string/export_delete_originals_desc"
                     android:textColor="@color/text_secondary"
-                    android:textSize="11sp" />
+                    android:textSize="@dimen/ui_text_caption" />
             </LinearLayout>
 
             <com.subhub.app.util.StateToggle
@@ -89,14 +89,14 @@
         <Button
             android:id="@+id/button_pick_images"
             style="@style/Widget.SubHub.PrimaryButton"
-            android:layout_marginTop="16dp"
-            android:letterSpacing="0.1"
+            android:layout_marginTop="@dimen/ui_gap_section"
+
             android:text="@string/export_pick_images" />
 
         <Button
             android:id="@+id/button_cancel_export"
             style="@style/Widget.SubHub.CompactOutlineButton"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="@dimen/ui_gap_control"
             android:text="@string/export_cancel"
             android:visibility="gone" />
 
@@ -104,10 +104,10 @@
             android:id="@+id/export_progress_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
+            android:layout_marginTop="@dimen/ui_gap_group"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="16dp"
+            android:padding="@dimen/ui_card_padding"
             android:visibility="gone">
 
             <TextView
@@ -115,14 +115,14 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:textColor="@color/text_primary"
-                android:textSize="13sp" />
+                android:textSize="@dimen/ui_text_body" />
 
             <ProgressBar
                 android:id="@+id/export_progress"
                 style="@android:style/Widget.ProgressBar.Horizontal"
                 android:layout_width="match_parent"
                 android:layout_height="6dp"
-                android:layout_marginTop="10dp"
+                android:layout_marginTop="@dimen/ui_gap_group"
                 android:progressBackgroundTint="@color/background"
                 android:progressTint="@color/accent" />
 
@@ -130,10 +130,10 @@
                 android:id="@+id/export_location"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
+                android:layout_marginTop="@dimen/ui_gap_group"
                 android:text="@string/export_saved_to"
                 android:textColor="@color/text_secondary"
-                android:textSize="11sp"
+                android:textSize="@dimen/ui_text_caption"
                 android:visibility="gone" />
         </LinearLayout>
     </LinearLayout>

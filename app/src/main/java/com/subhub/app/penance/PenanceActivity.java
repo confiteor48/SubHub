@@ -137,8 +137,13 @@ public final class PenanceActivity extends AppCompatActivity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (intent.getBooleanExtra(SubHubNavigation.EXTRA_SECTION_HOME, false)) showSectionHome();
         handlePayPalReturn(intent);
         showConnectionIfRequested();
+    }
+
+    public void showSectionHome() {
+        openWalletEditor("");
     }
 
     @Override protected void onResume() {
@@ -357,19 +362,15 @@ public final class PenanceActivity extends AppCompatActivity {
         boolean editable = enabled && ControllerPinManager.isSessionUnlocked();
         binding.paidPauseAmount.setEnabled(editable);
         binding.paidPauseMinutes.setEnabled(editable);
-        binding.paidPauseAmount.setAlpha(enabled ? 1f : 0.45f);
-        binding.paidPauseMinutes.setAlpha(enabled ? 1f : 0.45f);
     }
 
     private void syncRuleInputState(CompoundButton toggle, EditText amount, View... dependents) {
         boolean ruleEnabled = toggle.isChecked();
         boolean editable = ruleEnabled && ControllerPinManager.isSessionUnlocked();
         amount.setEnabled(editable);
-        amount.setAlpha(ruleEnabled ? 1f : 0.45f);
         if (dependents == null) return;
         for (View dependent : dependents) {
             dependent.setEnabled(editable);
-            dependent.setAlpha(ruleEnabled ? 1f : 0.45f);
         }
     }
 
@@ -855,9 +856,9 @@ public final class PenanceActivity extends AppCompatActivity {
     private void renderHistory(PenanceSnapshot snapshot, long nowMillis) {
         binding.history.setText(snapshot.getEvents().isEmpty() ? getString(R.string.penance_history_empty) : "");
         binding.history.setVisibility(snapshot.getEvents().isEmpty() ? View.VISIBLE : View.GONE);
-        binding.walletHistoryList.bind(snapshot.getEvents(), nowMillis, historyExpanded ? 12 : 2);
+        int groupCount = binding.walletHistoryList.bind(snapshot.getEvents(), nowMillis, historyExpanded ? 12 : 2);
         binding.walletHistoryMore.setVisibility(
-                snapshot.getEvents().size() > 2 ? View.VISIBLE : View.GONE);
+                groupCount > 2 ? View.VISIBLE : View.GONE);
         binding.walletHistoryMore.setText(
                 historyExpanded ? R.string.wallet_history_less : R.string.wallet_history_more);
     }

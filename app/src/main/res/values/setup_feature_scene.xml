@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tour_scene_censor">Censor</string>
+    <string name="tour_scene_censor_help">Keep temptation covered</string>
+    <string name="tour_scene_wallet">Wallet</string>
+    <string name="tour_scene_wallet_help">Tribute for temptation</string>
+    <string name="tour_scene_limits">Limits</string>
+    <string name="tour_scene_limits_help">Playtime with rules</string>
+    <string name="tour_feature_scene_accessibility">Censor covers temptation. Wallet can record tribute on detection. Limits sets your Sub’s daily app allowance.</string>
+</resources>

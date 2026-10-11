@@ -2,42 +2,42 @@
     <TextView android:id="@+id/service_duration_heading" style="@style/Widget.SubHub.SectionHeader"
         android:text="@string/commitment_timer_title" />
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="horizontal" android:layout_marginTop="8dp">
+        android:orientation="horizontal" android:layout_marginTop="@dimen/ui_gap_control">
         <TextView android:id="@+id/commitment_timer_1h" style="@style/Widget.SubHub.CompactAction"
             android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/commitment_timer_1h" />
         <TextView android:id="@+id/commitment_timer_24h" style="@style/Widget.SubHub.CompactAction"
             android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginStart="8dp" android:text="@string/commitment_timer_24h" />
     </LinearLayout>
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="horizontal" android:layout_marginTop="8dp">
+        android:orientation="horizontal" android:layout_marginTop="@dimen/ui_gap_control">
         <TextView android:id="@+id/commitment_timer_7d" style="@style/Widget.SubHub.CompactAction"
             android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/commitment_timer_7d" />
         <TextView android:id="@+id/commitment_timer_30d" style="@style/Widget.SubHub.CompactAction"
             android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginStart="8dp" android:text="@string/commitment_timer_30d" />
     </LinearLayout>
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="horizontal" android:layout_marginTop="8dp">
+        android:orientation="horizontal" android:layout_marginTop="@dimen/ui_gap_control">
         <TextView android:id="@+id/commitment_timer_permanent" style="@style/Widget.SubHub.CompactAction"
             android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/service_duration_permanent" />
         <TextView android:id="@+id/service_duration_random" style="@style/Widget.SubHub.CompactAction"
             android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginStart="8dp" android:text="@string/service_duration_random" />
     </LinearLayout>
-    <LinearLayout android:id="@+id/service_duration_range" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:orientation="horizontal" android:visibility="gone">
+    <com.subhub.app.util.FormRow android:id="@+id/service_duration_range" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:visibility="gone">
         <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:orientation="vertical">
             <TextView style="@style/Widget.SubHub.FieldLabel" android:text="@string/pact_minimum_hours" android:labelFor="@+id/service_duration_min_hours" />
             <EditText style="@style/Widget.SubHub.Input" android:id="@id/service_duration_min_hours" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:minHeight="48dp" android:singleLine="true"
-                android:inputType="numberDecimal" android:text="1" android:textColor="@color/text_primary" />
+                android:layout_height="wrap_content" android:singleLine="true"
+                android:inputType="numberDecimal" android:text="1" />
         </LinearLayout>
         <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginStart="8dp" android:orientation="vertical">
             <TextView style="@style/Widget.SubHub.FieldLabel" android:text="@string/pact_maximum_hours" android:labelFor="@+id/service_duration_max_hours" />
             <EditText style="@style/Widget.SubHub.Input" android:id="@id/service_duration_max_hours" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:minHeight="48dp" android:singleLine="true"
-                android:inputType="numberDecimal" android:text="24" android:textColor="@color/text_primary" />
+                android:layout_height="wrap_content" android:singleLine="true"
+                android:inputType="numberDecimal" android:text="24" />
         </LinearLayout>
-    </LinearLayout>
+    </com.subhub.app.util.FormRow>
     <com.subhub.app.util.StateToggle android:id="@+id/service_duration_hide" android:layout_width="match_parent"
-        android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/pact_hide_countdown"
-        android:layout_marginTop="6dp" android:textSize="12sp" android:textColor="@color/text_secondary" />
+        android:layout_height="wrap_content" android:text="@string/pact_hide_countdown"
+        android:layout_marginTop="@dimen/ui_gap_control" />
 </merge>

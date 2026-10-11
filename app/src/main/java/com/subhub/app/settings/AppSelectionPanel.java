@@ -40,19 +40,17 @@ public final class AppSelectionPanel extends LinearLayout {
         all = new StateToggle(context);
         all.setId(R.id.all_apps);
         all.setText(R.string.app_selection_all);
-        all.setTextColor(context.getColor(R.color.text_primary));
-        all.setTextSize(14);
+        com.subhub.app.util.UiIdentity.textSize(all, R.dimen.ui_text_body);
         all.setMinHeight(dp(48));
         addView(all, new LayoutParams(-1, -2));
-        allHelp = new TextView(context);
+        allHelp = (TextView) android.view.LayoutInflater.from(context)
+                .inflate(R.layout.view_form_help, this, false);
         allHelp.setText(R.string.app_selection_all_help);
-        allHelp.setTextColor(context.getColor(R.color.text_secondary));
-        allHelp.setTextSize(12);
-        addView(allHelp, new LayoutParams(-1, -2));
+        addView(allHelp);
         count = new TextView(context);
         count.setId(R.id.selected_count);
         count.setTextColor(context.getColor(R.color.text_secondary));
-        count.setTextSize(12);
+        com.subhub.app.util.UiIdentity.textSize(count, R.dimen.ui_text_label);
         count.setPadding(0, dp(8), 0, dp(8));
         addView(count, new LayoutParams(-1, -2));
         LinearLayout content = new LinearLayout(context);
@@ -75,6 +73,13 @@ public final class AppSelectionPanel extends LinearLayout {
     public void setCountOnlyForOverride(boolean compact) {
         countOnlyForOverride = compact;
         refresh();
+    }
+
+    /** Setup owns a bounded viewport, so let its app list use all remaining height. */
+    public void fillAvailableHeight() {
+        LinearLayout content = findViewById(R.id.app_list_content);
+        content.setLayoutParams(new LayoutParams(-1, 0, 1));
+        list.setLayoutParams(new LayoutParams(-1, 0, 1));
     }
 
     public void bind(AppCompatActivity activity, BooleanSupplier editable, Runnable changed) {

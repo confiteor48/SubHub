@@ -142,7 +142,6 @@ public class UiFollowupAndroidTest {
         try (ActivityScenario<OnboardingActivity> page = ActivityScenario.launch(
                 new Intent(context, OnboardingActivity.class).putExtra(OnboardingActivity.REPLAY, true))) {
             onView(withId(R.id.tour_next)).perform(click());
-            onView(withId(R.id.tour_next)).perform(click());
             page.onActivity(a -> capture(a, "tour-figure"));
         }
     }

@@ -3,56 +3,56 @@
     <ScrollView android:layout_width="match_parent" android:layout_height="match_parent" android:fillViewport="true" android:clipToPadding="false">
         <LinearLayout android:id="@+id/export_page" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:paddingHorizontal="@dimen/page_margin" android:paddingTop="@dimen/primary_header_top" android:paddingBottom="32dp">
             <include layout="@layout/view_secondary_header" />
-            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="14dp" android:padding="12dp" android:background="@drawable/bg_wallet_balance">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="@dimen/ui_gap_group" android:padding="12dp" android:background="@drawable/bg_wallet_balance">
                 <FrameLayout android:id="@+id/export_preview_stage" android:layout_width="match_parent" android:layout_height="230dp" android:background="@drawable/bg_card" android:clipToOutline="true">
                     <ImageView android:id="@+id/export_preview_image" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="fitCenter" android:contentDescription="@string/export_preview" android:visibility="gone" />
                     <LinearLayout android:id="@+id/export_preview_empty" android:layout_width="match_parent" android:layout_height="match_parent" android:gravity="center" android:orientation="vertical">
                         <ImageView android:layout_width="40dp" android:layout_height="40dp" android:src="@drawable/ic_tab_export" android:importantForAccessibility="no" app:tint="@color/accent_text" />
-                        <TextView android:id="@+id/export_preview_hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:layout_marginTop="12dp" android:paddingHorizontal="16dp" android:text="@string/export_select_first" android:textColor="@color/text_secondary" android:textSize="13sp" />
+                        <TextView android:id="@+id/export_preview_hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center" android:layout_marginTop="@dimen/ui_gap_group" android:paddingHorizontal="16dp" android:text="@string/export_select_first" android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_body" />
                     </LinearLayout>
                     <ProgressBar android:id="@+id/export_preview_progress" android:layout_width="40dp" android:layout_height="40dp" android:layout_gravity="center" android:visibility="gone" android:indeterminateTint="@color/accent_text" />
                 </FrameLayout>
-                <com.subhub.app.util.WalletBalanceRow android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp">
+                <com.subhub.app.util.WalletBalanceRow android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control">
                     <Button android:id="@+id/button_pick_images" style="@style/Widget.SubHub.CompactOutlineButton" android:text="@string/export_choose_media" />
                     <Button android:id="@+id/export_preview_button" style="@style/Widget.SubHub.CompactOutlineButton" android:text="@string/gallery_preview" android:visibility="gone" />
                 </com.subhub.app.util.WalletBalanceRow>
-                <TextView android:id="@+id/export_selected_summary" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:textColor="@color/text_secondary" android:textSize="12sp" android:visibility="gone" />
+                <TextView android:id="@+id/export_selected_summary" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control" android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_label" android:visibility="gone" />
                 <Spinner android:id="@+id/export_preview_selection" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:contentDescription="@string/export_preview_item" android:visibility="gone" />
                 <SeekBar android:id="@+id/export_preview_position" android:layout_width="match_parent" android:layout_height="48dp" android:max="100" android:progressTint="@color/accent_text" android:thumbTint="@color/accent_text" android:contentDescription="@string/export_preview_frame" android:visibility="gone" />
-                <TextView android:id="@+id/export_frame_note" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/gallery_video_preview_note" android:textSize="11sp" android:textColor="@color/text_secondary" android:visibility="gone" />
+                <TextView android:id="@+id/export_frame_note" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/gallery_video_preview_note" android:textSize="@dimen/ui_text_caption" android:textColor="@color/text_secondary" android:visibility="gone" />
             </LinearLayout>
-            <com.subhub.app.util.SelectionGrid android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp">
-                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="12dp" android:layout_marginEnd="4dp" android:layout_marginBottom="8dp">
+            <com.subhub.app.util.SelectionGrid android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="12dp" android:layout_marginEnd="4dp" android:layout_marginBottom="@dimen/ui_gap_control">
                     <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/gallery_look" />
-                    <Button android:id="@+id/export_look_button" style="@style/Widget.SubHub.CompactOutlineButton" android:layout_marginTop="8dp" />
+                    <Button android:id="@+id/export_look_button" style="@style/Widget.SubHub.CompactOutlineButton" android:layout_marginTop="@dimen/ui_gap_control" />
                 </LinearLayout>
-                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="12dp" android:layout_marginStart="4dp" android:layout_marginBottom="8dp">
+                <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="12dp" android:layout_marginStart="4dp" android:layout_marginBottom="@dimen/ui_gap_control">
                     <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/export_categories" />
-                    <Button android:id="@+id/export_areas_button" style="@style/Widget.SubHub.CompactOutlineButton" android:layout_marginTop="8dp" />
+                    <Button android:id="@+id/export_areas_button" style="@style/Widget.SubHub.CompactOutlineButton" android:layout_marginTop="@dimen/ui_gap_control" />
                 </LinearLayout>
             </com.subhub.app.util.SelectionGrid>
-            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="12dp" android:layout_marginTop="6dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/bg_card" android:padding="12dp" android:layout_marginTop="@dimen/ui_gap_control">
                 <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/export_quality_title" />
-                <com.subhub.app.util.CompactChoiceGroup android:id="@+id/export_quality_choices" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp">
+                <com.subhub.app.util.CompactChoiceGroup android:id="@+id/export_quality_choices" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control">
                     <RadioButton android:id="@+id/export_quality_draft" style="@style/Widget.SubHub.OptionRadio" android:text="@string/gallery_quality_draft" android:button="@null" android:gravity="center" android:minHeight="48dp" />
                     <RadioButton android:id="@+id/export_quality_balanced" style="@style/Widget.SubHub.OptionRadio" android:text="@string/gallery_quality_balanced" android:button="@null" android:gravity="center" android:minHeight="48dp" />
                     <RadioButton android:id="@+id/export_quality_high" style="@style/Widget.SubHub.OptionRadio" android:text="@string/gallery_quality_high" android:button="@null" android:gravity="center" android:minHeight="48dp" />
                     <RadioButton android:id="@+id/export_quality_best" style="@style/Widget.SubHub.OptionRadio" android:text="@string/gallery_quality_best" android:button="@null" android:gravity="center" android:minHeight="48dp" />
                 </com.subhub.app.util.CompactChoiceGroup>
             </LinearLayout>
-            <LinearLayout android:id="@+id/export_video_options" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="14dp" android:padding="12dp" android:background="@drawable/bg_card">
+            <LinearLayout android:id="@+id/export_video_options" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="@dimen/ui_gap_group" android:padding="12dp" android:background="@drawable/bg_card">
                 <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/gallery_videos" />
-                <com.subhub.app.util.CompactChoiceGroup android:id="@+id/export_detection_choices" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp">
+                <com.subhub.app.util.CompactChoiceGroup android:id="@+id/export_detection_choices" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control">
                     <RadioButton android:id="@+id/export_detection_full" style="@style/Widget.SubHub.OptionRadio" android:text="@string/gallery_best_detection" android:button="@null" android:gravity="center" android:minHeight="48dp" />
                     <RadioButton android:id="@+id/export_detection_fast" style="@style/Widget.SubHub.OptionRadio" android:text="@string/gallery_faster_detection" android:button="@null" android:gravity="center" android:minHeight="48dp" />
                 </com.subhub.app.util.CompactChoiceGroup>
-                <TextView style="@style/Widget.SubHub.FieldHelp" android:layout_marginTop="6dp" android:text="@string/gallery_faster_note" />
-                <com.subhub.app.util.StateToggle android:id="@+id/export_mute" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginTop="8dp" android:text="@string/export_mute" android:textColor="@color/text_primary" android:textSize="13sp" />
+                <TextView style="@style/Widget.SubHub.FieldHelp" android:layout_marginTop="@dimen/ui_gap_control" android:text="@string/gallery_faster_note" />
+                <com.subhub.app.util.StateToggle android:id="@+id/export_mute" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control" android:text="@string/export_mute" />
             </LinearLayout>
-            <com.subhub.app.util.StateToggle android:id="@+id/switch_delete_originals" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginTop="12dp" android:text="@string/export_delete_after" android:textColor="@color/text_primary" android:textSize="13sp" />
-            <Button android:id="@+id/export_start_batch_button" style="@style/Widget.SubHub.PrimaryButton" android:background="@drawable/bg_home_primary_action" android:textColor="@color/text_primary" android:letterSpacing="0" android:layout_marginTop="12dp" android:text="@string/export_start_batch" />
-            <TextView android:id="@+id/export_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:textColor="@color/text_secondary" android:textSize="13sp" />
-            <LinearLayout android:id="@+id/export_result_card" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="14dp" android:background="@drawable/bg_card" android:padding="12dp" android:visibility="gone">
+            <com.subhub.app.util.StateToggle android:id="@+id/switch_delete_originals" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group" android:text="@string/export_delete_after" />
+            <Button android:id="@+id/export_start_batch_button" style="@style/Widget.SubHub.PrimaryButton" android:background="@drawable/bg_home_primary_action" android:textColor="@color/text_primary" android:layout_marginTop="@dimen/ui_gap_group" android:text="@string/export_start_batch" />
+            <TextView android:id="@+id/export_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control" android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_body" />
+            <LinearLayout android:id="@+id/export_result_card" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="@dimen/ui_gap_group" android:background="@drawable/bg_card" android:padding="12dp" android:visibility="gone">
                 <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/export_results" />
                 <LinearLayout android:id="@+id/export_results_list" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" />
                 <Button android:id="@+id/button_cancel_export" style="@style/Widget.SubHub.CompactOutlineButton" android:text="@string/gallery_cancel_export" android:visibility="gone" />

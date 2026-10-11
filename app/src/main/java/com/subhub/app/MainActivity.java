@@ -5,7 +5,6 @@ import android.app.Activity;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
@@ -716,7 +715,8 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void showArrangementDetails(int title, List<ArrangementDetail> details) {
-        Dialog dialog = new Dialog(this);
+        com.google.android.material.bottomsheet.BottomSheetDialog dialog =
+                new com.google.android.material.bottomsheet.BottomSheetDialog(this);
         View content =
                 LayoutInflater.from(this).inflate(R.layout.dialog_arrangement_details, null, false);
         ((TextView) content.findViewById(R.id.arrangement_detail_title)).setText(title);
@@ -726,27 +726,36 @@ public final class MainActivity extends AppCompatActivity {
                 : title == R.string.sub_wallet_title ? R.drawable.ic_nav_money : R.drawable.ic_atmosphere);
         android.widget.ScrollView body = content.findViewById(R.id.arrangement_detail_body);
         android.widget.LinearLayout rows = content.findViewById(R.id.arrangement_detail_rows);
+        TextView summary = content.findViewById(R.id.arrangement_detail_summary);
+        summary.setText(details.get(0).value);
+        ((TextView) content.findViewById(R.id.arrangement_detail_summary_label))
+                .setText(details.get(0).label);
+        com.subhub.app.settings.CensorPreviewView preview =
+                content.findViewById(R.id.arrangement_detail_preview);
+        if (title == R.string.sub_censor_title) {
+            preview.setAppearance(new SettingsRepository(this).loadAppearance());
+            preview.setSquarePreview(true);
+            preview.setVisibility(View.VISIBLE);
+        }
         for (ArrangementDetail detail : details) {
-            if (rows.getChildCount() > 0) {
-                View seam = new View(this);
-                seam.setBackgroundColor(getColor(R.color.outline_subtle));
-                rows.addView(seam, new android.widget.LinearLayout.LayoutParams(-1, dp(1)));
-            }
+            if (detail == details.get(0)) continue;
+            View seam = new View(this);
+            seam.setBackgroundColor(getColor(R.color.outline_subtle));
+            rows.addView(seam, new android.widget.LinearLayout.LayoutParams(-1, dp(1)));
             android.widget.LinearLayout row = new android.widget.LinearLayout(this);
             row.setOrientation(android.widget.LinearLayout.VERTICAL);
-            row.setPadding(0, dp(11), 0, dp(11));
+            row.setPadding(0, dp(16), 0, dp(16));
             TextView label = new TextView(this);
             label.setText(detail.label);
-            label.setTextSize(12);
+            com.subhub.app.util.UiIdentity.textSize(label, R.dimen.ui_text_label);
             label.setTextColor(getColor(R.color.accent_text));
-            label.setTypeface(null, android.graphics.Typeface.BOLD);
-            androidx.core.view.ViewCompat.setAccessibilityHeading(label, true);
+            label.setPadding(0, 0, dp(16), 0);
             row.addView(label, new android.widget.LinearLayout.LayoutParams(-1, -2));
             TextView value = new TextView(this);
             value.setText(detail.value);
-            value.setTextSize(15);
+            com.subhub.app.util.UiIdentity.textSize(value, R.dimen.ui_text_section);
             value.setTextColor(getColor(R.color.text_primary));
-            value.setPadding(0, dp(4), 0, 0);
+            value.setPadding(0, dp(6), 0, 0);
             value.setLineSpacing(dp(2), 1f);
             row.addView(value, new android.widget.LinearLayout.LayoutParams(-1, -2));
             rows.addView(row, new android.widget.LinearLayout.LayoutParams(-1, -2));
@@ -754,31 +763,24 @@ public final class MainActivity extends AppCompatActivity {
         content.findViewById(R.id.arrangement_detail_close)
                 .setOnClickListener(view -> dialog.dismiss());
         dialog.setContentView(content);
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            window.setLayout(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT);
-        }
         dialog.setOnShowListener(
                 ignored -> {
-                    Window shown = dialog.getWindow();
-                    int width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(28), dp(560));
-                    rows.measure(View.MeasureSpec.makeMeasureSpec(width - dp(36), View.MeasureSpec.EXACTLY),
+                    android.widget.FrameLayout sheet = dialog.findViewById(
+                            com.google.android.material.R.id.design_bottom_sheet);
+                    if (sheet != null) sheet.setBackgroundColor(Color.TRANSPARENT);
+                    dialog.getBehavior().setState(
+                            com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED);
+                    dialog.getBehavior().setSkipCollapsed(true);
+                    int width = sheet == null ? getResources().getDisplayMetrics().widthPixels
+                            : sheet.getWidth();
+                    View bodyContent = body.getChildAt(0);
+                    bodyContent.measure(View.MeasureSpec.makeMeasureSpec(width - dp(36), View.MeasureSpec.EXACTLY),
                             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
                     android.view.ViewGroup.LayoutParams scrollParams = body.getLayoutParams();
-                    scrollParams.height = Math.min(rows.getMeasuredHeight(),
+                    scrollParams.height = Math.min(bodyContent.getMeasuredHeight(),
                             Math.round(getResources().getDisplayMetrics().heightPixels * .58f));
                     body.setLayoutParams(scrollParams);
-                    if (shown != null)
-                        shown.setLayout(
-                                Math.min(
-                                        getResources().getDisplayMetrics().widthPixels - dp(28),
-                                        dp(560)),
-                                WindowManager.LayoutParams.WRAP_CONTENT);
                 });
-        PremiumMotion.styleDialog(dialog);
         dialog.show();
     }
 
@@ -787,7 +789,6 @@ public final class MainActivity extends AppCompatActivity {
         DetectorConfig detector = repository.loadDetectorConfig();
         TextSmutConfig text = repository.loadTextSmutConfig();
         CensorAppearance appearance = repository.loadAppearance();
-        AppModeManager appMode = new AppModeManager(this);
         List<ArrangementDetail> lines = new ArrayList<>();
         lines.add(
                 detailLine(
@@ -831,14 +832,10 @@ public final class MainActivity extends AppCompatActivity {
                         appearance.isShowText()
                                 ? friendlyPhraseNames(phraseGroups)
                                 : getString(R.string.popup_off)));
-        lines.add(
-                detailLine(
-                        R.string.arrangement_apps, appLabels(appMode.getIncludedPackages())));
         return lines;
     }
 
     private List<ArrangementDetail> limitsArrangementDetails() {
-        AppModeManager appMode = new AppModeManager(this);
         AppTimerManager timers = new AppTimerManager(this);
         AppTimerManager.Settings settings = timers.loadSettings();
         List<ArrangementDetail> lines = new ArrayList<>();
@@ -848,26 +845,8 @@ public final class MainActivity extends AppCompatActivity {
                         settings.totalEnabled
                                 ? getString(R.string.arrangement_minutes, settings.totalMinutes)
                                 : getString(R.string.popup_off)));
-        Set<String> packages = appMode.getIncludedPackages();
-        if (settings.perAppEnabled && !packages.isEmpty()) {
-            List<String> allowances = new ArrayList<>();
-            for (String packageName : packages) {
-                allowances.add(
-                        getString(
-                                R.string.arrangement_app_allowance,
-                                appLabel(packageName),
-                                timers.allowanceMinutes(packageName)));
-            }
-            Collections.sort(allowances, String.CASE_INSENSITIVE_ORDER);
-            lines.add(
-                    detailLine(
-                            R.string.arrangement_limits_individual,
-                            android.text.TextUtils.join("\n", allowances)));
-        } else {
-            lines.add(
-                    detailLine(
-                            R.string.arrangement_limits_individual, getString(R.string.popup_off)));
-        }
+        lines.add(detailLine(R.string.arrangement_limits_individual,
+                getString(settings.perAppEnabled ? R.string.control_state_on : R.string.control_state_off)));
         return lines;
     }
 
@@ -919,7 +898,6 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private List<ArrangementDetail> subliminalArrangementDetails() {
-        AppModeManager appMode = new AppModeManager(this);
         SubliminalSettings settings = new SubliminalSettingsRepository(this).load();
         List<String> voices = new ArrayList<>();
         for (String pack : settings.getEnabledPacks()) voices.add(friendlySubliminalPack(pack));
@@ -935,9 +913,6 @@ public final class MainActivity extends AppCompatActivity {
                 detailLine(
                         R.string.arrangement_subliminal_intensity,
                         friendlyPreset(settings.getPreset())));
-        lines.add(
-                detailLine(
-                        R.string.arrangement_apps, appLabels(appMode.getIncludedPackages())));
         return lines;
     }
 
@@ -960,10 +935,6 @@ public final class MainActivity extends AppCompatActivity {
                         popup.isEnabled()
                                 ? getString(R.string.atmosphere_state_on)
                                 : getString(R.string.popup_off)));
-        lines.add(
-                detailLine(
-                        R.string.arrangement_apps,
-                        appLabels(new AppModeManager(this).getIncludedPackages())));
         return lines;
     }
 
@@ -982,24 +953,6 @@ public final class MainActivity extends AppCompatActivity {
         for (ArrangementDetail row : censorArrangementRows())
             lines.add(getString(R.string.arrangement_detail_line, getString(row.label), row.value));
         return android.text.TextUtils.join("\n\n", lines);
-    }
-
-    private String appLabels(Set<String> packages) {
-        if (packages == null || packages.isEmpty()) return getString(R.string.arrangement_no_apps);
-        List<String> labels = new ArrayList<>();
-        for (String packageName : packages) labels.add(appLabel(packageName));
-        Collections.sort(labels, String.CASE_INSENSITIVE_ORDER);
-        return android.text.TextUtils.join(", ", labels);
-    }
-
-    private String appLabel(String packageName) {
-        try {
-            ApplicationInfo info = getPackageManager().getApplicationInfo(packageName, 0);
-            CharSequence label = getPackageManager().getApplicationLabel(info);
-            return label == null ? packageName : label.toString();
-        } catch (PackageManager.NameNotFoundException ignored) {
-            return packageName;
-        }
     }
 
     private String friendlyCategories(Set<String> categories) {

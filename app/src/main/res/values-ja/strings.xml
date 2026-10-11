@@ -7,6 +7,6 @@
     <string name="permission_all_granted">オーバーレイと通知の権限は使用できます。</string><string name="permission_overlay_name">他のアプリの上に表示</string><string name="permission_notifications_name">通知</string><string name="permission_missing_fmt">不足: %1$s</string>
     <string name="settings_language">言語</string><string name="language_system_default">システムの既定値</string>
     <string name="help_getting_started">はじめに</string><string name="help_permissions">権限</string><string name="help_app_protection">サービスロック</string><string name="help_censored_downloads">エクスポートとダウンロード</string><string name="help_customisation">カスタマイズ</string><string name="help_popup_storm">Popup Storm の安全性</string><string name="help_troubleshooting">トラブルシューティング</string><string name="help_privacy">プライバシーとデータ</string><string name="help_updates">ビルドと更新</string>
-    <string name="onboarding_title">SubHub へようこそ</string><string name="onboarding_body">Dom モードで機能を設定します。Enter Service を押すと、Sub モードで設定した機能を使用できます。</string><string name="onboarding_help">ガイドを開く</string><string name="onboarding_dismiss">続行</string>
+    <string name="onboarding_title">SubHub へようこそ</string><string name="onboarding_body">Dom がルールを決め、Sub が従います。準備ができたら Home の Enter Service で開始します。</string><string name="onboarding_help">ガイドを開く</string><string name="onboarding_dismiss">続行</string>
     <string name="shortcut_start_protection">Enter Service</string><string name="shortcut_start_protection_long">Enter SubHub service</string>
 </resources>

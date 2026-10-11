@@ -2,10 +2,11 @@ package com.subhub.app.security;
 
 import android.app.Activity;
 import android.text.InputType;
-import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.KeyEvent;
+import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -39,6 +40,8 @@ public final class ControllerPinGate {
                 .create();
         dialog.setOnShowListener(ignored -> {
             styleDialog(activity, dialog);
+            bindSubmit(dialog, pin, confirmation);
+            com.subhub.app.util.InputFocusPolicy.focusController(dialog, pin);
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
                     String value = pin.getText().toString();
                     if (!value.equals(confirmation.getText().toString())) {
@@ -72,6 +75,8 @@ public final class ControllerPinGate {
                     .setNegativeButton(android.R.string.cancel, null).setPositiveButton(R.string.controller_pin_set, null).create();
             dialog.setOnShowListener(ignored -> {
                 styleDialog(activity, dialog);
+                bindSubmit(dialog, pin, confirmation);
+                com.subhub.app.util.InputFocusPolicy.focusController(dialog, pin);
                 dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
                     if (!ControllerPinManager.isDomModeActive()) { dialog.dismiss(); return; }
                     if (!pin.getText().toString().equals(confirmation.getText().toString()))
@@ -139,6 +144,8 @@ public final class ControllerPinGate {
                 .create();
         dialog.setOnShowListener(ignored -> {
             styleDialog(activity, dialog);
+            bindSubmit(dialog, pin);
+            com.subhub.app.util.InputFocusPolicy.focusController(dialog, pin);
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
                     if (credential.verify()) {
                         dialog.dismiss();
@@ -149,12 +156,37 @@ public final class ControllerPinGate {
         dialog.show();
     }
 
+    /** Keyboard submission follows the existing validated button action. */
+    public static void submitOnEnter(EditText input, Runnable submit) {
+        input.setImeOptions((input.getImeOptions() & ~EditorInfo.IME_MASK_ACTION)
+                | EditorInfo.IME_ACTION_DONE);
+        input.setOnEditorActionListener((view, action, event) -> {
+            if (event != null && (event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    || event.getKeyCode() == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+                if (event.getAction() == KeyEvent.ACTION_UP && event.getRepeatCount() == 0)
+                    submit.run();
+                return true;
+            }
+            if (action == EditorInfo.IME_ACTION_DONE || action == EditorInfo.IME_ACTION_GO
+                    || action == EditorInfo.IME_ACTION_SEND) {
+                submit.run();
+                return true;
+            }
+            return false;
+        });
+    }
+
+    private static void bindSubmit(AlertDialog dialog, EditText... inputs) {
+        for (EditText input : inputs) submitOnEnter(input, () -> {
+            if (dialog.isShowing()) dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
+        });
+    }
+
     private static LinearLayout panel(Activity activity) {
         LinearLayout panel = new LinearLayout(activity);
         panel.setOrientation(LinearLayout.VERTICAL);
         int horizontal = dp(activity, 24);
         panel.setPadding(horizontal, dp(activity, 20), horizontal, dp(activity, 4));
-        panel.setBackgroundColor(activity.getColor(R.color.surface));
         return panel;
     }
 
@@ -162,9 +194,9 @@ public final class ControllerPinGate {
         TextView view = new TextView(activity);
         view.setText(text);
         view.setTextColor(activity.getColor(R.color.text_primary));
-        view.setTextSize(18f);
+        com.subhub.app.util.UiIdentity.textSize(view, R.dimen.ui_text_title);
         view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        view.setLetterSpacing(0.08f);
+        view.setLetterSpacing(0.02f);
         view.setIncludeFontPadding(false);
         view.setPadding(0, 0, 0, dp(activity, 10));
         return view;
@@ -174,7 +206,8 @@ public final class ControllerPinGate {
         TextView view = new TextView(activity);
         view.setText(text);
         view.setTextColor(activity.getColor(R.color.text_secondary));
-        view.setTextSize(12f);
+        com.subhub.app.util.UiIdentity.textSize(view, R.dimen.ui_text_caption);
+        view.setIncludeFontPadding(false);
         view.setPadding(0, 0, 0, dp(activity, 10));
         return view;
     }
@@ -184,13 +217,13 @@ public final class ControllerPinGate {
         input.setHint(hint);
         input.setSingleLine(true);
         input.setMaxLines(1);
-        input.setInputType(InputType.TYPE_CLASS_NUMBER
+        com.subhub.app.util.UiIdentity.inputType(input, InputType.TYPE_CLASS_NUMBER
                 | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        input.setTextColor(activity.getColor(R.color.text_primary));
-        input.setHintTextColor(activity.getColor(R.color.text_muted));
-        input.setBackgroundTintList(ColorStateList.valueOf(activity.getColor(R.color.accent)));
-        input.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(activity, 50)));
+        input.setBackgroundTintList(null);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = activity.getResources().getDimensionPixelSize(R.dimen.ui_gap_control);
+        input.setLayoutParams(params);
         return input;
     }
 

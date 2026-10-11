@@ -1,25 +1,25 @@
 <resources>
     <string name="keyholder_home_title">Keyholder</string>
-    <string name="keyholder_home_unpaired">Your lock. Their key. Set up code-based approval.</string>
-    <string name="keyholder_home_paired">Key handed over · View your arrangement</string>
+    <string name="keyholder_home_unpaired">Let the Dom keep the keys. Set up PIN or code approval.</string>
+    <string name="keyholder_home_paired">The Dom holds the keys · View your arrangement</string>
     <string name="keyholder_intro_title">Keyholder</string>
     <string name="keyholder_intro_body">Use a PIN in person or Google Authenticator for remote approval.</string>
     <string name="keyholder_intro_open">Set up Keyholder</string>
     <string name="keyholder_intro_dismiss">Got it</string>
     <string name="keyholder_pin_heading">In person · Private PIN</string>
-    <string name="keyholder_pin_description">Your keyholder enters their PIN on this device to open Dom access. Your existing PIN stays the same.</string>
-    <string name="keyholder_pin_change">Change Keyholder PIN</string>
+    <string name="keyholder_pin_description">Your Dom enters their PIN on this device to open Dom controls. Your existing PIN stays the same.</string>
+    <string name="keyholder_pin_change">Change Dom PIN</string>
     <string name="keyholder_remote_heading">REMOTE · AUTHENTICATOR</string>
     <item type="id" name="keyholder_pin_change_button" />
     <string name="keyholder_pin_subtitle">A private PIN, entered on this device</string>
     <string name="keyholder_remote_title">Remote · Authenticator</string>
     <string name="keyholder_remote_subtitle">Fresh codes from Google Authenticator or a compatible app</string>
     <string name="keyholder_pin_step_one">Set a PIN</string>
-    <string name="keyholder_pin_step_one_help">Your keyholder sets a 4–12 digit PIN on this device and keeps it private.</string>
+    <string name="keyholder_pin_step_one_help">Your Dom sets a 4–12 digit PIN on this device and keeps it private.</string>
     <string name="keyholder_pin_step_two">Enter the PIN</string>
-    <string name="keyholder_pin_step_two_help">When you need a change, hand them your phone so they can enter their PIN at the Dom prompt.</string>
+    <string name="keyholder_pin_step_two_help">Need a change? Hand your Dom the phone so they can enter their PIN at the Dom prompt.</string>
     <string name="keyholder_pin_step_three">Open Dom controls</string>
-    <string name="keyholder_pin_step_three_help">The PIN opens Dom controls for this session. Use Lock when finished to return to Sub mode.</string>
+    <string name="keyholder_pin_step_three_help">The PIN opens Dom controls for this session. Use Lock when finished to hand back to the Sub.</string>
     <string name="keyholder_expanded">Expanded</string>
     <string name="keyholder_collapsed">Collapsed</string>
     <item type="id" name="keyholder_pin_header" />

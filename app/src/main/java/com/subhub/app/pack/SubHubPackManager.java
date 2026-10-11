@@ -143,13 +143,13 @@ public final class SubHubPackManager {
             boolean replacing = installed != null;
             if (replacing && !ControllerPinManager.isDomModeActive()
                     && !samePackIdentity(installed, pack)) {
-                throw new IOException("Arrangement identity differs; unlock Dom Space to replace it");
+                throw new IOException("Arrangement identity differs; unlock Dom to replace it");
             }
             if (pack.getId().equals(activePackId())) {
                 if (pack.hasEncryptedPayPal() || activeHasPayPalBackup()
                         || (installed != null && installed.hasEncryptedPayPal())) {
                     throw new IOException(
-                            "Deactivate in Dom Space before updating an encrypted PayPal"
+                            "The Dom must deactivate before updating an encrypted PayPal"
                                 + " arrangement");
                 }
                 if (installed == null || !samePackIdentity(installed, pack)) {
@@ -254,7 +254,7 @@ public final class SubHubPackManager {
     public UnlockedPayPal unlockPayPal(SubHubPack pack, char[] password)
             throws java.security.GeneralSecurityException {
         if (!ControllerPinManager.isDomModeActive() || pack == null || !pack.hasEncryptedPayPal()) {
-            throw new java.security.GeneralSecurityException("Unlock Dom Space first");
+            throw new java.security.GeneralSecurityException("Unlock Dom first");
         }
         JSONObject envelope = pack.getEncryptedPayPal();
         return new UnlockedPayPal(pack.getId(), pack.getOriginDeviceId(), envelope.toString(),

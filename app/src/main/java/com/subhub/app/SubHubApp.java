@@ -27,6 +27,8 @@ public final class SubHubApp extends Application {
         com.subhub.app.capture.export.ExportJobStore.recoverProcess(this);
         com.subhub.app.privacy.PrivacyLifecycle.install(this);
         registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
+            private final java.util.Set<Activity> opened = java.util.Collections.newSetFromMap(
+                    new java.util.IdentityHashMap<>());
             @Override
             public void onActivityPreCreated(@NonNull Activity activity, @Nullable Bundle state) {
                 WindowCompat.setDecorFitsSystemWindows(activity.getWindow(), false);
@@ -35,6 +37,7 @@ public final class SubHubApp extends Application {
             @Override
             public void onActivityCreated(@NonNull Activity activity, @Nullable Bundle state) {
                 View content = activity.findViewById(android.R.id.content);
+                com.subhub.app.util.InputFocusPolicy.openForReading(content);
                 int left = content.getPaddingLeft();
                 int top = content.getPaddingTop();
                 int right = content.getPaddingRight();
@@ -50,12 +53,18 @@ public final class SubHubApp extends Application {
             }
 
             @Override public void onActivityStarted(@NonNull Activity activity) { }
-            @Override public void onActivityResumed(@NonNull Activity activity) { }
+            @Override public void onActivityResumed(@NonNull Activity activity) {
+                if (opened.add(activity)) {
+                    // View-state restoration can focus a saved EditText after onCreate.
+                    activity.getWindow().getDecorView().post(() ->
+                            com.subhub.app.util.InputFocusPolicy.openActivityForReading(activity));
+                }
+            }
             @Override public void onActivityPaused(@NonNull Activity activity) { }
             @Override public void onActivityStopped(@NonNull Activity activity) { }
             @Override public void onActivitySaveInstanceState(@NonNull Activity activity,
                     @NonNull Bundle outState) { }
-            @Override public void onActivityDestroyed(@NonNull Activity activity) { }
+            @Override public void onActivityDestroyed(@NonNull Activity activity) { opened.remove(activity); }
         });
         LocaleHelper.applySaved(this);
         new SubHubPackManager(this);

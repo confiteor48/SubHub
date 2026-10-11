@@ -217,8 +217,8 @@ public class ExportWorkspaceActivity extends PreferencePage {
         List<String> labels = new ArrayList<>();
         for (int i = 0; i < selected.size(); i++) labels.add(mediaName(selected.get(i).toString(), i + 1));
         int chosen = Math.max(0, Math.min(previewIndex, selected.size() - 1));
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item); previewSelection.setAdapter(adapter);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, R.layout.view_form_spinner_value, labels);
+        adapter.setDropDownViewResource(R.layout.view_form_spinner_option); previewSelection.setAdapter(adapter);
         previewSelection.setSelection(chosen);
         previewIndex = chosen;
         refreshMediaControls();

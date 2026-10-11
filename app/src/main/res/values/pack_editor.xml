@@ -40,7 +40,7 @@
     <string name="pack_editor_minmax">The maximum must be at least the minimum.</string>
     <string name="pack_editor_caps">The daily cap must cover every enabled tribute price, and the weekly cap must cover the daily cap.</string>
     <string name="pack_editor_message_limit">Use at most 200 messages, with at most 120 characters per message.</string>
-    <string name="pack_apply_controller">Unlock Dom mode before applying a pack.</string>
+    <string name="pack_apply_controller">Unlock Dom before applying a pack.</string>
     <string name="pack_apply_empty">Choose at least one section to apply.</string>
     <string name="pack_apply_recovery">A previous apply is awaiting recovery. Restart the app before trying again.</string>
     <string name="pack_apply_invalid">The pack contains incompatible setting values. Review its section settings before applying.</string>

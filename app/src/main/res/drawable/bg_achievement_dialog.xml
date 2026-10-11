@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <corners android:radius="26dp" />
-    <gradient android:angle="90" android:startColor="#F035203E"
-        android:centerColor="#F025172D" android:endColor="#EE17121E" />
-    <stroke android:width="1dp" android:color="@color/accent_mid" />
+    <corners android:radius="@dimen/ui_feature_radius" />
+    <solid android:color="@color/dialog_surface" />
+    <stroke android:width="1dp" android:color="@color/outline_default" />
 </shape>

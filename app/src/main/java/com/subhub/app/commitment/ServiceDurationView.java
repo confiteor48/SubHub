@@ -138,8 +138,8 @@ public final class ServiceDurationView extends LinearLayout {
             persist();
             return true;
         } catch (IllegalArgumentException invalid) {
-            maximum.setError(getContext().getString(R.string.pact_range_invalid));
-            maximum.requestFocus();
+            com.subhub.app.util.InputFocusPolicy.showError(maximum,
+                    getContext().getString(R.string.pact_range_invalid));
             return false;
         }
     }

@@ -85,7 +85,7 @@ public final class AuthenticatorActivity extends PreferencePage {
         LinearLayout labels = new LinearLayout(this); labels.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams copy = new LinearLayout.LayoutParams(0, -2, 1); copy.leftMargin = dp(12); header.addView(labels, copy);
         TextView heading = text(labels, getString(title), 17, false); heading.setTypeface(null, android.graphics.Typeface.BOLD);
-        TextView arrow = new TextView(this); arrow.setTextSize(23); arrow.setTextColor(getColor(R.color.accent_hot)); arrow.setGravity(android.view.Gravity.CENTER);
+        TextView arrow = new TextView(this); com.subhub.app.util.UiIdentity.textSize(arrow, R.dimen.ui_icon_text); arrow.setTextColor(getColor(R.color.accent_hot)); arrow.setGravity(android.view.Gravity.CENTER);
         header.addView(arrow, new LinearLayout.LayoutParams(dp(36), dp(48)));
         arrow.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         header.setFocusable(true); header.setContentDescription(getString(title) + ". " + getString(subtitle));
@@ -120,7 +120,7 @@ public final class AuthenticatorActivity extends PreferencePage {
         page.addView(setup);
         ImageView image = setup.findViewById(R.id.authenticator_pairing_qr);
         try {
-            BitMatrix matrix = new QRCodeWriter().encode("otpauth://totp/SubHub:Controller?secret=" + pendingSecret
+            BitMatrix matrix = new QRCodeWriter().encode("otpauth://totp/SubHub:Dom?secret=" + pendingSecret
                     + "&issuer=SubHub&algorithm=SHA1&digits=6&period=30", BarcodeFormat.QR_CODE, 600, 600);
             int[] pixels = new int[600 * 600];
             for (int y = 0; y < 600; y++) for (int x = 0; x < 600; x++) pixels[y * 600 + x] = matrix.get(x, y) ? Color.BLACK : Color.WHITE;
@@ -162,11 +162,8 @@ public final class AuthenticatorActivity extends PreferencePage {
                 });
             });
         });
-        code.setOnEditorActionListener((view, action, event) -> {
-            if (action == android.view.inputmethod.EditorInfo.IME_ACTION_DONE && confirm.isEnabled()) {
-                confirm.performClick(); return true;
-            }
-            return false;
+        ControllerPinGate.submitOnEnter(code, () -> {
+            if (confirm.isEnabled()) confirm.performClick();
         });
         setup.findViewById(R.id.authenticator_pairing_cancel).setOnClickListener(v -> { clearPending(); render(); });
     }

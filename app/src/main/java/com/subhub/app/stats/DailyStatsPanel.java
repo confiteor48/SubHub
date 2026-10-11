@@ -329,7 +329,7 @@ public final class DailyStatsPanel extends LinearLayout {
                 title.setText(
                         d.getDisplayName(java.time.format.TextStyle.NARROW, Locale.getDefault()));
                 title.setGravity(Gravity.CENTER);
-                title.setTextSize(11);
+                com.subhub.app.util.UiIdentity.textSize(title, R.dimen.ui_text_caption);
                 title.setTextColor(getContext().getColor(R.color.text_secondary));
                 cell(grid, title, i, dp(24));
             }
@@ -349,7 +349,7 @@ public final class DailyStatsPanel extends LinearLayout {
             boolean known = d.toString().compareTo(since) >= 0 && !d.isAfter(LocalDate.now());
             TextView day = new TextView(getContext());
             day.setText(Integer.toString(d.getDayOfMonth()));
-            day.setTextSize(13);
+            com.subhub.app.util.UiIdentity.textSize(day, R.dimen.ui_text_body);
             day.setGravity(Gravity.CENTER);
             day.setTextColor(getContext().getColor(R.color.text_primary));
             android.graphics.drawable.GradientDrawable tile =

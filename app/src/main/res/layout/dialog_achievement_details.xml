@@ -19,18 +19,18 @@
         android:id="@+id/achievement_detail_status"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="13dp"
+        android:layout_marginTop="@dimen/ui_gap_group"
         android:includeFontPadding="false"
-        android:letterSpacing="0.14"
+
         android:textColor="@color/accent_hot"
-        android:textSize="11sp"
+        android:textSize="@dimen/ui_text_caption"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/achievement_detail_name"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="@dimen/ui_gap_control"
         android:gravity="center"
         android:includeFontPadding="false"
         android:textColor="@color/text_primary"
@@ -41,33 +41,33 @@
         android:id="@+id/achievement_detail_description"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="@dimen/ui_gap_control"
         android:gravity="center"
         android:includeFontPadding="false"
         android:lineSpacingExtra="3dp"
         android:textColor="@color/text_secondary"
-        android:textSize="14sp" />
+        android:textSize="@dimen/ui_text_row_title" />
 
     <TextView
         android:id="@+id/achievement_detail_progress"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
+        android:layout_marginTop="@dimen/ui_gap_group"
         android:gravity="center"
         android:includeFontPadding="false"
-        android:textColor="@color/accent_mid"
-        android:textSize="12sp"
+        android:textColor="@color/accent_text"
+        android:textSize="@dimen/ui_text_label"
         android:textStyle="bold" />
 
     <TextView
         android:id="@+id/achievement_detail_date"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="7dp"
+        android:layout_marginTop="@dimen/ui_gap_control"
         android:gravity="center"
         android:includeFontPadding="false"
         android:textColor="@color/text_muted"
-        android:textSize="11sp" />
+        android:textSize="@dimen/ui_text_caption" />
 
     <TextView
         android:id="@+id/achievement_detail_close"

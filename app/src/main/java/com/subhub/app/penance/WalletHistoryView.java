@@ -21,17 +21,22 @@ public final class WalletHistoryView extends LinearLayout {
         setOrientation(VERTICAL);
     }
 
-    public void bind(List<PenanceEvent> events, long now, int limit) {
-        StringBuilder next = new StringBuilder().append(limit);
-        for (int i = 0; i < Math.min(limit, events.size()); i++) {
-            PenanceEvent e = events.get(i);
+    public int bind(List<PenanceEvent> events, long now, int limit) {
+        java.time.ZoneId zone = java.time.ZoneId.systemDefault();
+        List<WalletHistoryGroups.Group> groups = WalletHistoryGroups.group(events, now, zone);
+        int shown = Math.min(Math.max(0, limit), groups.size());
+        StringBuilder next = new StringBuilder().append(limit).append(zone.getId())
+                .append(getResources().getConfiguration().getLocales().get(0).toLanguageTag());
+        for (int i = 0; i < shown; i++) {
+            WalletHistoryGroups.Group group = groups.get(i);
+            PenanceEvent e = group.latest;
             next.append(e.getCreatedAtMillis())
                     .append("|")
                     .append(e.getInfraction())
                     .append("|")
-                    .append(e.getStrikeCount())
+                    .append(group.count)
                     .append("|")
-                    .append(e.getAmountCents())
+                    .append(group.amountCents)
                     .append("|")
                     .append(e.getCurrency())
                     .append("|")
@@ -42,12 +47,13 @@ public final class WalletHistoryView extends LinearLayout {
                     .append(android.text.format.DateUtils.isToday(e.getCreatedAtMillis()))
                     .append(";");
         }
-        if (receipt.contentEquals(next)) return;
+        if (receipt.contentEquals(next)) return groups.size();
         receipt = next.toString();
         removeAllViews();
         DateFormat date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT);
-        for (int i = 0; i < Math.min(limit, events.size()); i++) {
-            PenanceEvent e = events.get(i);
+        for (int i = 0; i < shown; i++) {
+            WalletHistoryGroups.Group group = groups.get(i);
+            PenanceEvent e = group.latest;
             LinearLayout row = new LinearLayout(getContext());
             row.setOrientation(VERTICAL);
             if (i > 0) {
@@ -63,18 +69,18 @@ public final class WalletHistoryView extends LinearLayout {
             row.addView(header, new LayoutParams(-1, -2));
             TextView reason =
                     label(
-                            (e.getStrikeCount() == 1
+                            (group.count == 1
                                     ? labelFor(e.getInfraction())
                                     : getContext()
                                             .getString(
-                                                    R.string.wallet_event_label,
+                                                    R.string.wallet_history_group_label,
                                                     labelFor(e.getInfraction()),
-                                                    e.getStrikeCount())),
+                                                    group.count)),
                             13,
                             false);
             header.addView(reason, new LayoutParams(stack ? -1 : 0, -2, stack ? 0 : 1));
             TextView amount =
-                    label(WalletCurrency.format(e.getCurrency(), e.getAmountCents()), 16, false);
+                    label(WalletCurrency.format(e.getCurrency(), group.amountCents), 16, false);
             amount.setTypeface(null, android.graphics.Typeface.BOLD);
             if (!stack) amount.setGravity(Gravity.END);
             header.addView(amount, new LayoutParams(stack ? -1 : -2, -2));
@@ -109,6 +115,7 @@ public final class WalletHistoryView extends LinearLayout {
             detailParams.topMargin = dp(4);
             row.addView(detail, detailParams);
         }
+        return groups.size();
     }
 
     private String labelFor(PenanceInfraction kind) {
@@ -128,7 +135,8 @@ public final class WalletHistoryView extends LinearLayout {
     private TextView label(String value, int size, boolean muted) {
         TextView text = new TextView(getContext());
         text.setText(value);
-        text.setTextSize(size);
+        com.subhub.app.util.UiIdentity.textSize(text, size == 16 ? R.dimen.ui_text_section
+                : size == 11 ? R.dimen.ui_text_caption : R.dimen.ui_text_body);
         text.setTextColor(
                 getContext().getColor(muted ? R.color.text_secondary : R.color.text_primary));
         return text;

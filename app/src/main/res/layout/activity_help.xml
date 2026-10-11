@@ -6,60 +6,60 @@
         <include layout="@layout/view_secondary_header"
             android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginHorizontal="@dimen/page_margin"
-            android:layout_marginTop="@dimen/primary_header_top" android:layout_marginBottom="14dp" />
+            android:layout_marginTop="@dimen/primary_header_top" android:layout_marginBottom="@dimen/ui_gap_group" />
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginHorizontal="@dimen/page_margin" android:background="@drawable/bg_card"
-            android:orientation="vertical" android:padding="16dp">
+            android:orientation="vertical" android:padding="@dimen/ui_card_padding">
             <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/help_rework_access" />
             <TextView android:id="@+id/permission_status" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="8dp"
-                android:textColor="@color/text_secondary" android:textSize="14sp" />
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control"
+                android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_row_title" />
             <Button android:id="@+id/button_fix_permissions" style="@style/Widget.SubHub.CompactOutlineButton"
-                android:layout_width="match_parent" android:layout_marginTop="12dp"
+                android:layout_width="match_parent" android:layout_marginTop="@dimen/ui_gap_group"
                 android:text="@string/help_rework_grant_access" />
             <Button android:id="@+id/button_accessibility" style="@style/Widget.SubHub.CompactOutlineButton"
-                android:layout_width="match_parent" android:layout_marginTop="6dp"
+                android:layout_width="match_parent" android:layout_marginTop="@dimen/ui_gap_control"
                 android:text="@string/permission_setup_open" />
         </LinearLayout>
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginHorizontal="@dimen/page_margin" android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card" android:orientation="vertical" android:padding="16dp">
+            android:layout_marginHorizontal="@dimen/page_margin" android:layout_marginTop="@dimen/ui_gap_group"
+            android:background="@drawable/bg_card" android:orientation="vertical" android:padding="@dimen/ui_card_padding">
             <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/help_rework_tools" />
             <Button android:id="@+id/help_diagnostics" style="@style/Widget.SubHub.CompactOutlineButton"
-                android:layout_width="match_parent" android:layout_marginTop="10dp" android:text="@string/diagnostics_title" />
+                android:layout_width="match_parent" android:layout_marginTop="@dimen/ui_gap_group" android:text="@string/diagnostics_title" />
         </LinearLayout>
         <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/help_rework_questions"
             android:layout_marginHorizontal="@dimen/page_margin" android:layout_marginTop="22dp" />
         <EditText android:id="@+id/help_search" style="@style/Widget.SubHub.Input"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginHorizontal="@dimen/page_margin" android:layout_marginTop="10dp"
+            android:layout_marginHorizontal="@dimen/page_margin" android:layout_marginTop="@dimen/ui_gap_group"
             android:minHeight="48dp" android:hint="@string/help_rework_search"
             android:contentDescription="@string/help_rework_search" android:inputType="text"
             android:imeOptions="actionDone" android:maxLines="1" android:singleLine="true" />
         <TextView android:id="@+id/help_no_results" android:layout_width="match_parent"
             android:layout_height="wrap_content" android:layout_marginHorizontal="@dimen/page_margin"
-            android:layout_marginTop="12dp" android:text="@string/help_rework_no_results"
-            android:textColor="@color/text_secondary" android:textSize="14sp" android:visibility="gone" />
+            android:layout_marginTop="@dimen/ui_gap_group" android:text="@string/help_rework_no_results"
+            android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_row_title" android:visibility="gone" />
         <LinearLayout android:id="@+id/help_sections" android:layout_width="match_parent"
             android:layout_height="wrap_content" android:layout_marginHorizontal="@dimen/page_margin"
-            android:layout_marginTop="10dp" android:orientation="vertical" />
+            android:layout_marginTop="@dimen/ui_gap_group" android:orientation="vertical" />
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginHorizontal="@dimen/page_margin" android:layout_marginTop="18dp"
-            android:background="@drawable/bg_card" android:orientation="vertical" android:padding="16dp">
+            android:layout_marginHorizontal="@dimen/page_margin" android:layout_marginTop="@dimen/ui_gap_section"
+            android:background="@drawable/bg_card" android:orientation="vertical" android:padding="@dimen/ui_card_padding">
             <TextView style="@style/Widget.SubHub.SectionHeader" android:text="@string/help_rework_app" />
             <TextView android:id="@+id/help_build" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="8dp"
-                android:textColor="@color/text_secondary" android:textSize="14sp" />
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control"
+                android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_row_title" />
             <TextView android:id="@+id/update_summary" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="8dp"
-                android:textColor="@color/accent" android:textSize="14sp" />
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control"
+                android:textColor="@color/accent_text" android:textSize="@dimen/ui_text_row_title" />
             <Button android:id="@+id/button_updates" style="@style/Widget.SubHub.CompactOutlineButton"
-                android:layout_width="match_parent" android:layout_marginTop="10dp" android:text="@string/update_manage" />
+                android:layout_width="match_parent" android:layout_marginTop="@dimen/ui_gap_group" android:text="@string/update_manage" />
             <TextView android:id="@+id/language_status" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="14dp"
-                android:textColor="@color/text_secondary" android:textSize="14sp" />
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group"
+                android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_row_title" />
             <Button android:id="@+id/button_language" style="@style/Widget.SubHub.CompactOutlineButton"
-                android:layout_width="match_parent" android:layout_marginTop="6dp" android:text="@string/help_choose_language" />
+                android:layout_width="match_parent" android:layout_marginTop="@dimen/ui_gap_control" android:text="@string/help_choose_language" />
         </LinearLayout>
     </LinearLayout>
 </ScrollView>

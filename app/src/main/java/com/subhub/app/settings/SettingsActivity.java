@@ -136,10 +136,10 @@ public final class SettingsActivity extends AppCompatActivity {
             text.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.ITALIC), label.length() + 1, text.length(), flags);
             text.setSpan(new android.text.style.RelativeSizeSpan(.8f), label.length() + 1, text.length(), flags);
             text.setSpan(new android.text.style.ForegroundColorSpan(getColor(R.color.text_secondary)), label.length() + 1, text.length(), flags);
-            choices[index].setTextSize(14f);
+            com.subhub.app.util.UiIdentity.textSize(choices[index], R.dimen.ui_text_row_title);
             choices[index].setText(text);
         }
-        binding.radioPresetOff.setTextSize(14f);
+        com.subhub.app.util.UiIdentity.textSize(binding.radioPresetOff, R.dimen.ui_text_row_title);
         binding.radioPresetOff.setTypeface(null, android.graphics.Typeface.BOLD);
     }
 
@@ -153,7 +153,7 @@ public final class SettingsActivity extends AppCompatActivity {
             params.width = stack ? ViewGroup.LayoutParams.MATCH_PARENT : 0;
             params.weight = stack ? 0f : 1f;
             choice.setLayoutParams(params);
-            choice.setTextSize(14f);
+            com.subhub.app.util.UiIdentity.textSize(choice, R.dimen.ui_text_row_title);
             if (stack) {
                 android.graphics.drawable.Drawable icon = choice.getCompoundDrawables()[1];
                 choice.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null);
@@ -435,7 +435,6 @@ public final class SettingsActivity extends AppCompatActivity {
         binding.gradientEnd.setEnabled(active && editing);
         binding.gradientColors.setAlpha(active ? 1f : .5f);
         binding.switchAnimateBorder.setEnabled(active && editing);
-        binding.switchAnimateBorder.setAlpha(active ? 1f : .5f);
         setEnabledRecursive(binding.borderEffectGroup, active && editing);
         binding.borderEffectGroup.setAlpha(active ? 1f : .5f);
     }

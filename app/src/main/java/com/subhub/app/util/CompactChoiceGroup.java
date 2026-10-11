@@ -34,6 +34,17 @@ public final class CompactChoiceGroup extends RadioGroup {
         float density = getResources().getDisplayMetrics().density;
         float fontScale = getResources().getConfiguration().fontScale;
         int minimum = Math.round(minimumCellWidthDp * density * Math.max(1f, fontScale));
+        // Preserve whole words when labels need more width than the base cell size.
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            if (!(child instanceof android.widget.TextView) || child.getVisibility() == GONE) continue;
+            android.widget.TextView label = (android.widget.TextView) child;
+            LayoutParams params = (LayoutParams) child.getLayoutParams();
+            int insets = label.getCompoundPaddingLeft() + label.getCompoundPaddingRight()
+                    + params.leftMargin + params.rightMargin;
+            for (String word : label.getText().toString().split("\\s+"))
+                minimum = Math.max(minimum, (int) Math.ceil(label.getPaint().measureText(word)) + insets);
+        }
         int desired =
                 preferredColumns > 0
                         ? Math.min(preferredColumns, count)

@@ -28,6 +28,26 @@ public final class CensorPreviewView extends View {
     private android.graphics.Bitmap phoneBitmap;
     private String phoneStyle;
     private boolean phonePreview;
+    private CensorAppearance appearance;
+    private boolean squarePreview;
+    private android.graphics.Bitmap squareBitmap;
+
+    public void setSquarePreview(boolean enabled) {
+        squarePreview = enabled;
+        invalidate();
+    }
+
+    /** Render the saved style on the same synthetic sample used by style selection. */
+    public void setAppearance(CensorAppearance value) {
+        appearance = value;
+        setTag(value.getType().getPreferenceValue());
+        phonePreview = true;
+        if (phoneBitmap != null) phoneBitmap.recycle();
+        phoneBitmap = null;
+        if (squareBitmap != null) squareBitmap.recycle();
+        squareBitmap = null;
+        invalidate();
+    }
 
     public void setPhonePreview(boolean enabled) {
         phonePreview = enabled;
@@ -51,6 +71,30 @@ public final class CensorPreviewView extends View {
         float width = getWidth();
         float height = getHeight();
         if (width <= 0f || height <= 0f) return;
+
+        if (squarePreview && appearance != null) {
+            if (squareBitmap == null) {
+                android.graphics.Bitmap source = android.graphics.Bitmap.createBitmap(
+                        128, 128, android.graphics.Bitmap.Config.ARGB_8888);
+                Canvas sample = new Canvas(source);
+                paint.setShader(null);
+                paint.setColor(PLUM_LIGHT);
+                sample.drawRect(32, 32, 96, 96, paint);
+                squareBitmap = source.copy(android.graphics.Bitmap.Config.ARGB_8888, true);
+                try (com.subhub.app.capture.CensorRenderer renderer =
+                        new com.subhub.app.capture.CensorRenderer(getContext(), null)) {
+                    renderer.draw(squareBitmap, source, java.util.Collections.singletonList(
+                            new com.subhub.app.detection.Detection("preview", "preview", 1f,
+                                    new com.subhub.app.detection.BBox(32, 32, 64, 64), false, false)), appearance);
+                } finally { source.recycle(); }
+            }
+            paint.setShader(null);
+            float edge = Math.min(width, height);
+            canvas.drawBitmap(squareBitmap, null,
+                    new RectF((width - edge) / 2, (height - edge) / 2,
+                            (width + edge) / 2, (height + edge) / 2), paint);
+            return;
+        }
 
         String style = String.valueOf(getTag());
         if (phonePreview) {
@@ -151,10 +195,10 @@ public final class CensorPreviewView extends View {
             sample.drawRoundRect(86, 459, 154, 465, 3, 3, brush);
             phoneBitmap = source.copy(android.graphics.Bitmap.Config.ARGB_8888, true);
             CensorAppearance.Type type = CensorAppearance.Type.fromPreference(style);
-            if (type == CensorAppearance.Type.CUSTOM) type = CensorAppearance.Type.BOX;
+            if (appearance == null && type == CensorAppearance.Type.CUSTOM) type = CensorAppearance.Type.BOX;
             try (com.subhub.app.capture.CensorRenderer renderer =
                     new com.subhub.app.capture.CensorRenderer(
-                            getContext(), java.util.Collections.emptyList())) {
+                            getContext(), appearance == null ? java.util.Collections.emptyList() : null)) {
                 renderer.draw(
                         phoneBitmap,
                         source,
@@ -173,7 +217,7 @@ public final class CensorPreviewView extends View {
                                         new com.subhub.app.detection.BBox(102, 227, 42, 24),
                                         false,
                                         false)),
-                        new CensorAppearance(
+                        appearance != null ? appearance : new CensorAppearance(
                                 type,
                                 65,
                                 0f,
@@ -188,6 +232,17 @@ public final class CensorPreviewView extends View {
                                 "rectangle",
                                 "SubHub",
                                 "Access blocked."));
+                if (appearance == null && type == CensorAppearance.Type.PIXELATE) {
+                    // At phone-preview scale, the ordinary thin border can disappear.
+                    // This demonstration outline never changes saved censor settings.
+                    Canvas outlined = new Canvas(phoneBitmap);
+                    brush.setStyle(Paint.Style.STROKE);
+                    brush.setStrokeWidth(3);
+                    brush.setColor(getContext().getColor(com.subhub.app.R.color.accent_text));
+                    outlined.drawRect(94, 166, 146, 191, brush);
+                    outlined.drawRect(102, 227, 144, 251, brush);
+                    brush.setStyle(Paint.Style.FILL);
+                }
             } finally {
                 source.recycle();
             }
@@ -272,6 +327,15 @@ public final class CensorPreviewView extends View {
         torso.close();
         brush.setColor(Color.rgb(191, 116, 184));
         canvas.drawPath(torso, brush);
+        // Fine, contrasting fabric stripes give blur and pixelation source detail
+        // to obscure. A flat-color outfit otherwise looks unchanged when censored.
+        int fabric = canvas.save();
+        canvas.clipPath(torso);
+        brush.setColor(Color.rgb(78, 43, 100));
+        for (int y = 154; y < 255; y += 8) canvas.drawRect(90, y, 150, y + 4, brush);
+        brush.setColor(Color.rgb(225, 191, 238));
+        for (int x = 101; x < 145; x += 14) canvas.drawRect(x, 154, x + 3, 255, brush);
+        canvas.restoreToCount(fabric);
         // A simple fitted outfit and facial detail keep the demo non-explicit.
         brush.setStyle(Paint.Style.STROKE);
         brush.setStrokeWidth(2);

@@ -109,7 +109,7 @@ public class ServiceDurationUiAndroidTest {
                                 activity.findViewById(R.id.commitment_timer_permanent)
                                         .isSelected());
                         assertFalse(activity.findViewById(R.id.service_duration_range).isShown());
-                        assertFalse(activity.findViewById(R.id.service_duration_hide).isShown());
+                        assertTrue(activity.findViewById(R.id.service_duration_hide).isShown());
                         capture(activity, "duration-home-fixed.png");
                     });
         }

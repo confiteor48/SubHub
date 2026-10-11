@@ -10,7 +10,17 @@ public final class ThemedDialogs {
     private ThemedDialogs() { }
 
     public static MaterialAlertDialogBuilder builder(Context context) {
-        return new MaterialAlertDialogBuilder(context, R.style.ThemeOverlay_SubHub_AlertDialog)
+        return new MaterialAlertDialogBuilder(context, R.style.ThemeOverlay_SubHub_AlertDialog) {
+            @Override public MaterialAlertDialogBuilder setView(android.view.View view) {
+                if (view instanceof android.widget.EditText) {
+                    android.widget.FrameLayout wrapper = new android.widget.FrameLayout(context);
+                    wrapper.addView(view, new android.widget.FrameLayout.LayoutParams(-1, -2));
+                    view = wrapper;
+                }
+                InputFocusPolicy.openForReading(view);
+                return super.setView(view);
+            }
+        }
                 .setBackground(ContextCompat.getDrawable(context, R.drawable.bg_native_dialog));
     }
 }

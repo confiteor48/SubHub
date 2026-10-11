@@ -15,25 +15,25 @@
 
             <TextView android:id="@+id/achievement_progress"
                         android:layout_width="wrap_content" android:layout_height="wrap_content"
-                        android:textColor="@color/accent_hot" android:textSize="11sp"
+                        android:textColor="@color/accent_hot" android:textSize="@dimen/ui_text_caption"
                         android:textStyle="bold" />
 
             <ProgressBar android:id="@+id/achievement_overall_progress"
                     style="?android:attr/progressBarStyleHorizontal"
                     android:layout_width="match_parent" android:layout_height="7dp"
-                    android:layout_marginTop="14dp" android:max="100"
+                    android:layout_marginTop="@dimen/ui_gap_group" android:max="100"
                     android:progressBackgroundTint="@color/outline_subtle"
                     android:progressTint="@color/accent_hot" />
 
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="16dp" android:background="@drawable/bg_achievement_home"
+                android:layout_marginTop="@dimen/ui_gap_section" android:background="@drawable/bg_achievement_home"
                 android:orientation="vertical">
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:letterSpacing="0.14" android:text="@string/achievements_showcase_title"
-                    android:textColor="@color/accent_mid" android:textSize="12sp"
+                    android:text="@string/achievements_showcase_title"
+                    android:textColor="@color/accent_text" android:textSize="@dimen/ui_text_label"
                     android:textStyle="bold" />
                 <HorizontalScrollView android:layout_width="match_parent"
-                    android:layout_height="112dp" android:layout_marginTop="11dp"
+                    android:layout_height="112dp" android:layout_marginTop="@dimen/ui_gap_group"
                     android:clipToPadding="false" android:fillViewport="false"
                     android:scrollbars="none">
                     <LinearLayout android:id="@+id/achievement_badge_strip"
@@ -42,19 +42,19 @@
                 </HorizontalScrollView>
                 <TextView android:id="@+id/achievement_next_name"
                     android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp" android:textColor="@color/text_primary"
-                    android:textSize="12sp" android:textStyle="bold" />
+                    android:layout_marginTop="@dimen/ui_gap_group" android:textColor="@color/text_primary"
+                    android:textSize="@dimen/ui_text_label" android:textStyle="bold" />
                 <ProgressBar android:id="@+id/achievement_next_progress"
                     style="?android:attr/progressBarStyleHorizontal"
                     android:layout_width="match_parent" android:layout_height="7dp"
-                    android:layout_marginTop="9dp" android:max="100"
+                    android:layout_marginTop="@dimen/ui_gap_control" android:max="100"
                     android:progressBackgroundTint="@color/outline_subtle"
                     android:progressTint="@color/accent_hot" />
             </LinearLayout>
 
             <LinearLayout android:id="@+id/achievement_list"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:layout_marginTop="18dp" android:orientation="vertical" />
+                android:layout_marginTop="@dimen/ui_gap_section" android:orientation="vertical" />
         </LinearLayout>
     </ScrollView>
 </FrameLayout>

@@ -42,30 +42,107 @@ public final class CensorPhrases {
 
     private static Map<String, List<String>> categories() {
         Map<String, List<String>> value = new LinkedHashMap<>();
-        value.put("short", Arrays.asList("BLOCKED", "CENSORED", "DENIED", "LOCKED"));
+        value.put("short", Arrays.asList(
+                "BLOCKED",
+                "CENSORED",
+                "DENIED",
+                "LOCKED",
+                "NO",
+                "NOT A CHANCE",
+                "NEVER"));
         value.put("denial", Arrays.asList(
-                "NICE TRY", "STILL NO", "NO PEEKING", "DENIED, DARLING", "NOT TODAY",
-                "DREAM ON", "EYES OFF", "LOOK ELSEWHERE", "WISHFUL THINKING", "RULES ARE RULES"));
+                "DENIED, DARLING",
+                "DREAM ON",
+                "EYES OFF",
+                "LOOK ELSEWHERE",
+                "NICE TRY",
+                "NO PEEKING",
+                "NOT TODAY",
+                "RULES ARE RULES",
+                "STILL NO",
+                "WISHFUL THINKING",
+                "STOP TRYING",
+                "ALL YOU GET IS CENSORED",
+                "NOT FOR YOU",
+                "NEVER FOR YOU"));
         value.put("humiliation", Arrays.asList(
-                "CUTE TRY, BETA", "BEHAVE, CUCK", "KNOW YOUR ROLE", "ASK NICELY",
-                "EYES DOWN, BETA", "LESS BRAVADO", "GOOD LITTLE BETA", "STILL WAITING?",
-                "BACK IN LINE", "KEEP DREAMING, CUCK"));
+                "ASK NICELY",
+                "BACK IN LINE",
+                "BEHAVE, CUCK",
+                "CUTE TRY, BETA",
+                "EYES DOWN, BETA",
+                "GOOD LITTLE BETA",
+                "KEEP DREAMING, CUCK",
+                "KNOW YOUR ROLE",
+                "LESS BRAVADO",
+                "STILL WAITING?",
+                "BETACHIP ACTIVATED",
+                "BETAS DON'T GET TO SEE",
+                "YOU LIKE THIS DON'T YOU?",
+                "HURT YOURSELF FOR ME"));
         value.put("edge", Arrays.asList(
-                "NOT YET", "PATIENCE, TROUBLE", "WAIT FOR IT", "ENJOY THE WAIT",
-                "SO CLOSE", "SLOW DOWN", "ANTICIPATION", "STILL WAITING",
-                "HOLD THAT THOUGHT", "THE WAIT CONTINUES"));
+                "ANTICIPATION",
+                "ENJOY THE WAIT",
+                "HOLD THAT THOUGHT",
+                "NOT YET",
+                "PATIENCE, TROUBLE",
+                "SLOW DOWN",
+                "SO CLOSE",
+                "STILL WAITING",
+                "THE WAIT CONTINUES",
+                "WAIT FOR IT",
+                "NEVER FINISH",
+                "IT FEELS BETTER THIS WAY"));
         value.put("findom", Arrays.asList(
-                "VIP VIEW", "LUXURY DENIED", "TRIBUTE THEATRE", "PREMIUM TEMPTATION",
-                "EXCLUSIVE ACCESS", "VELVET ROPE", "NOT ON THE LIST", "PRIVATE COLLECTION",
-                "LOOKS EXPENSIVE", "PRICELESS PATIENCE"));
+                "EXCLUSIVE ACCESS",
+                "LOOKS EXPENSIVE",
+                "LUXURY DENIED",
+                "NOT ON THE LIST",
+                "PREMIUM TEMPTATION",
+                "PRICELESS PATIENCE",
+                "PRIVATE COLLECTION",
+                "TRIBUTE THEATRE",
+                "VELVET ROPE",
+                "VIP VIEW",
+                "YOU CAN'T AFFORD IT",
+                "$END MORE",
+                "PATHETIC PAYPIG",
+                "RUIN YOUR LIFE FOR ME",
+                "NEVER STOP $ENDING"));
         value.put("ntr", Arrays.asList(
-                "NOT YOUR VIEW", "SIDE SEAT", "SPECTATOR ONLY", "WATCH THE RULES",
-                "PRIVATE SHOW", "WRONG INVITATION", "OUTSIDE LOOKING IN", "JUST A SPECTATOR",
-                "RESERVED ELSEWHERE", "GUEST LIST CLOSED"));
+                "GUEST LIST CLOSED",
+                "JUST A SPECTATOR",
+                "NOT YOUR VIEW",
+                "OUTSIDE LOOKING IN",
+                "PRIVATE SHOW",
+                "RESERVED ELSEWHERE",
+                "SIDE SEAT",
+                "SPECTATOR ONLY",
+                "WATCH THE RULES",
+                "WRONG INVITATION",
+                "YOU AREN'T NEEDED",
+                "HAPPIER WITHOUT YOU",
+                "STOP BREATHING",
+                "LOOK AWAY",
+                "YOU LOST",
+                "THEY ARE BETTER"));
         value.put("gooner", Arrays.asList(
-                "CAUGHT LOOKING", "THERE YOU GO AGAIN", "ONE MORE PEEK?", "EYES UP, TROUBLE",
-                "NICE EXCUSE", "SCROLLING, HUH?", "THAT LOOK AGAIN", "OH, REALLY?",
-                "CURIOUS LITTLE THING", "YOU KNOW THE RULE"));
+                "CAUGHT LOOKING",
+                "CURIOUS LITTLE THING",
+                "EYES UP, TROUBLE",
+                "NICE EXCUSE",
+                "OH, REALLY?",
+                "ONE MORE PEEK?",
+                "SCROLLING, HUH?",
+                "THAT LOOK AGAIN",
+                "THERE YOU GO AGAIN",
+                "YOU KNOW THE RULE",
+                "KEEP GOING",
+                "NEVER STOP",
+                "WORK IS OVERRATED",
+                "YOU DON'T NEED SLEEP",
+                "CENSORS ARE YOUR ONLY FRIENDS",
+                "NEVER CUM"));
         return value;
     }
 

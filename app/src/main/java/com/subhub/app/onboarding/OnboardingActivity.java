@@ -30,6 +30,8 @@ public final class OnboardingActivity extends PreferencePage {
     private CensorAppearance.Type style;
     private LinearLayout body;
     private boolean resumeRefresh;
+    private SetupWalletRulesView walletRules;
+    private Bundle walletDraft;
     private final ActivityResultLauncher<String> notifications =
             registerForActivityResult(
                     new ActivityResultContracts.RequestPermission(), ignored -> render());
@@ -46,6 +48,13 @@ public final class OnboardingActivity extends PreferencePage {
         if (!replay && state == null && OnboardingState.inProgress(this)) {
             android.content.SharedPreferences draft = getSharedPreferences("subhub_onboarding", 0);
             step = draft.getInt("draft_step", 0);
+            if (draft.getInt("draft_flow_version", 1) < 2) {
+                // Resume an older wizard on the equivalent page in the new six-step flow.
+                int[] migratedSteps = {0, 3, 1, 4, 5, 5};
+                step = migratedSteps[Math.max(0, Math.min(5, step))];
+            }
+            step = Math.max(0, Math.min(STEPS - 1, step));
+            walletDraft = SetupWalletRulesView.readDraft(draft);
             censor = draft.getBoolean("draft_censor", censor);
 
 
@@ -62,6 +71,7 @@ public final class OnboardingActivity extends PreferencePage {
 
             style = CensorAppearance.Type.fromPreference(state.getString("style"));
             appearanceChanged = state.getBoolean("appearance_changed");
+            walletDraft = state.getBundle("wallet_rules");
         }
         getOnBackPressedDispatcher()
                 .addCallback(
@@ -78,25 +88,28 @@ public final class OnboardingActivity extends PreferencePage {
     @Override
     protected void onResume() {
         super.onResume();
-        if (resumeRefresh && body != null && step >= 3) render();
+        if (resumeRefresh && body != null && step >= 4) render();
         if (appSelection != null) appSelection.reload();
         resumeRefresh = false;
     }
 
     @Override
     protected void onPause() {
+        saveDraft();
         resumeRefresh = true;
         super.onPause();
     }
 
     @Override
     protected void onSaveInstanceState(Bundle state) {
+        captureWalletDraft();
         state.putInt("step", step);
         state.putBoolean("censor", censor);
         state.putBoolean("limits", limits);
         state.putBoolean("wallet", wallet);
         state.putString("style", style.getPreferenceValue());
         state.putBoolean("appearance_changed", appearanceChanged);
+        state.putBundle("wallet_rules", walletDraft);
         super.onSaveInstanceState(state);
     }
 
@@ -110,6 +123,7 @@ public final class OnboardingActivity extends PreferencePage {
     private void render() {
         if (isFinishing() || isDestroyed()) return;
         saveDraft();
+        walletRules = null;
         appSelection = null;
         setContentView(R.layout.activity_onboarding);
         page = findViewById(R.id.tour_content);
@@ -130,30 +144,32 @@ public final class OnboardingActivity extends PreferencePage {
         }
         int[] titles = {
             R.string.tour_welcome,
-            R.string.tour_select_apps,
             R.string.tour_choose_style,
+            R.string.tour_wallet_rules,
+            R.string.tour_select_apps,
             R.string.keyholder_home_title,
-            R.string.tour_permissions,
-            R.string.tour_review
+            R.string.tour_permissions
         };
         TextView title = text(body, getString(titles[step]), 26, false);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         title.setId(R.id.tour_step_title);
         if (step == 0) welcome();
-        else if (step == 1) features();
-        else if (step == 2) appearance();
-        else if (step == 3) keyholder();
-        else if (step == 4) permissions();
-        else review();
+        else if (step == 1) appearance();
+        else if (step == 2) walletRules();
+        else if (step == 3) features();
+        else if (step == 4) keyholder();
+        else permissions();
         Button next = findViewById(R.id.tour_next);
         next.setBackgroundResource(R.drawable.bg_primary_button);
         next.setTextColor(getColor(R.color.text_primary));
         next.setText(
                 step == 0
                         ? R.string.tour_get_started
-                        : step == STEPS - 1 ? R.string.tour_open_home : R.string.tour_next);
+                        : step == STEPS - 1 ? R.string.tour_finish : R.string.tour_next);
         next.setOnClickListener(
                 v -> {
+                    if (walletRules != null && !walletRules.applyRules()) return;
+                    captureWalletDraft();
                     if (step == STEPS - 1) finishSetup();
                     else {
                         step++;
@@ -165,7 +181,11 @@ public final class OnboardingActivity extends PreferencePage {
 
     private void welcome() {
         text(body, getString(R.string.tour_intro), 16, true);
-        preview(body, style, dp(175));
+        SetupFeaturePreviewView features = new SetupFeaturePreviewView(this);
+        features.setTag("setup-feature-overview");
+        LinearLayout.LayoutParams featureParams = new LinearLayout.LayoutParams(-1, -2);
+        featureParams.bottomMargin = getResources().getDimensionPixelSize(R.dimen.ui_gap_group);
+        body.addView(features, featureParams);
         explain(body, R.drawable.ic_tab_settings, R.string.tour_dom_title, R.string.tour_dom_help);
         explain(body, R.drawable.ic_tab_home, R.string.tour_sub_title, R.string.tour_sub_help);
     }
@@ -174,13 +194,29 @@ public final class OnboardingActivity extends PreferencePage {
 
     private void features() {
         LinearLayout apps = card(body);
+        apps.setTag("setup-app-card");
+        apps.setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1));
         appSelection = new com.subhub.app.settings.AppSelectionPanel(this);
-        apps.addView(appSelection, new LinearLayout.LayoutParams(-1, -2));
+        apps.addView(appSelection, new LinearLayout.LayoutParams(-1, -1));
+        appSelection.fillAvailableHeight();
         appSelection.bind(this,
                 () -> ControllerPinManager.isDomModeActive()
                         || !replay && !ControllerPinManager.hasCredentials(this),
                 this::saveDraft);
         appSelection.load();
+    }
+
+    private void walletRules() {
+        walletRules = new SetupWalletRulesView(this, walletDraft,
+                () -> ControllerPinManager.isDomModeActive()
+                        || !replay && !ControllerPinManager.hasCredentials(this));
+        body.addView(walletRules, new LinearLayout.LayoutParams(-1, -2));
+        ScrollView scroll = findViewById(R.id.tour_scroll);
+        scroll.post(() -> {
+            if (walletRules != null && walletRules.getParent() == body) {
+                walletRules.fitGraphic(scroll.getHeight() - body.getHeight());
+            }
+        });
     }
 
     private void appearance() {
@@ -204,8 +240,8 @@ public final class OnboardingActivity extends PreferencePage {
                     (LinearLayout.LayoutParams) item.getLayoutParams();
             itemParams.setMargins(dp(4), dp(4), dp(4), dp(8));
             item.setLayoutParams(itemParams);
-            item.setBackgroundResource(
-                    style == chosen ? R.drawable.bg_sub_hero : R.drawable.bg_card);
+            item.setBackgroundResource(R.drawable.bg_choice_card);
+            item.setSelected(style == chosen);
             preview(item, chosen, dp(86));
             Button pick =
                     button(
@@ -217,6 +253,7 @@ public final class OnboardingActivity extends PreferencePage {
                                 render();
                             });
             pick.setSelected(style == chosen);
+            pick.setTag("setup-style:" + chosen.getPreferenceValue());
             pick.setTextColor(
                     getColor(style == chosen ? R.color.text_primary : R.color.accent_hot));
             pick.setBackgroundResource(
@@ -314,37 +351,6 @@ public final class OnboardingActivity extends PreferencePage {
                 .setEnabled(!ready);
     }
 
-    private void review() {
-        if (replay) {
-            FeatureModuleManager saved = new FeatureModuleManager(this);
-            censor = saved.isCensorEnabled();
-            limits = saved.isLimitsEnabled();
-            wallet = saved.isWalletEnabled();
-        }
-        LinearLayout choices = card(body);
-        text(choices, getString(R.string.settings_apps), 17, false)
-                .setTypeface(null, android.graphics.Typeface.BOLD);
-        AppModeManager apps = new AppModeManager(this);
-        if (apps.isAllApps()) text(choices, getString(R.string.app_selection_all), 15, false);
-        text(
-                choices,
-                getResources()
-                        .getQuantityString(
-                                R.plurals.apps_included_count,
-                                apps.getIncludedPackages().size(),
-                        apps.getIncludedPackages().size()),
-                13,
-                true);
-        text(
-                choices,
-                getString(
-                        ControllerPinManager.hasCredentials(this)
-                                ? R.string.tour_keyholder_ready
-                                : R.string.tour_keyholder_optional),
-                13,
-                true);
-    }
-
     private LinearLayout explain(LinearLayout parent, int resource, int title, int explanation) {
         LinearLayout c = card(parent);
         LinearLayout header = new LinearLayout(this);
@@ -371,7 +377,9 @@ public final class OnboardingActivity extends PreferencePage {
 
     private void preview(LinearLayout parent, CensorAppearance.Type type, int height) {
         CensorPreviewView preview = new CensorPreviewView(this, null);
-        preview.setPhonePreview(true);
+        // Keep the woman in the main preview, and use close-up effects in the
+        // small choices so blur/pixelation remain legible at thumbnail size.
+        preview.setPhonePreview(parent == body);
         preview.setTag(type.getPreferenceValue());
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, height);
         p.bottomMargin = dp(14);
@@ -379,16 +387,23 @@ public final class OnboardingActivity extends PreferencePage {
     }
 
     private void saveDraft() {
-        if (!replay)
+        captureWalletDraft();
+        if (!replay && OnboardingState.inProgress(this))
             getSharedPreferences("subhub_onboarding", 0)
                     .edit()
                     .putInt("draft_step", step)
+                    .putInt("draft_flow_version", 2)
+                    .putString("draft_wallet_rules", SetupWalletRulesView.encodeDraft(walletDraft))
                     .putBoolean("draft_censor", censor)
                     .putBoolean("draft_limits", limits)
                     .putBoolean("draft_wallet", wallet)
                     .putString("draft_style", style.getPreferenceValue())
                     .putBoolean("draft_appearance_changed", appearanceChanged)
                     .apply();
+    }
+
+    private void captureWalletDraft() {
+        if (walletRules != null) walletDraft = walletRules.snapshot();
     }
 
     private void finishSetup() {

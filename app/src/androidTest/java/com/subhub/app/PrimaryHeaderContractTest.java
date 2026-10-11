@@ -92,7 +92,7 @@ public final class PrimaryHeaderContractTest {
         }
     }
 
-    @Test public void subModeKeepsCompactHeadersAndWalletCurrency() {
+    @Test public void subModeKeepsCompactHeadersWithoutRedundantSubtitles() {
         ControllerPinManager.enterSubMode();
         try {
             assertHeader(MainActivity.class, R.string.app_name);
@@ -207,8 +207,7 @@ public final class PrimaryHeaderContractTest {
                         activity.getResources().getDisplayMetrics())), title.getTextSize(), 0.01f);
                 assertEquals(Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 12,
                         activity.getResources().getDisplayMetrics())), subtitle.getTextSize(), 0.01f);
-                assertEquals(activityClass == PenanceActivity.class ? View.VISIBLE : View.GONE,
-                        subtitle.getVisibility());
+                assertEquals(View.GONE, subtitle.getVisibility());
                 assertTrue(ViewCompat.isAccessibilityHeading(title));
                 assertEquals(View.IMPORTANT_FOR_ACCESSIBILITY_NO,
                         icon.getImportantForAccessibility());

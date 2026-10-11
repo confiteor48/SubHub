@@ -1,17 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:top="3dp">
-        <shape android:shape="rectangle">
-            <solid android:color="#78000000" />
-            <corners android:radius="22dp" />
-        </shape>
-    </item>
-    <item android:bottom="3dp">
-        <shape android:shape="rectangle">
-            <gradient android:angle="270" android:startColor="#F90E0C12"
-                android:centerColor="#FA131019" android:endColor="#FA18121E" />
-            <stroke android:width="1dp" android:color="#5944394E" />
-            <corners android:radius="22dp" />
-        </shape>
-    </item>
+    <item android:drawable="@drawable/bg_home_flat_bubble" />
 </layer-list>

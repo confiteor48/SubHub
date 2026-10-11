@@ -331,17 +331,22 @@ public final class PopupStormActivity extends AppCompatActivity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         params.topMargin = binding.dynamicSettings.getChildCount() == 0 ? dp(8) : dp(14);
         card.setLayoutParams(params);
-        TextView header = label(getString(title), 12, true, R.color.text_primary);
+        TextView header = (TextView) getLayoutInflater().inflate(R.layout.view_form_label, card, false);
+        header.setText(title);
         card.addView(header);
         binding.dynamicSettings.addView(card);
         return card;
     }
 
+    private TextView formLabel(String text, LinearLayout parent) {
+        TextView label = (TextView) getLayoutInflater().inflate(R.layout.view_form_label, parent, false);
+        label.setText(text);
+        return label;
+    }
+
     private void addToggle(LinearLayout parent, int title, String key, boolean defaultValue) {
         SwitchMaterial toggle = new com.subhub.app.util.StateToggle(this);
         toggle.setText(title);
-        toggle.setTextColor(getColor(R.color.text_primary));
-        toggle.setMinHeight(dp(50));
         toggle.setEnabled(ControllerPinManager.isSessionUnlocked());
         toggle.setChecked(preferences.getBoolean(key, defaultValue));
         toggle.setOnCheckedChangeListener((button, checked) -> {
@@ -354,8 +359,7 @@ public final class PopupStormActivity extends AppCompatActivity {
     private void addIntSlider(LinearLayout parent, int title, String key,
             int minimum, int maximum, int defaultValue) {
         int stored = Math.max(minimum, Math.min(maximum, preferences.getInt(key, defaultValue)));
-        TextView value = label(getString(title) + ": " + stored, 11, false, R.color.text_secondary);
-        value.setPadding(0, dp(10), 0, 0);
+        TextView value = formLabel(getString(title) + ": " + stored, parent);
         parent.addView(value);
         SeekBar slider = new SeekBar(this);
         slider.setMinimumHeight(dp(48));
@@ -377,9 +381,7 @@ public final class PopupStormActivity extends AppCompatActivity {
             float maximum, float defaultValue, float step, String format) {
         float stored = Math.max(minimum, Math.min(maximum, preferences.getFloat(key, defaultValue)));
         int steps = Math.round((maximum - minimum) / step);
-        TextView value = label(getString(title) + ": " + String.format(Locale.ROOT, format, stored),
-                11, false, R.color.text_secondary);
-        value.setPadding(0, dp(10), 0, 0);
+        TextView value = formLabel(getString(title) + ": " + String.format(Locale.ROOT, format, stored), parent);
         parent.addView(value);
         SeekBar slider = new SeekBar(this);
         slider.setMinimumHeight(dp(48));
@@ -399,13 +401,10 @@ public final class PopupStormActivity extends AppCompatActivity {
 
     private void addChoice(LinearLayout parent, int title, String key, String[] values,
             int[] labels, String defaultValue) {
-        TextView heading = label(getString(title), 11, false, R.color.text_secondary);
-        heading.setPadding(0, dp(10), 0, 0);
+        TextView heading = formLabel(getString(title), parent);
         parent.addView(heading);
-        GridLayout group = new GridLayout(this);
+        com.subhub.app.util.SelectionGrid group = new com.subhub.app.util.SelectionGrid(this, null);
         group.setTag("popup-choice:" + key);
-        int columns = Math.min(3, values.length);
-        group.setColumnCount(columns);
         group.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         String selected = preferences.getString(key, defaultValue);
@@ -414,17 +413,12 @@ public final class PopupStormActivity extends AppCompatActivity {
             option.setId(View.generateViewId());
             option.setTag(values[index]);
             option.setText(labels[index]);
-            option.setTextColor(getColor(R.color.text_primary));
-            option.setTextSize(11);
             option.setEnabled(ControllerPinManager.isSessionUnlocked());
             option.setSelected(values[index].equals(selected));
             option.setMinHeight(dp(48));
             option.setMinimumHeight(dp(48));
-            GridLayout.LayoutParams params = new GridLayout.LayoutParams(
-                    GridLayout.spec(index / columns, GridLayout.FILL),
-                    GridLayout.spec(index % columns, 1f));
-            params.width = 0;
-            params.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
             params.setMargins(dp(2), dp(2), dp(2), dp(2));
             group.addView(option, params);
             option.setOnClickListener(view -> {
@@ -440,18 +434,16 @@ public final class PopupStormActivity extends AppCompatActivity {
     }
 
     private void addTextField(LinearLayout parent, int title, String key, String defaultValue) {
-        TextView heading = label(getString(title), 11, false, R.color.text_secondary);
-        heading.setPadding(0, dp(10), 0, 0);
+        TextView heading = formLabel(getString(title), parent);
         parent.addView(heading);
-        EditText input = new EditText(this);
+        EditText input = (EditText) getLayoutInflater().inflate(R.layout.view_preference_input, parent, false);
         input.setId(View.generateViewId());
         heading.setLabelFor(input.getId());
         input.setMinimumHeight(dp(48));
         input.setSingleLine(true);
         input.setMaxLines(1);
         input.setText(preferences.getString(key, defaultValue));
-        input.setTextColor(getColor(R.color.text_primary));
-        input.setTextSize(12);
+        com.subhub.app.util.UiIdentity.textSize(input, R.dimen.ui_text_body);
         input.setEnabled(ControllerPinManager.isSessionUnlocked());
         input.setImeOptions(EditorInfo.IME_ACTION_DONE);
         View.OnFocusChangeListener save = (view, focused) -> {
@@ -519,7 +511,6 @@ public final class PopupStormActivity extends AppCompatActivity {
                         0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                 Button remove = new Button(this);
                 remove.setText(R.string.popup_remove);
-                remove.setTextSize(11);
                 remove.setAllCaps(false);
                 remove.setBackgroundResource(R.drawable.bg_outline_button);
                 remove.setTextColor(getColor(R.color.accent));
@@ -577,7 +568,8 @@ public final class PopupStormActivity extends AppCompatActivity {
     private TextView label(String text, float size, boolean bold, int color) {
         TextView view = new TextView(this);
         view.setText(text);
-        view.setTextSize(size);
+        com.subhub.app.util.UiIdentity.textSize(view, size == 12
+                ? R.dimen.ui_text_label : R.dimen.ui_text_caption);
         view.setTextColor(getColor(color));
         if (bold) view.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         view.setGravity(Gravity.CENTER_VERTICAL);

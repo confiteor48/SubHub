@@ -21,14 +21,14 @@
             android:id="@+id/button_add"
             android:layout_width="match_parent"
             style="@style/Widget.SubHub.PrimaryButton"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="@dimen/ui_gap_section"
             android:text="@string/custom_images_add" />
 
-        <TextView
+        <TextView android:textSize="@dimen/ui_text_body"
             android:id="@+id/status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="@dimen/ui_gap_group"
             android:gravity="center"
             android:textColor="@color/text_muted" />
 
@@ -36,7 +36,7 @@
             android:id="@+id/image_list"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="@dimen/ui_gap_section"
             android:orientation="vertical" />
     </LinearLayout>
 </ScrollView>

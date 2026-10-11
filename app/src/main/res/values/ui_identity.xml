@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compact Wallet spacing is the reference; touch targets remain 48dp. -->
+    <dimen name="ui_gap_inline">4dp</dimen>
+    <dimen name="ui_gap_control">8dp</dimen>
+    <dimen name="ui_gap_group">12dp</dimen>
+    <dimen name="ui_gap_section">16dp</dimen>
+    <dimen name="ui_card_padding">16dp</dimen>
+    <dimen name="ui_card_padding_compact">12dp</dimen>
+    <dimen name="ui_tile_padding">10dp</dimen>
+    <dimen name="ui_control_padding">10dp</dimen>
+    <dimen name="ui_control_padding_compact">8dp</dimen>
+    <dimen name="ui_card_radius">16dp</dimen>
+    <dimen name="ui_feature_radius">24dp</dimen>
+    <dimen name="ui_control_radius">14dp</dimen>
+    <dimen name="ui_input_radius">12dp</dimen>
+    <dimen name="ui_text_caption">11sp</dimen>
+    <dimen name="ui_text_label">12sp</dimen>
+    <dimen name="ui_text_body">13sp</dimen>
+    <dimen name="ui_text_row_title">14sp</dimen>
+    <dimen name="ui_text_section">15sp</dimen>
+    <dimen name="ui_text_title">20sp</dimen>
+    <dimen name="ui_icon_text">22sp</dimen>
+
+    <style name="TextAppearance.SubHub.Body" parent="TextAppearance.AppCompat.Body1">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:textSize">@dimen/ui_text_body</item>
+        <item name="android:textColor">@color/text_primary</item>
+    </style>
+    <style name="TextAppearance.SubHub.Secondary" parent="TextAppearance.SubHub.Body">
+        <item name="android:textSize">@dimen/ui_text_label</item>
+        <item name="android:textColor">@color/text_secondary</item>
+    </style>
+    <style name="TextAppearance.SubHub.Caption" parent="TextAppearance.SubHub.Secondary">
+        <item name="android:textSize">@dimen/ui_text_caption</item>
+    </style>
+    <style name="TextAppearance.SubHub.Section" parent="TextAppearance.SubHub.Body">
+        <item name="android:textSize">@dimen/ui_text_section</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/text_primary</item>
+    </style>
+    <style name="TextAppearance.SubHub.RowTitle" parent="TextAppearance.SubHub.Body">
+        <item name="android:textSize">@dimen/ui_text_row_title</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+    <style name="TextAppearance.SubHub.Title" parent="TextAppearance.SubHub.Body">
+        <item name="android:textSize">@dimen/ui_text_title</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+</resources>

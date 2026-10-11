@@ -25,38 +25,64 @@ public abstract class PreferencePage extends AppCompatActivity {
         PrimaryHeader.bindSecondary(header, title, false);
         PrimaryHeader.backButton(header).setOnClickListener(view -> finish());
         LinearLayout.LayoutParams headerParams = (LinearLayout.LayoutParams) header.getLayoutParams();
-        headerParams.bottomMargin = dp(16); header.setLayoutParams(headerParams);
+        headerParams.bottomMargin = getResources().getDimensionPixelSize(R.dimen.ui_gap_group);
+        header.setLayoutParams(headerParams);
     }
     protected LinearLayout card(LinearLayout parent) {
         LinearLayout card = new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackgroundResource(R.drawable.bg_card); card.setPadding(dp(16), dp(12), dp(16), dp(12));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.bottomMargin = dp(14);
+        card.setBackgroundResource(R.drawable.bg_card);
+        int inset = getResources().getDimensionPixelSize(R.dimen.ui_card_padding_compact);
+        int gap = getResources().getDimensionPixelSize(R.dimen.ui_gap_group);
+        card.setPadding(inset, gap, inset, gap);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.bottomMargin = gap;
         parent.addView(card, params); return card;
     }
     protected TextView text(LinearLayout parent, CharSequence value, int size, boolean muted) {
-        TextView view = new TextView(this); view.setText(value); view.setTextSize(size);
+        TextView view = new TextView(this); view.setText(value);
+        int textSize = size >= 18 ? R.dimen.ui_text_title
+                : size >= 15 ? R.dimen.ui_text_section
+                : size == 14 ? R.dimen.ui_text_row_title
+                : size == 13 ? R.dimen.ui_text_body
+                : size == 12 ? R.dimen.ui_text_label : R.dimen.ui_text_caption;
+        UiIdentity.textSize(view, textSize);
         view.setTextColor(getColor(muted ? R.color.text_secondary : R.color.text_primary));
-        view.setPadding(0, dp(5), 0, dp(7)); view.setLineSpacing(dp(2), 1);
+        int gap = getResources().getDimensionPixelSize(R.dimen.ui_gap_inline);
+        view.setPadding(0, gap, 0, gap); view.setLineSpacing(dp(2), 1);
         parent.addView(view, new LinearLayout.LayoutParams(-1, -2)); return view;
+    }
+    protected TextView fieldHelp(LinearLayout parent, CharSequence value) {
+        TextView view = (TextView) getLayoutInflater().inflate(R.layout.view_form_help, parent, false);
+        view.setText(value);
+        parent.addView(view);
+        return view;
+    }
+    protected TextView fieldLabel(LinearLayout parent, CharSequence value) {
+        TextView view = (TextView) getLayoutInflater().inflate(R.layout.view_form_label, parent, false);
+        view.setText(value);
+        parent.addView(view);
+        return view;
     }
     protected Button button(LinearLayout parent, CharSequence label, Runnable action) {
         Button button = (Button) getLayoutInflater().inflate(R.layout.view_ux_action, parent, false);
         button.setText(label); button.setAllCaps(false);
         button.setMinHeight(dp(48)); button.setOnClickListener(v -> action.run());
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.topMargin = dp(6); params.bottomMargin = dp(4);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = getResources().getDimensionPixelSize(R.dimen.ui_gap_control);
+        params.bottomMargin = 0;
         parent.addView(button, params); return button;
     }
     protected View toggle(LinearLayout parent, int label, boolean enabled, Consumer<Boolean> changed) {
-        StateToggle toggle = new StateToggle(this); toggle.setText(label);
-        toggle.setTextColor(getColor(R.color.text_primary)); toggle.setChecked(enabled);
+        StateToggle toggle = (StateToggle) getLayoutInflater().inflate(R.layout.view_form_toggle, parent, false); toggle.setText(label);
+        toggle.setChecked(enabled);
         toggle.setOnCheckedChangeListener((button, checked) -> changed.accept(checked));
         parent.addView(toggle, new LinearLayout.LayoutParams(-1, -2)); return toggle;
     }
     protected EditText input(LinearLayout parent, int hint, int inputType) {
-        EditText input = new EditText(this); input.setSingleLine(); input.setHint(hint);
-        input.setInputType(inputType); input.setTextColor(getColor(R.color.text_primary));
-        input.setHintTextColor(getColor(R.color.text_secondary)); input.setMinHeight(dp(48));
-        parent.addView(input, new LinearLayout.LayoutParams(-1, -2)); return input;
+        EditText input = (EditText) getLayoutInflater().inflate(R.layout.view_preference_input, parent, false);
+        input.setSingleLine(); input.setHint(hint);
+        com.subhub.app.util.UiIdentity.inputType(input, inputType);
+        input.setMinHeight(dp(48));
+        parent.addView(input); return input;
     }
     protected void notice(String value) { Toast.makeText(this, value, Toast.LENGTH_LONG).show(); }
     protected int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }

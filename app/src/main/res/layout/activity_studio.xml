@@ -26,7 +26,7 @@
 
             <LinearLayout
                 android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="56dp"
-                android:layout_marginTop="14dp" android:background="@drawable/bg_card"
+                android:layout_marginTop="@dimen/ui_gap_group" android:background="@drawable/bg_card"
                 android:gravity="center" android:orientation="horizontal" android:padding="6dp">
                 <Button android:id="@+id/tab_library" style="@style/Widget.SubHub.SegmentedButton"
                     android:text="@string/studio_library" />
@@ -39,96 +39,96 @@
             </LinearLayout>
 
             <LinearLayout android:id="@+id/library_panel" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="14dp"
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group"
                 android:orientation="vertical">
                 <Button android:id="@+id/button_import" style="@style/Widget.SubHub.PrimaryButton"
                     android:text="@string/studio_import" />
-                <TextView android:id="@+id/library_empty" android:layout_width="match_parent"
-                    android:layout_height="wrap_content" android:layout_marginTop="12dp"
-                    android:background="@drawable/bg_card" android:padding="16dp"
+                <TextView android:textSize="@dimen/ui_text_body" android:id="@+id/library_empty" android:layout_width="match_parent"
+                    android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group"
+                    android:background="@drawable/bg_card" android:padding="@dimen/ui_card_padding"
                     android:text="@string/studio_library_empty" android:textColor="@color/text_muted" />
                 <LinearLayout android:id="@+id/library_list" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:orientation="vertical" />
             </LinearLayout>
 
             <LinearLayout android:id="@+id/drafts_panel" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="14dp"
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group"
                 android:orientation="vertical" android:visibility="gone">
-                <TextView android:id="@+id/drafts_empty" android:layout_width="match_parent"
+                <TextView android:textSize="@dimen/ui_text_body" android:id="@+id/drafts_empty" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:background="@drawable/bg_card"
-                    android:padding="16dp" android:text="@string/studio_drafts_empty"
+                    android:padding="@dimen/ui_card_padding" android:text="@string/studio_drafts_empty"
                     android:textColor="@color/text_muted" />
                 <LinearLayout android:id="@+id/drafts_list" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:orientation="vertical" />
             </LinearLayout>
 
             <LinearLayout android:id="@+id/create_panel" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="14dp"
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group"
                 android:orientation="vertical" android:visibility="gone">
                 <Button android:id="@+id/button_blank" style="@style/Widget.SubHub.PrimaryButton"
                     android:text="@string/studio_start_blank" />
                 <Button android:id="@+id/button_capture" style="@style/Widget.SubHub.CompactOutlineButton"
-                    android:layout_marginTop="8dp" android:text="@string/studio_capture_current" />
+                    android:layout_marginTop="@dimen/ui_gap_control" android:text="@string/studio_capture_current" />
             </LinearLayout>
 
             <LinearLayout android:id="@+id/editor_panel" android:layout_width="match_parent"
-                android:layout_height="wrap_content" android:layout_marginTop="14dp"
+                android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_group"
                 android:orientation="vertical" android:visibility="gone">
                 <TextView android:id="@+id/draft_save_status"
                     android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:layout_marginBottom="8dp" android:text="@string/pack_editor_saved"
-                    android:textColor="@color/text_secondary" android:textSize="12sp"
+                    android:layout_marginBottom="@dimen/ui_gap_control" android:text="@string/pack_editor_saved"
+                    android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_label"
                     android:accessibilityLiveRegion="polite" />
                 <LinearLayout android:id="@+id/editor_steps" android:layout_width="match_parent"
                     android:layout_height="wrap_content" android:orientation="vertical"
-                    android:layout_marginBottom="8dp" />
+                    android:layout_marginBottom="@dimen/ui_gap_control" />
                 <LinearLayout android:id="@+id/details_step" android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:background="@drawable/bg_card" android:orientation="vertical"
-                    android:padding="14dp">
+                    android:padding="@dimen/ui_gap_group">
                     <TextView style="@style/Widget.SubHub.SectionHeader"
                         android:text="@string/studio_identity" />
-                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="10dp"
+                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="@dimen/ui_gap_group"
                         android:text="@string/studio_name" android:labelFor="@id/pack_name" />
                     <EditText android:id="@+id/pack_name" style="@style/Widget.SubHub.Input"
                         android:hint="@string/studio_name_hint" android:maxLength="80"
                         android:singleLine="true" />
-                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="10dp"
+                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="@dimen/ui_gap_group"
                         android:text="@string/studio_author" android:labelFor="@id/pack_author" />
                     <EditText android:id="@+id/pack_author" style="@style/Widget.SubHub.Input"
                         android:hint="@string/studio_author_hint" android:maxLength="80"
                         android:singleLine="true" />
-                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="10dp"
+                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="@dimen/ui_gap_group"
                         android:text="@string/studio_description" android:labelFor="@id/pack_description" />
                     <EditText android:id="@+id/pack_description" style="@style/Widget.SubHub.Input"
                         android:hint="@string/studio_description_hint" android:maxLength="500"
                         android:minLines="3" />
-                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="10dp"
+                    <TextView style="@style/Widget.SubHub.FieldLabel" android:layout_marginTop="@dimen/ui_gap_group"
                         android:text="@string/studio_pack_version" android:labelFor="@id/pack_version" />
                     <EditText android:id="@+id/pack_version" style="@style/Widget.SubHub.Input"
                         android:hint="1.0.0" android:maxLength="24" android:singleLine="true" />
                 </LinearLayout>
 
                 <LinearLayout android:id="@+id/features_step" android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp" android:background="@drawable/bg_card"
-                    android:orientation="vertical" android:padding="14dp">
+                    android:layout_marginTop="@dimen/ui_gap_group" android:background="@drawable/bg_card"
+                    android:orientation="vertical" android:padding="@dimen/ui_gap_group">
                     <TextView style="@style/Widget.SubHub.SectionHeader"
                         android:text="@string/studio_sections" />
-                    <TextView style="@style/Widget.SubHub.FieldHelp" android:layout_marginTop="4dp"
+                    <TextView style="@style/Widget.SubHub.FieldHelp" android:layout_marginTop="@dimen/ui_gap_inline"
                         android:text="@string/studio_sections_help" />
                     <LinearLayout android:id="@+id/section_list" android:layout_width="match_parent"
-                        android:layout_height="wrap_content" android:layout_marginTop="8dp"
+                        android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control"
                         android:orientation="vertical" />
                 </LinearLayout>
 
                 <LinearLayout android:id="@+id/images_step" android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp" android:background="@drawable/bg_card"
-                    android:orientation="vertical" android:padding="14dp">
+                    android:layout_marginTop="@dimen/ui_gap_group" android:background="@drawable/bg_card"
+                    android:orientation="vertical" android:padding="@dimen/ui_gap_group">
                     <TextView style="@style/Widget.SubHub.SectionHeader"
                         android:text="@string/studio_assets" />
                     <TextView android:id="@+id/asset_summary" style="@style/Widget.SubHub.FieldHelp"
-                        android:layout_marginTop="5dp" />
+                        android:layout_marginTop="@dimen/ui_gap_inline" />
                     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp" android:orientation="horizontal">
+                        android:layout_marginTop="@dimen/ui_gap_control" android:orientation="horizontal">
                         <Button android:id="@+id/button_censor_assets"
                             style="@style/Widget.SubHub.CompactOutlineButton"
                             android:layout_width="0dp" android:layout_height="wrap_content" android:minHeight="48dp"
@@ -140,43 +140,43 @@
                             android:text="@string/studio_add_popup_images" />
                     </LinearLayout>
                     <Button android:id="@+id/button_cover_asset" style="@style/Widget.SubHub.CompactOutlineButton"
-                        android:layout_marginTop="8dp" android:text="@string/pack_editor_add_cover" />
+                        android:layout_marginTop="@dimen/ui_gap_control" android:text="@string/pack_editor_add_cover" />
                     <LinearLayout android:id="@+id/asset_list" android:layout_width="match_parent"
                         android:layout_height="wrap_content" android:orientation="vertical" />
                 </LinearLayout>
 
                 <LinearLayout android:id="@+id/recommendations_step" android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp" android:background="@drawable/bg_card"
-                    android:orientation="vertical" android:padding="14dp">
+                    android:layout_marginTop="@dimen/ui_gap_group" android:background="@drawable/bg_card"
+                    android:orientation="vertical" android:padding="@dimen/ui_gap_group">
                     <TextView style="@style/Widget.SubHub.SectionHeader"
                         android:text="@string/studio_recommendations" />
-                    <TextView style="@style/Widget.SubHub.FieldHelp" android:layout_marginTop="4dp"
+                    <TextView style="@style/Widget.SubHub.FieldHelp" android:layout_marginTop="@dimen/ui_gap_inline"
                         android:text="@string/studio_recommendations_help" />
                     <CheckBox android:id="@+id/recommend_hardcore" android:layout_width="match_parent"
-                        android:layout_height="wrap_content" android:layout_marginTop="8dp"
+                        android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control"
                         android:text="@string/studio_recommend_hardcore"
-                        android:textColor="@color/text_primary" />
+                        />
                     <Spinner android:id="@+id/recommend_duration" android:layout_width="match_parent"
-                        android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginTop="4dp" />
+                        android:layout_height="wrap_content" android:minHeight="48dp" android:layout_marginTop="@dimen/ui_gap_inline" />
                 </LinearLayout>
 
                 <LinearLayout android:id="@+id/review_step" android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp" android:background="@drawable/bg_card"
-                    android:orientation="vertical" android:padding="14dp">
+                    android:layout_marginTop="@dimen/ui_gap_group" android:background="@drawable/bg_card"
+                    android:orientation="vertical" android:padding="@dimen/ui_gap_group">
                     <TextView style="@style/Widget.SubHub.SectionHeader"
                         android:text="@string/studio_preview" />
                     <TextView android:id="@+id/preview_text" android:layout_width="match_parent"
-                        android:layout_height="wrap_content" android:layout_marginTop="8dp"
-                        android:background="@drawable/bg_card" android:padding="14dp"
-                        android:textColor="@color/text_secondary" android:textSize="12sp" />
+                        android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control"
+                        android:background="@drawable/bg_card" android:padding="@dimen/ui_gap_group"
+                        android:textColor="@color/text_secondary" android:textSize="@dimen/ui_text_label" />
                 </LinearLayout>
 
                 <Button android:id="@+id/button_publish" style="@style/Widget.SubHub.PrimaryButton"
-                    android:layout_marginTop="12dp" android:text="@string/studio_add_library" />
+                    android:layout_marginTop="@dimen/ui_gap_group" android:text="@string/studio_add_library" />
                 <Button android:id="@+id/button_export" style="@style/Widget.SubHub.CompactOutlineButton"
-                    android:layout_marginTop="8dp" android:text="@string/studio_export_share" />
+                    android:layout_marginTop="@dimen/ui_gap_control" android:text="@string/studio_export_share" />
                 <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                    android:orientation="horizontal" android:layout_marginTop="12dp">
+                    android:orientation="horizontal" android:layout_marginTop="@dimen/ui_gap_group">
                     <Button android:id="@+id/editor_back" style="@style/Widget.SubHub.CompactOutlineButton"
                         android:layout_width="0dp" android:layout_weight="1"
                         android:text="@string/pack_editor_back" />
@@ -185,7 +185,7 @@
                         android:text="@string/pack_editor_next" />
                 </LinearLayout>
                 <Button android:id="@+id/button_delete_draft" style="@style/Widget.SubHub.CompactOutlineButton"
-                    android:layout_marginTop="8dp" android:text="@string/studio_delete_draft" />
+                    android:layout_marginTop="@dimen/ui_gap_control" android:text="@string/studio_delete_draft" />
             </LinearLayout>
         </LinearLayout>
     </ScrollView>

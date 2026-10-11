@@ -40,12 +40,12 @@ final class WalletActionRow extends LinearLayout {
         addView(labels, labelParams);
         TextView heading = new TextView(context);
         heading.setText(title);
-        heading.setTextSize(14);
+        com.subhub.app.util.UiIdentity.textSize(heading, R.dimen.ui_text_row_title);
         heading.setTypeface(null, Typeface.BOLD);
         heading.setTextColor(context.getColor(R.color.text_primary));
         labels.addView(heading, new LayoutParams(-1, -2));
         summary = new TextView(context);
-        summary.setTextSize(11);
+        com.subhub.app.util.UiIdentity.textSize(summary, R.dimen.ui_text_caption);
         summary.setTextColor(context.getColor(R.color.text_secondary));
         LayoutParams details = new LayoutParams(-1, -2);
         details.topMargin = dp(2);

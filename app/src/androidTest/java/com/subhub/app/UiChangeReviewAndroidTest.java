@@ -68,9 +68,11 @@ public final class UiChangeReviewAndroidTest {
         try (ActivityScenario<OnboardingActivity> page = ActivityScenario.launch(
                 new Intent(context, OnboardingActivity.class).putExtra(OnboardingActivity.REPLAY, true))) {
             page.onActivity(a -> a.findViewById(R.id.tour_next).performClick());
-            settle(); page.onActivity(a -> capture(a, "setup-apps"));
-            page.onActivity(a -> a.findViewById(R.id.tour_next).performClick());
             settle(); page.onActivity(a -> capture(a, "setup-figure"));
+            page.onActivity(a -> a.findViewById(R.id.tour_next).performClick());
+            settle(); page.onActivity(a -> capture(a, "setup-wallet"));
+            page.onActivity(a -> a.findViewById(R.id.tour_next).performClick());
+            settle(); page.onActivity(a -> capture(a, "setup-apps"));
         }
         try (ActivityScenario<HelpActivity> page = ActivityScenario.launch(HelpActivity.class)) {
             settle(); page.onActivity(a -> capture(a, "help"));

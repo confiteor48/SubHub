@@ -2,22 +2,20 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_pressed="true">
         <shape>
-            <corners android:radius="20dp" />
-            <gradient android:angle="0" android:startColor="#2E183A"
-                android:endColor="#3A1738" />
+            <corners android:radius="@dimen/ui_card_radius" />
+            <solid android:color="@color/surface_pressed" />
             <stroke android:width="1dp" android:color="@color/accent_mid" />
-            <padding android:left="16dp" android:top="14dp"
-                android:right="16dp" android:bottom="14dp" />
+            <padding android:left="@dimen/ui_card_padding" android:top="@dimen/ui_gap_group"
+                android:right="@dimen/ui_card_padding" android:bottom="@dimen/ui_gap_group" />
         </shape>
     </item>
     <item>
         <shape>
-            <corners android:radius="20dp" />
-            <gradient android:angle="0" android:startColor="#1B1424"
-                android:endColor="#241323" />
+            <corners android:radius="@dimen/ui_card_radius" />
+            <solid android:color="@color/surface_card" />
             <stroke android:width="1dp" android:color="@color/outline_default" />
-            <padding android:left="16dp" android:top="14dp"
-                android:right="16dp" android:bottom="14dp" />
+            <padding android:left="@dimen/ui_card_padding" android:top="@dimen/ui_gap_group"
+                android:right="@dimen/ui_card_padding" android:bottom="@dimen/ui_gap_group" />
         </shape>
     </item>
 </selector>

@@ -443,7 +443,7 @@ public final class PopupStormManager {
         TextView stop = new TextView(context);
         stop.setText(R.string.popup_stop_now);
         stop.setTextColor(Color.WHITE);
-        stop.setTextSize(13);
+        com.subhub.app.util.UiIdentity.textSize(stop, R.dimen.ui_text_body);
         stop.setGravity(Gravity.CENTER);
         stop.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         stop.setPadding(dp(18), 0, dp(18), 0);

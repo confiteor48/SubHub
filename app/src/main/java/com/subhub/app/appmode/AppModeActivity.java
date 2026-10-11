@@ -292,11 +292,9 @@ public final class AppModeActivity extends AppCompatActivity {
         boolean perAppEnabled = binding.perAppLimitEnabled.isChecked();
         for (EditText input : allowanceInputs.values()) {
             input.setEnabled(editingUnlocked && perAppEnabled);
-            input.setAlpha(perAppEnabled ? 1f : 0.5f);
         }
         binding.totalLimitMinutes.setEnabled(
                 editingUnlocked && binding.totalLimitEnabled.isChecked());
-        binding.totalLimitMinutes.setAlpha(binding.totalLimitEnabled.isChecked() ? 1f : 0.5f);
         renderTimerUsage();
     }
 
@@ -389,7 +387,7 @@ public final class AppModeActivity extends AppCompatActivity {
     private void message(int label) {
         TextView empty = new TextView(this);
         empty.setText(label);
-        empty.setTextSize(13);
+        com.subhub.app.util.UiIdentity.textSize(empty, R.dimen.ui_text_body);
         empty.setTextColor(getColor(R.color.text_secondary));
         empty.setPadding(0, dp(8), 0, dp(8));
         binding.perAppAllowancesList.addView(empty, new LinearLayout.LayoutParams(-1, -2));

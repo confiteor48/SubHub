@@ -167,7 +167,7 @@ final class StudioPayPalTransfer {
     private EditText passwordField(String hint) {
         EditText field = new EditText(activity);
         field.setHint(hint);
-        field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        com.subhub.app.util.UiIdentity.inputType(field, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         field.setFilters(new InputFilter[]{new InputFilter.LengthFilter(256)});
         field.setSaveEnabled(false);
         field.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
@@ -180,7 +180,7 @@ final class StudioPayPalTransfer {
         value.show();
     }
     private boolean allowed() {
-        if (!ControllerPinManager.isDomModeActive()) { toast("Unlock Dom Space first."); return false; }
+        if (!ControllerPinManager.isDomModeActive()) { toast("Unlock Dom first."); return false; }
         if (busy) { toast("PayPal encryption is still running."); return false; }
         return !activity.isFinishing() && !activity.isDestroyed();
     }

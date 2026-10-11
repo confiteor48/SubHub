@@ -30,108 +30,100 @@ import java.lang.reflect.Field;
 
 public class SetupPickerAndroidTest {
     @Test
-    public void pickerReturnsToDraftAndPhonePreviewAndReviewExcludeWhispersAndNotices()
-            throws Exception {
+    public void inlineAppChoicesSurviveRecreationAndSetupPreservesFeatureSettings() throws Exception {
         assumeTrue(android.os.Build.MODEL.contains("sdk_gphone"));
         Instrumentation instrument = InstrumentationRegistry.getInstrumentation();
         Context context = instrument.getTargetContext();
-        context.getSharedPreferences("subhub_onboarding", 0).edit().clear().commit();
+        android.content.SharedPreferences settings = context.getSharedPreferences(SettingsRepository.PREFERENCES_NAME, 0);
+        android.content.SharedPreferences onboarding = context.getSharedPreferences("subhub_onboarding", 0);
+        java.util.Map<String, ?> previousSettings = settings.getAll();
+        java.util.Map<String, ?> previousOnboarding = onboarding.getAll();
+        onboarding.edit().clear().commit();
         ControllerPinManager.useWithoutKeyholder(context);
         ControllerPinManager.enterDomMode();
         new FeatureModuleManager(context).save(true, true, true, true);
-        Instrumentation.ActivityMonitor monitor =
-                instrument.addMonitor(SetupAppsActivity.class.getName(), null, false);
-        Activity picker = null;
-        try (ActivityScenario<OnboardingActivity> tour =
-                ActivityScenario.launch(OnboardingActivity.class)) {
-            instrument.waitForIdleSync();
-            tour.onActivity(
-                    activity -> {
-                        CensorPreviewView sample =
-                                findPreview(activity.findViewById(android.R.id.content));
-                        assertNotNull(sample);
-                        Bitmap frame =
-                                Bitmap.createBitmap(
-                                        sample.getWidth(),
-                                        sample.getHeight(),
-                                        Bitmap.Config.ARGB_8888);
-                        sample.draw(new Canvas(frame));
-                        frame.recycle();
-                        try {
-                            Field field = CensorPreviewView.class.getDeclaredField("phoneBitmap");
-                            field.setAccessible(true);
-                            Bitmap phone = (Bitmap) field.get(sample);
-                            assertTrue(
-                                    "Rendered sample is portrait",
-                                    phone.getHeight() > phone.getWidth());
-                        } catch (ReflectiveOperationException error) {
-                            throw new AssertionError(error);
-                        }
-                        capture(activity, "setup-mobile.png");
-                    });
+        boolean walletRulesEnabled = new com.subhub.app.penance.PenanceManager(context).isEnabled();
+        new AppModeManager(context).setAllAppsEnabled(false);
+        new AppModeManager(context).setArmed(false);
+        java.util.concurrent.atomic.AtomicReference<String> changedPackage = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean selected = new java.util.concurrent.atomic.AtomicBoolean();
+        try (ActivityScenario<OnboardingActivity> tour = ActivityScenario.launch(OnboardingActivity.class)) {
+            tour.onActivity(activity -> {
+                View scene = activity.findViewById(android.R.id.content).findViewWithTag("setup-feature-overview");
+                assertNotNull(scene);
+                assertEquals(activity.getString(R.string.tour_feature_scene_accessibility), scene.getContentDescription());
+                CensorPreviewView sample = findPreview(scene);
+                assertNotNull(sample);
+                Bitmap frame = Bitmap.createBitmap(sample.getWidth(), sample.getHeight(), Bitmap.Config.ARGB_8888);
+                sample.draw(new Canvas(frame));
+                frame.recycle();
+                try {
+                    Field field = CensorPreviewView.class.getDeclaredField("phoneBitmap");
+                    field.setAccessible(true);
+                    Bitmap phone = (Bitmap) field.get(sample);
+                    assertTrue("Rendered sample is portrait", phone.getHeight() > phone.getWidth());
+                } catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+                capture(activity, "setup-mobile.png");
+            });
             onView(withId(R.id.tour_next)).perform(click());
-            onView(withText(R.string.global_feature_wallet)).perform(scrollTo(), click());
-            tour.onActivity(
-                    a ->
-                            assertFalse(
-                                    text(a.findViewById(android.R.id.content))
-                                            .contains("Whispers")));
-            onView(withText(R.string.tour_choose_apps)).perform(scrollTo(), click());
-            picker = monitor.waitForActivityWithTimeout(4000);
-            assertNotNull(picker);
-            Activity opened = picker;
-            long deadline = android.os.SystemClock.uptimeMillis() + 5000;
-            java.util.concurrent.atomic.AtomicBoolean ready =
-                    new java.util.concurrent.atomic.AtomicBoolean();
-            while (!ready.get() && android.os.SystemClock.uptimeMillis() < deadline) {
-                instrument.runOnMainSync(
-                        () ->
-                                ready.set(
-                                        ((ListView) opened.findViewById(R.id.app_list))
-                                                        .getChildCount()
-                                                > 1));
-                android.os.SystemClock.sleep(25);
-            }
-            assertTrue(ready.get());
-            instrument.runOnMainSync(
-                    () -> {
-                        assertNull(opened.findViewById(R.id.bottom_navigation));
-                        ListView list = opened.findViewById(R.id.app_list);
-                        IncludedAppRow row = (IncludedAppRow) list.getChildAt(0);
-                        row.choice().setChecked(!row.choice().isChecked());
-                        capture(opened, "setup-apps.png");
-                        PrimaryHeader.backButton(opened.findViewById(android.R.id.content))
-                                .performClick();
-                    });
-            onView(withId(R.id.tour_progress))
-                    .check(matches(withText(context.getString(R.string.tour_progress, 2, 6))));
-            onView(withText(R.string.global_feature_wallet)).check(matches(isNotChecked()));
-            // Draft values survive the child activity and recreation.
+            onView(withId(R.id.tour_next)).perform(click());
+            onView(withId(R.id.tour_next)).perform(click());
+            awaitApps(tour, instrument);
+            tour.onActivity(activity -> {
+                assertFalse(text(activity.findViewById(android.R.id.content)).contains("Whispers"));
+                ListView list = activity.findViewById(R.id.app_list);
+                View card = activity.findViewById(android.R.id.content).findViewWithTag("setup-app-card");
+                android.graphics.Rect cardBounds = new android.graphics.Rect(), scrollBounds = new android.graphics.Rect();
+                card.getGlobalVisibleRect(cardBounds);
+                activity.findViewById(R.id.tour_scroll).getGlobalVisibleRect(scrollBounds);
+                assertTrue("Apps use the available height", Math.abs(cardBounds.bottom
+                        - scrollBounds.bottom + activity.findViewById(R.id.tour_content).getPaddingBottom()) <= 3);
+                assertTrue("App list is tall", list.getHeight() > activity.getResources().getDisplayMetrics().density * 360);
+                IncludedAppRow row = (IncludedAppRow) list.getChildAt(0);
+                assertNotNull(row);
+                CheckBox choice = row.choice();
+                changedPackage.set(((String) choice.getTag()).substring("included:".length()));
+                selected.set(!choice.isChecked());
+                choice.setChecked(selected.get());
+                assertEquals(selected.get(), new AppModeManager(context).getSelectedPackages().contains(changedPackage.get()));
+                capture(activity, "setup-apps.png");
+            });
             tour.recreate();
-            onView(withText(R.string.global_feature_wallet)).check(matches(isNotChecked()));
-            for (int step = 1; step < 5; step++) onView(withId(R.id.tour_next)).perform(click());
-            tour.onActivity(
-                    a -> {
-                        String content = text(a.findViewById(android.R.id.content));
-                        assertFalse(content.contains("Whispers"));
-                        assertFalse(content.contains("Start from Home"));
-                        assertFalse(content.contains("Configure the details"));
-                        capture(a, "setup-review.png");
-                    });
+            awaitApps(tour, instrument);
+            onView(withId(R.id.tour_progress)).check(matches(withText(context.getString(R.string.tour_progress, 4, 6))));
+            assertEquals(selected.get(), new AppModeManager(context).getSelectedPackages().contains(changedPackage.get()));
+            for (int step = 3; step < 5; step++) onView(withId(R.id.tour_next)).perform(click());
+            tour.onActivity(activity -> {
+                String content = text(activity.findViewById(android.R.id.content));
+                assertFalse(content.contains("Whispers"));
+                assertFalse(content.contains("Start from Home"));
+                assertFalse(content.contains("Configure the details"));
+                capture(activity, "setup-review.png");
+            });
             onView(withId(R.id.tour_skip)).perform(click());
-            assertFalse(new FeatureModuleManager(context).isWalletEnabled());
+            assertTrue(new FeatureModuleManager(context).isWalletEnabled());
+            assertEquals(walletRulesEnabled, new com.subhub.app.penance.PenanceManager(context).isEnabled());
             assertTrue(new FeatureModuleManager(context).isSubliminalEnabled());
+            assertEquals(selected.get(), new AppModeManager(context).getSelectedPackages().contains(changedPackage.get()));
             assertFalse(new AppModeManager(context).isArmed());
         } finally {
-            if (picker != null && !picker.isFinishing()) {
-                Activity closed = picker;
-                instrument.runOnMainSync(closed::finish);
-            }
-            instrument.removeMonitor(monitor);
-            OnboardingState.complete(context);
-            ControllerPinManager.setPin(context, "2468");
+            SharedPreferenceTestRestore.restore(settings, previousSettings);
+            SharedPreferenceTestRestore.restore(onboarding, previousOnboarding);
             ControllerPinManager.enterSubMode();
         }
+    }
+
+    private static void awaitApps(ActivityScenario<OnboardingActivity> tour, Instrumentation instrument) {
+        java.util.concurrent.atomic.AtomicBoolean ready = new java.util.concurrent.atomic.AtomicBoolean();
+        for (int attempt = 0; attempt < 50 && !ready.get(); attempt++) {
+            instrument.waitForIdleSync();
+            tour.onActivity(activity -> {
+                ListView list = activity.findViewById(R.id.app_list);
+                ready.set(list.getAdapter() != null && list.getAdapter().getCount() > 0 && list.getChildCount() > 0);
+            });
+            if (!ready.get()) android.os.SystemClock.sleep(100);
+        }
+        assertTrue("Installed app choices must finish loading", ready.get());
     }
 
     private static CensorPreviewView findPreview(View view) {

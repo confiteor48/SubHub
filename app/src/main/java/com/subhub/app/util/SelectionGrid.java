@@ -38,6 +38,16 @@ public final class SelectionGrid extends LinearLayout {
             rowHeights[row] = Math.max(rowHeights[row],
                     child.getMeasuredHeight() + params.topMargin + params.bottomMargin);
         }
+        visible = 0;
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            if (child.getVisibility() == GONE) continue;
+            LayoutParams params = (LayoutParams) child.getLayoutParams();
+            int row = visible++ / columns;
+            child.measure(MeasureSpec.makeMeasureSpec(child.getMeasuredWidth(), MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec(Math.max(0, rowHeights[row]
+                            - params.topMargin - params.bottomMargin), MeasureSpec.EXACTLY));
+        }
         int height = getPaddingTop() + getPaddingBottom();
         for (int row : rowHeights) height += row;
         setMeasuredDimension(resolveSize(width, widthSpec), resolveSize(height, heightSpec));

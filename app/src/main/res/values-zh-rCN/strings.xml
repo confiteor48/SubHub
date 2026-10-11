@@ -7,6 +7,6 @@
     <string name="permission_all_granted">悬浮窗和通知权限已就绪。</string><string name="permission_overlay_name">显示在其他应用上层</string><string name="permission_notifications_name">通知</string><string name="permission_missing_fmt">缺少：%1$s</string>
     <string name="settings_language">语言</string><string name="language_system_default">系统默认</string>
     <string name="help_getting_started">开始使用</string><string name="help_permissions">权限</string><string name="help_app_protection">服务锁定</string><string name="help_censored_downloads">导出与下载</string><string name="help_customisation">自定义</string><string name="help_popup_storm">Popup Storm 安全</string><string name="help_troubleshooting">故障排除</string><string name="help_privacy">隐私与数据</string><string name="help_updates">构建与更新</string>
-    <string name="onboarding_title">欢迎使用 SubHub</string><string name="onboarding_body">在 Dom 模式下配置功能。点击 Enter Service，即可在 Sub 模式下使用已配置的功能。</string><string name="onboarding_help">打开指南</string><string name="onboarding_dismiss">继续</string>
+    <string name="onboarding_title">欢迎使用 SubHub</string><string name="onboarding_body">Dom 定下规则，Sub 遵守约定。准备好后，在 Home 点击 Enter Service 开始。</string><string name="onboarding_help">打开指南</string><string name="onboarding_dismiss">继续</string>
     <string name="shortcut_start_protection">Enter Service</string><string name="shortcut_start_protection_long">Enter SubHub service</string>
 </resources>

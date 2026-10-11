@@ -9,9 +9,9 @@
     android:gravity="center_vertical"
     android:orientation="horizontal"
     android:paddingStart="12dp"
-    android:paddingTop="8dp"
+    android:paddingTop="@dimen/ui_gap_control"
     android:paddingEnd="12dp"
-    android:paddingBottom="8dp">
+    android:paddingBottom="@dimen/ui_gap_control">
 
     <TextView
         android:id="@+id/button_back"
@@ -21,8 +21,8 @@
         android:minHeight="@dimen/control_min_height"
         android:gravity="center"
         android:text="@string/back"
-        android:textColor="@color/accent"
-        android:textSize="12sp"
+        android:textColor="@color/accent_text"
+        android:textSize="@dimen/ui_text_label"
         android:textStyle="bold"
         android:visibility="gone" />
 
@@ -33,7 +33,7 @@
         android:background="@drawable/bg_header_icon"
         android:contentDescription="@null"
         android:importantForAccessibility="no"
-        android:padding="10dp"
+        android:padding="@dimen/ui_tile_padding"
         app:tint="@color/text_primary" />
 
     <LinearLayout
@@ -50,17 +50,17 @@
             android:includeFontPadding="false"
             android:letterSpacing="0.06"
             android:textColor="@color/text_primary"
-            android:textSize="20sp"
+            android:textSize="@dimen/ui_text_title"
             android:textStyle="bold" />
 
         <TextView
         android:id="@+id/primary_header_subtitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
+            android:layout_marginTop="@dimen/ui_gap_inline"
             android:includeFontPadding="false"
             android:textColor="@color/text_secondary"
-        android:textSize="12sp"
+        android:textSize="@dimen/ui_text_label"
         android:visibility="gone" />
     </LinearLayout>
 

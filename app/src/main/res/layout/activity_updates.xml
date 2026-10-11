@@ -15,7 +15,7 @@
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="@dimen/page_margin"
             android:layout_marginTop="@dimen/primary_header_top"
-            android:layout_marginBottom="10dp" />
+            android:layout_marginBottom="@dimen/ui_gap_group" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -23,58 +23,58 @@
             android:layout_marginHorizontal="@dimen/page_margin"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="14dp">
+            android:padding="@dimen/ui_gap_group">
             <TextView style="@style/Widget.SubHub.SectionHeader"
                 android:text="@string/update_status_title" />
             <TextView
                 android:id="@+id/installed_version"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
+                android:layout_marginTop="@dimen/ui_gap_control"
                 android:textColor="@color/text_primary"
-                android:textSize="13sp"
+                android:textSize="@dimen/ui_text_body"
                 android:textStyle="bold" />
             <TextView
                 android:id="@+id/available_version"
                 style="@style/Widget.SubHub.FieldHelp"
-                android:layout_marginTop="4dp" />
+                android:layout_marginTop="@dimen/ui_gap_inline" />
             <TextView
                 android:id="@+id/last_checked"
                 style="@style/Widget.SubHub.FieldHelp"
-                android:layout_marginTop="4dp" />
+                android:layout_marginTop="@dimen/ui_gap_inline" />
             <TextView
                 android:id="@+id/update_status"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:textColor="@color/accent"
-                android:textSize="11sp"
+                android:layout_marginTop="@dimen/ui_gap_control"
+                android:textColor="@color/accent_text"
+                android:textSize="@dimen/ui_text_caption"
                 android:textStyle="bold" />
             <ProgressBar
                 android:id="@+id/download_progress"
                 style="?android:attr/progressBarStyleHorizontal"
                 android:layout_width="match_parent"
                 android:layout_height="6dp"
-                android:layout_marginTop="8dp"
+                android:layout_marginTop="@dimen/ui_gap_control"
                 android:progressTint="@color/accent"
                 android:visibility="gone" />
             <Button
                 android:id="@+id/button_check"
                 style="@style/Widget.SubHub.CompactOutlineButton"
                 android:layout_width="match_parent"
-                android:layout_marginTop="10dp"
+                android:layout_marginTop="@dimen/ui_gap_group"
                 android:text="@string/update_check_now" />
             <Button
                 android:id="@+id/button_action"
                 style="@style/Widget.SubHub.PrimaryButton"
-                android:layout_marginTop="7dp"
+                android:layout_marginTop="@dimen/ui_gap_control"
                 android:text="@string/update_download"
                 android:visibility="gone" />
             <Button
                 android:id="@+id/button_cancel"
                 style="@style/Widget.SubHub.CompactOutlineButton"
                 android:layout_width="match_parent"
-                android:layout_marginTop="7dp"
+                android:layout_marginTop="@dimen/ui_gap_control"
                 android:text="@string/update_cancel_download"
                 android:visibility="gone" />
         </LinearLayout>
@@ -83,17 +83,17 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="@dimen/page_margin"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="@dimen/ui_gap_group"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="14dp">
+            android:padding="@dimen/ui_gap_group">
             <TextView style="@style/Widget.SubHub.SectionHeader"
                 android:text="@string/update_automatic_title" />
             <com.subhub.app.util.StateToggle
                 android:id="@+id/automatic_checks"
                 style="@style/Widget.SubHub.SettingsToggle"
                 android:layout_width="match_parent"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="@dimen/ui_gap_inline"
                 android:text="@string/update_automatic_toggle" />
             <TextView
                 android:id="@+id/automatic_help"
@@ -103,7 +103,7 @@
                 android:id="@+id/dev_updates"
                 style="@style/Widget.SubHub.SettingsToggle"
                 android:layout_width="match_parent"
-                android:layout_marginTop="8dp"
+                android:layout_marginTop="@dimen/ui_gap_control"
                 android:text="@string/update_dev_toggle" />
             <TextView
                 android:id="@+id/dev_updates_help"
@@ -116,16 +116,16 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="@dimen/page_margin"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="@dimen/ui_gap_group"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="14dp"
+            android:padding="@dimen/ui_gap_group"
             android:visibility="gone">
             <TextView style="@style/Widget.SubHub.SectionHeader"
                 android:text="@string/update_release_notes" />
             <TextView
                 style="@style/Widget.SubHub.FieldHelp"
-                android:layout_marginTop="3dp"
+                android:layout_marginTop="@dimen/ui_gap_inline"
                 android:text="@string/update_history_help" />
             <LinearLayout
                 android:id="@+id/release_history_list"
@@ -139,17 +139,17 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginHorizontal="@dimen/page_margin"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="@dimen/ui_gap_group"
             android:background="@drawable/bg_card"
             android:orientation="vertical"
-            android:padding="14dp"
+            android:padding="@dimen/ui_gap_group"
             android:visibility="gone">
             <TextView style="@style/Widget.SubHub.SectionHeader"
                 android:text="@string/update_download_options" />
             <TextView
                 android:id="@+id/download_guide"
                 style="@style/Widget.SubHub.FieldHelp"
-                android:layout_marginTop="8dp" />
+                android:layout_marginTop="@dimen/ui_gap_control" />
         </LinearLayout>
     </LinearLayout>
 </ScrollView>

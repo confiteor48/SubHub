@@ -30,6 +30,7 @@ import java.util.List;
 
 /** Dom feature pages stay reachable even when disabled; Sub retains its safe surfaces. */
 public final class SubHubNavigation {
+    public static final String EXTRA_SECTION_HOME = "subhub.navigation.section_home";
     public enum Screen { HOME, CENSOR, LIMITS, MONEY, ATMOSPHERE, SETTINGS }
 
     private static final AccessibilityDelegateCompat TAB_ACCESSIBILITY =
@@ -214,9 +215,14 @@ public final class SubHubNavigation {
                 activity.getColor(selected ? R.color.accent : R.color.text_primary)));
         tab.setBackgroundResource(R.drawable.bg_bottom_tab_active);
         tab.setOnClickListener(view -> {
-            if (selected) return;
+            if (selected && activity instanceof PenanceActivity) {
+                ((PenanceActivity) activity).showSectionHome();
+                return;
+            }
             activity.startActivity(new Intent(activity, target)
-                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    .putExtra(EXTRA_SECTION_HOME, selected)
+                    .addFlags(selected ? Intent.FLAG_ACTIVITY_CLEAR_TOP
+                            : Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
             boolean movingForward = destination.ordinal() > active.ordinal();
             activity.overridePendingTransition(
                     movingForward ? R.anim.subhub_page_enter : R.anim.subhub_page_pop_enter,

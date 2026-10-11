@@ -118,7 +118,8 @@ public final class StateToggle extends SwitchMaterial {
                         ? getPaddingLeft()
                         : getWidth() - getPaddingRight() - width;
         float top = (getHeight() - height) / 2f;
-        statusBounds.set(left, top, left + width, top + height);
+        float inset = dp(1) / 2f;
+        statusBounds.set(left + inset, top + inset, left + width - inset, top + height - inset);
         statusPaint.setStyle(Paint.Style.FILL);
         statusPaint.setColor(
                 getContext()

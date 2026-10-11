@@ -47,16 +47,18 @@ public class OnboardingAndroidTest {
         new FeatureModuleManager(context).save(true,true,true,false);
         try(ActivityScenario<OnboardingActivity> tour=ActivityScenario.launch(OnboardingActivity.class)){
             onView(withId(R.id.tour_next)).perform(click());
-            onView(withId(R.id.tour_step_title)).check(matches(withText(R.string.tour_select_apps)));
-            tour.onActivity(a->capture(a,"tour-apps.png"));
-            onView(withId(R.id.tour_next)).perform(click());
             onView(withText(R.string.style_blur)).perform(scrollTo(),click());tour.recreate();
             onView(withText(R.string.style_blur)).check(matches(isSelected()));
             tour.onActivity(a->capture(a,"tour-appearance.png"));
             onView(withId(R.id.tour_next)).perform(click());
+            onView(withId(R.id.tour_step_title)).check(matches(withText(R.string.tour_wallet_rules)));
+            onView(withId(R.id.tour_next)).perform(click());
+            onView(withId(R.id.tour_step_title)).check(matches(withText(R.string.tour_select_apps)));
+            tour.onActivity(a->capture(a,"tour-apps.png"));
+            onView(withId(R.id.tour_next)).perform(click());
             onView(withId(R.id.tour_next)).perform(click());
             onView(withId(R.id.tour_step_title)).check(matches(withText(R.string.tour_permissions)));
-            onView(withId(R.id.tour_next)).perform(click());
+            onView(withId(R.id.tour_next)).check(matches(withText(R.string.tour_finish)));
             onView(withId(R.id.tour_next)).perform(click());
         }
         assertTrue(new FeatureModuleManager(context).isWalletEnabled());
@@ -69,8 +71,6 @@ public class OnboardingAndroidTest {
         new SettingsRepository(context).saveAppearance(CensorAppearance.Type.GLITCH,71,false,false);
         try(ActivityScenario<OnboardingActivity> tour=ActivityScenario.launch(new Intent(context,OnboardingActivity.class).putExtra(OnboardingActivity.REPLAY,true))){
             onView(withId(R.id.tour_next)).perform(click());
-            onView(withId(R.id.tour_step_title)).check(matches(withText(R.string.tour_select_apps)));
-            onView(withId(R.id.tour_next)).perform(click());
             onView(withText(R.string.style_blur)).perform(scrollTo(),click());
             onView(withId(R.id.tour_skip)).perform(click());
         }
@@ -80,12 +80,11 @@ public class OnboardingAndroidTest {
     @Test public void incompleteSetupResumesAfterCredentialsAreConfigured() {
         new FeatureModuleManager(context).save(true,true,true,false);
         try(ActivityScenario<OnboardingActivity> tour=ActivityScenario.launch(OnboardingActivity.class)) {
-            onView(withId(R.id.tour_next)).perform(click());onView(withId(R.id.tour_step_title)).check(matches(withText(R.string.tour_select_apps)));
             onView(withId(R.id.tour_next)).perform(click());onView(withText(R.string.style_blur)).perform(scrollTo(),click());
         }
         ControllerPinManager.setPin(context,"2468");assertTrue(OnboardingState.shouldStart(context));
         try(ActivityScenario<OnboardingActivity> resumed=ActivityScenario.launch(OnboardingActivity.class)) {
-            onView(withId(R.id.tour_progress)).check(matches(withText(context.getString(R.string.tour_progress,3,6))));
+            onView(withId(R.id.tour_progress)).check(matches(withText(context.getString(R.string.tour_progress,2,6))));
             onView(withText(R.string.style_blur)).perform(scrollTo()).check(matches(isSelected()));
             onView(withId(R.id.tour_skip)).perform(click());
         }
