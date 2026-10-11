@@ -137,9 +137,9 @@
     <string name="pack_field_effect_palette_tape_1">Tape color 1</string>
     <string name="pack_field_effect_palette_tape_2">Tape color 2</string>
     <string name="pack_field_effect_palette_tape_3">Tape color 3</string>
-    <string name="pack_field_effect_palette_error_popup_1">Error popup color 1</string>
-    <string name="pack_field_effect_palette_error_popup_2">Error popup color 2</string>
-    <string name="pack_field_effect_palette_error_popup_3">Error popup color 3</string>
+    <string name="pack_field_effect_palette_error_popup_1">Lockpad panel color</string>
+    <string name="pack_field_effect_palette_error_popup_2">Lockpad keys and lock</string>
+    <string name="pack_field_effect_palette_error_popup_3">Lockpad hardware color</string>
     <string name="pack_field_app_timer_per_app_enabled">Individual app allowances</string>
     <string name="pack_field_app_timer_per_app_minutes">Default allowance per app (minutes)</string>
     <string name="pack_field_app_timer_total_enabled">Shared allowance</string>
@@ -240,7 +240,7 @@
     <string name="pack_choice_censor_type_static">Static</string>
     <string name="pack_choice_censor_type_glitch">Glitch</string>
     <string name="pack_choice_censor_type_tape">Tape</string>
-    <string name="pack_choice_censor_type_error_popup">Error popup</string>
+    <string name="pack_choice_censor_type_error_popup">Lockpad</string>
     <string name="pack_choice_border_effect_classic">Outline</string>
     <string name="pack_choice_border_effect_glow">Glow</string>
     <string name="pack_choice_border_effect_gradient">Gradient</string>

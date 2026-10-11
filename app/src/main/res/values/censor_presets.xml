@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="censor_presets_title">Presets</string>
+    <string name="censor_presets_builtin">Built-in</string>
+    <string name="censor_presets_saved">Saved</string>
+    <string name="censor_presets_empty">No saved presets</string>
+    <string name="censor_preset_save">Save current look</string>
+    <string name="censor_preset_save_action">Save</string>
+    <string name="censor_preset_name">Preset name</string>
+    <string name="censor_preset_edit">Edit</string>
+    <string name="censor_preset_edit_name">Edit %1$s</string>
+    <string name="censor_preset_rename">Rename</string>
+    <string name="censor_preset_update">Update from current look</string>
+    <string name="censor_preset_delete">Delete</string>
+    <string name="lockpad_color_keys">Keys and lock</string>
+    <string name="lockpad_color_hardware">Hardware</string>
+</resources>

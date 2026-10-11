@@ -59,6 +59,8 @@ public final class SettingsActivity extends AppCompatActivity {
         bindDisclosures();
         bindValues();
         attachListeners();
+        binding.buttonCensorPresets.setOnClickListener(view -> startActivity(
+                new android.content.Intent(this, CensorPresetsActivity.class)));
         applyLockState();
         PrimaryHeader.backButton(binding.getRoot()).setOnClickListener(view -> finish());
         PrimaryHeader.editLockButton(binding.getRoot())
@@ -541,7 +543,7 @@ public final class SettingsActivity extends AppCompatActivity {
                         R.string.effect_color_stripe_one, R.string.effect_color_stripe_two};
             case ERROR_POPUP:
                 return new int[]{R.string.effect_color_panel,
-                        R.string.effect_color_alert, R.string.effect_color_action};
+                        R.string.lockpad_color_keys, R.string.lockpad_color_hardware};
             default:
                 return new int[]{R.string.effect_color_fill,
                         R.string.effect_color_light, R.string.effect_color_flash};

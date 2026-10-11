@@ -29,7 +29,7 @@ public final class EffectPalette {
                         0xff121216, 0xffe53935, 0xfff3d33b);
             case ERROR_POPUP:
                 return new EffectPalette(
-                        0xfff0f0f0, 0xffd72630, 0xff0078d7);
+                        0xff2f1c39, 0xffb78bc5, 0xffe4c8ee);
             default:
                 return new EffectPalette(0xff000000, 0xffffffff, 0xffffffff);
         }

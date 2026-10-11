@@ -153,7 +153,7 @@
     <string name="style_static">TV Static</string>
     <string name="style_glitch">Glitch</string>
     <string name="style_tape">Privacy Tape</string>
-    <string name="style_error">Error Popup</string>
+    <string name="style_error">Lockpad</string>
     <string name="effect_colors_title">Effect Colors</string>
     <string name="effect_color_fill">Fill Color</string>
     <string name="effect_color_dark">Dark Color</string>

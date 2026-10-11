@@ -22,6 +22,7 @@ public final class CensorAppearance {
         public static Type fromPreference(String value) {
             if (value == null) return BOX;
             String normalized = value.trim().toLowerCase(Locale.ROOT);
+            if ("lockpad".equals(normalized)) return ERROR_POPUP;
             for (Type type : values()) {
                 if (type.preferenceValue.equals(normalized)) return type;
             }
