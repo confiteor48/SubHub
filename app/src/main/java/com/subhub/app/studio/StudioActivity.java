@@ -604,11 +604,12 @@ public final class StudioActivity extends AppCompatActivity {
         long request = ++libraryRequest;
         storage.execute(() -> {
             List<SubHubPackManager.Record> records = manager.listLibrary();
+            Map<String, Bitmap> covers = loadCovers(records);
             editorHandler.post(() -> {
-                if (isDestroyed() || request != libraryRequest) return;
+                if (isDestroyed() || request != libraryRequest) { recycleCovers(covers); return; }
                 binding.libraryEmpty.setText(R.string.studio_library_empty);
                 binding.libraryEmpty.setVisibility(records.isEmpty() ? View.VISIBLE : View.GONE);
-                for (SubHubPackManager.Record record : records) addLibraryCard(record);
+                for (SubHubPackManager.Record record : records) addLibraryCard(record, covers.get(record.pack.getId()));
             });
         });
     }
@@ -621,11 +622,12 @@ public final class StudioActivity extends AppCompatActivity {
         long request = ++draftsRequest;
         storage.execute(() -> {
             List<SubHubPackManager.Record> records = manager.listDrafts();
+            Map<String, Bitmap> covers = loadCovers(records);
             editorHandler.post(() -> {
-                if (isDestroyed() || request != draftsRequest) return;
+                if (isDestroyed() || request != draftsRequest) { recycleCovers(covers); return; }
                 binding.draftsEmpty.setText(R.string.studio_drafts_empty);
                 binding.draftsEmpty.setVisibility(records.isEmpty() ? View.VISIBLE : View.GONE);
-                for (SubHubPackManager.Record record : records) addDraftCard(record);
+                for (SubHubPackManager.Record record : records) addDraftCard(record, covers.get(record.pack.getId()));
             });
         });
     }
@@ -639,10 +641,23 @@ public final class StudioActivity extends AppCompatActivity {
         }, completed);
     }
 
-    private void addDraftCard(SubHubPackManager.Record record) {
+    private Map<String, Bitmap> loadCovers(List<SubHubPackManager.Record> records) {
+        Map<String, Bitmap> covers = new LinkedHashMap<>();
+        for (SubHubPackManager.Record record : records) {
+            Bitmap image = PackCoverArtwork.decode(manager.readCover(record), 256);
+            if (image != null) covers.put(record.pack.getId(), image);
+        }
+        return covers;
+    }
+
+    private static void recycleCovers(Map<String, Bitmap> covers) {
+        for (Bitmap image : covers.values()) image.recycle();
+    }
+
+    private void addDraftCard(SubHubPackManager.Record record, Bitmap cover) {
         LinearLayout card = packCard(record.pack,
                 getResources().getQuantityString(R.plurals.pack_editor_section_count,
-                        record.pack.getIncludedSections().size(), record.pack.getIncludedSections().size()));
+                        record.pack.getIncludedSections().size(), record.pack.getIncludedSections().size()), cover);
         LinearLayout actions = actionRow();
         Button edit = outlineButton(getString(R.string.studio_edit));
         edit.setOnClickListener(view -> loadRecord(record, this::openDraft));
@@ -656,12 +671,12 @@ public final class StudioActivity extends AppCompatActivity {
         binding.draftsList.addView(card);
     }
 
-    private void addLibraryCard(SubHubPackManager.Record record) {
+    private void addLibraryCard(SubHubPackManager.Record record, Bitmap cover) {
         String detail = getResources().getQuantityString(R.plurals.pack_editor_section_count,
                 record.pack.getIncludedSections().size(), record.pack.getIncludedSections().size())
                 + " · " + getResources().getQuantityString(R.plurals.pack_editor_image_count,
                         record.assetCount, record.assetCount);
-        LinearLayout card = packCard(record.pack, detail);
+        LinearLayout card = packCard(record.pack, detail, cover);
         if (record.active) {
             TextView active = label(getString(R.string.studio_active), true);
             active.setTextColor(getColor(R.color.accent));
@@ -875,21 +890,19 @@ public final class StudioActivity extends AppCompatActivity {
 
     private void renderAssets() {
         binding.assetList.removeAllViews();
+        binding.previewCover.setImageDrawable(null);
+        binding.previewCover.setVisibility(View.GONE);
         if (draft == null || storage.isShutdown()) return;
         long request = ++assetRequest;
         SubHubPack snapshot = draft.snapshot();
         storage.execute(() -> {
             Map<String, Bitmap> thumbnails = new LinkedHashMap<>();
+            String coverPath = snapshot.getAssetPaths().stream()
+                    .filter(path -> path.startsWith("assets/cover/")).sorted().findFirst().orElse("");
             for (String path : snapshot.getAssetPaths()) {
                 byte[] bytes = snapshot.getAsset(path);
-                BitmapFactory.Options options = new BitmapFactory.Options();
-                options.inJustDecodeBounds = true;
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
-                options.inSampleSize = 1;
-                while (options.outWidth / options.inSampleSize > 128
-                        || options.outHeight / options.inSampleSize > 128) options.inSampleSize *= 2;
-                options.inJustDecodeBounds = false;
-                thumbnails.put(path, BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options));
+                thumbnails.put(path, PackCoverArtwork.decode(bytes,
+                        path.startsWith("assets/cover/") ? 512 : 128));
             }
             editorHandler.post(() -> {
                 if (isDestroyed() || request != assetRequest || draft == null
@@ -900,6 +913,10 @@ public final class StudioActivity extends AppCompatActivity {
                 int index = 0;
                 for (Map.Entry<String, Bitmap> entry : thumbnails.entrySet()) {
                     String path = entry.getKey();
+                    if (path.equals(coverPath) && entry.getValue() != null) {
+                        binding.previewCover.setImageBitmap(entry.getValue());
+                        binding.previewCover.setVisibility(View.VISIBLE);
+                    }
                     LinearLayout row = actionRow();
                     ImageView image = new ImageView(this);
                     image.setImageBitmap(entry.getValue());
@@ -928,7 +945,7 @@ public final class StudioActivity extends AppCompatActivity {
         });
     }
 
-    private LinearLayout packCard(SubHubPack pack, String detail) {
+    private LinearLayout packCard(SubHubPack pack, String detail, Bitmap cover) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(14), dp(14), dp(14), dp(14));
@@ -937,10 +954,29 @@ public final class StudioActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         params.topMargin = dp(10);
         card.setLayoutParams(params);
-        card.addView(label(pack.getName(), true));
+        card.setTag("pack_card:" + pack.getId());
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.HORIZONTAL);
+        heading.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        if (cover != null) {
+            ImageView image = new ImageView(this);
+            image.setTag("pack_cover:" + pack.getId());
+            image.setImageBitmap(cover);
+            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(dp(64), dp(80));
+            coverParams.setMarginEnd(dp(12));
+            heading.addView(image, coverParams);
+        }
+        LinearLayout metadata = new LinearLayout(this);
+        metadata.setOrientation(LinearLayout.VERTICAL);
+        metadata.addView(label(pack.getName(), true));
         String byline = pack.getAuthor().isBlank() ? "v" + pack.getPackVersion()
                 : "by " + pack.getAuthor() + " · v" + pack.getPackVersion();
-        card.addView(label(byline, false));
+        metadata.addView(label(byline, false));
+        heading.addView(metadata, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(heading);
         if (!pack.getDescription().isBlank()) card.addView(label(pack.getDescription(), false));
         card.addView(label(detail, false));
         if (pack.hasEncryptedPayPal()) card.addView(label("Encrypted PayPal · passphrase required", false));
