@@ -81,7 +81,9 @@ Limits shows today's recorded app usage, a combined daily budget, and separate a
 
 ### Wallet / Tribute
 
-Wallet is optional. Rules can count only deliberately enabled events: a new stable temptation, lingering on one still screen, tapping a visible censor, opening an included app, or a rate-limited Hardcore tamper signal. Every event is gated behind active service and the Wallet master switch.
+Wallet is optional. Rules can count only deliberately enabled events: a new stable temptation, lingering on one still screen, tapping a visible censor, opening an included app, or a rate-limited Hardcore tamper signal. Each rule follows its configured session participation, rates, and caps.
+
+Censor taps require an Android click event whose complete control bounds are covered by the currently displayed censor. Partly covered controls and surfaces that send no click event cannot be attributed reliably, including some video and canvas views. Reverse-mode revealed regions are not censor tap targets. Tap entries require an armed Sub session, the Censor module, and the tap rule to be enabled. Censor Lab recordings never create tap entries, including redraws of retained Lab content after recording stops.
 
 Wallet places the amount due, payment action, and recent ledger in one compact overview. Dom opens Rules & caps, Paid pause, PayPal, or Corrections to configure them; Back returns to the overview. Review what is owed and settle it through PayPal. Merchant credentials and saved-wallet tokens are encrypted with Android Keystore and stay bound to the selected Sandbox or Live environment.
 

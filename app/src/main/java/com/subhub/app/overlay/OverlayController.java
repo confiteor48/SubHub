@@ -333,6 +333,12 @@ public final class OverlayController implements AutoCloseable {
         view.setAppearance(appearance);
     }
 
+    /** Retains packet provenance independently of whether a Lab recording is still active. */
+    public void setTapSourceLabOwned(boolean labOwned) { view.setTapSourceLabOwned(labOwned); }
+
+    /** A source packet accepted before a scope change cannot rearm billing when drawn late. */
+    public void setTapSource(boolean labOwned, long sourceScope) { view.setTapSource(labOwned, sourceScope); }
+
     public void setDiagnostics(String text) {
         view.setDiagnostics(text);
     }

@@ -4,7 +4,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.penance.DwellInfractionTracker;
 
 import org.junit.Test;
@@ -54,77 +53,6 @@ public final class InfractionTrackerTest {
                 track(5, new BBox(40, 40, 90, 90))), 13_000L, 5_000L, false));
         assertEquals(1, tracker.update(List.of(
                 track(6, new BBox(260, 120, 180, 120))), 18_000L, 5_000L, false));
-    }
-
-    @Test public void tapUsesVisibleCensorBoundsAndRejectsScreenSizedTargets() {
-        CensorTapTracker tracker = new CensorTapTracker();
-        tracker.update(List.of(track(1, new BBox(100, 200, 100, 100))),
-                1_000, 2_000, 1_000L);
-        assertTrue(tracker.matchesClick(90, 190, 240, 340,
-                1_000, 2_000, 1_500L));
-        assertFalse(tracker.matchesClick(0, 0, 1_000, 2_000,
-                1_000, 2_000, 1_500L));
-        assertTrue(tracker.matchesClick(90, 190, 240, 340,
-                1_000, 2_000, 3_001L));
-    }
-
-    @Test public void tapTargetFollowsTheVisibleCensorDuringScroll() {
-        CensorTapTracker tracker = new CensorTapTracker();
-        tracker.update(List.of(track(1, new BBox(100, 800, 200, 200))),
-                1_000, 2_000, 1_000L);
-
-        tracker.offsetContent(0, -300, 1_000, 2_000, 1_200L);
-
-        assertFalse(tracker.matchesClick(100, 800, 300, 1_000,
-                1_000, 2_000, 1_300L));
-        assertTrue(tracker.matchesClick(100, 500, 300, 700,
-                1_000, 2_000, 1_300L));
-    }
-
-    @Test public void directTouchMatchesOnlyInsideARecentVisibleCensor() {
-        CensorTapTracker tracker = new CensorTapTracker();
-        tracker.update(List.of(track(1, new BBox(100, 200, 200, 160))),
-                1_000, 2_000, 1_000L);
-
-        assertTrue(tracker.matchesPoint(150f, 250f,
-                1_000, 2_000, 1_200L));
-        assertFalse(tracker.matchesPoint(90f, 250f,
-                1_000, 2_000, 1_200L));
-        assertTrue(tracker.matchesPoint(150f, 250f,
-                1_000, 2_000, 3_001L));
-    }
-
-    @Test public void directTouchTargetMovesWithTheCensorDuringScroll() {
-        CensorTapTracker tracker = new CensorTapTracker();
-        tracker.update(List.of(track(1, new BBox(100, 800, 200, 200))),
-                1_000, 2_000, 1_000L);
-
-        tracker.offsetContent(0, -300, 1_000, 2_000, 1_100L);
-
-        assertFalse(tracker.matchesPoint(150f, 850f,
-                1_000, 2_000, 1_200L));
-        assertTrue(tracker.matchesPoint(150f, 550f,
-                1_000, 2_000, 1_200L));
-    }
-
-    @Test public void overlappingNestedClickTargetMatchesWithoutContainingCensorCenter() {
-        CensorTapTracker tracker = new CensorTapTracker();
-        tracker.update(List.of(track(1, new BBox(100, 200, 200, 200))),
-                1_000, 2_000, 1_000L);
-
-        assertTrue(tracker.matchesClick(280, 240, 360, 360,
-                1_000, 2_000, 1_200L));
-    }
-
-    @Test public void predictedButStillVisibleTrackRemainsTappable() {
-        CensorTapTracker tracker = new CensorTapTracker();
-        TrackedObject predicted = track(1, new BBox(100, 200, 100, 100));
-        predicted.miss(new BBox(110, 210, 100, 100));
-
-        tracker.update(List.of(predicted), 1_000, 2_000, 1_000L);
-
-        assertTrue(tracker.matchesClick(100, 200, 240, 340,
-                1_000, 2_000, 1_200L));
     }
 
     private static TrackedObject track(int id, BBox box) {

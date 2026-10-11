@@ -29,6 +29,8 @@ import com.subhub.app.detection.Detection;
 import com.subhub.app.detection.TrackedObject;
 import com.subhub.app.detection.RenderSourceReference;
 import com.subhub.app.diagnostics.CensorLabLog;
+import com.subhub.app.diagnostics.CensorLabCensorSession;
+import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.settings.CensorAppearance;
 
 import java.util.ArrayList;
@@ -68,6 +70,20 @@ final class CensorOverlayView extends View {
     private final CustomImagePool customImages;
     private final Map<Integer, SolidRenderLayer> solidRenderLayers = new HashMap<>();
     private final List<LabelPlacement> labelPlacements = new ArrayList<>();
+    private final CensorTapTracker tapTracker = CensorTapTracker.shared();
+    private final List<BBox> displayedTapRegions = new ArrayList<>();
+    private final int[] tapScreenLocation = new int[2];
+    private final Rect tapVisibleRect = new Rect();
+    private long visualTapScope;
+    private long textTapScope;
+    private boolean tapSourceLabOwned;
+    private long tapSourceScope = Long.MIN_VALUE;
+    private boolean visualTapSourceLabOwned;
+    private boolean textTapSourceLabOwned;
+    private final Runnable refreshDisplayedTapGeometry = () -> {
+        if (isAttachedToWindow() && isShown() && getWindowVisibility() == VISIBLE) invalidate();
+        else tapTracker.clearDisplayed(this);
+    };
 
     private List<RenderTrackSnapshot> liveTracks = new ArrayList<>();
     private List<RenderTrackSnapshot> cachedTracks = new ArrayList<>();
@@ -233,6 +249,7 @@ final class CensorOverlayView extends View {
             int sourceMotionX,
             int sourceMotionY,
             Runnable latestFrameRelease) {
+        noteVisualTapSource();
         if (worldSpaceTracks) {
             visualSteering.clear();
             visualLayout.clear();
@@ -333,6 +350,7 @@ final class CensorOverlayView extends View {
             long trackCameraX, long trackCameraY, long sourceCameraX, long sourceCameraY,
             int viewportWidth, int viewportHeight, Runnable latestFrameRelease,
             RenderSourceReference sourceReference) {
+        noteVisualTapSource();
         advancePersonFrame();
         if (!worldSpaceTracks) {
             visualSteering.clear();
@@ -404,6 +422,8 @@ final class CensorOverlayView extends View {
             int viewportWidth,
             int viewportHeight) {
         if (!worldSpaceTracks) return;
+        // Replacing render memory cannot make a retained Lab scene become normal content.
+        visualTapSourceLabOwned |= tapSourceLabOwned || CensorLabCensorSession.isActive();
         List<RenderTrackSnapshot> cachedSnapshots = new ArrayList<>(
                 cachedRegions == null ? 0 : cachedRegions.size());
         if (cachedRegions != null) {
@@ -539,6 +559,7 @@ final class CensorOverlayView extends View {
             int sourceHeight,
             int motionX,
             int motionY) {
+        noteTextTapSource();
         if (worldSpaceText) textSteering.clear();
         worldSpaceText = false;
         List<RenderTrackSnapshot> snapshots = new ArrayList<>(detections.size());
@@ -590,6 +611,7 @@ final class CensorOverlayView extends View {
             long cameraY,
             int viewportWidth,
             int viewportHeight) {
+        noteTextTapSource();
         if (!worldSpaceText) textSteering.clear();
         List<RenderTrackSnapshot> snapshots = new ArrayList<>(detections.size());
         for (Detection detection : detections) {
@@ -719,6 +741,8 @@ final class CensorOverlayView extends View {
 
     /** Hide all censor pixels without treating an empty track list as reverse-mode content. */
     void clearContent() {
+        tapTracker.clearDisplayed(this);
+        removeCallbacks(refreshDisplayedTapGeometry);
         clearPersonCoverage();
         long nowMillis = SystemClock.uptimeMillis();
         latestMutationUptime = nowMillis;
@@ -780,6 +804,24 @@ final class CensorOverlayView extends View {
         scheduleNextFrame(SystemClock.uptimeMillis());
     }
 
+    /** The originating packet's ownership survives recording stop and later redraws. */
+    void setTapSourceLabOwned(boolean labOwned) { setTapSource(labOwned, tapTracker.scope()); }
+
+    void setTapSource(boolean labOwned, long sourceScope) {
+        tapSourceLabOwned = labOwned;
+        tapSourceScope = sourceScope;
+    }
+
+    private void noteVisualTapSource() {
+        visualTapScope = tapSourceScope == Long.MIN_VALUE ? tapTracker.scope() : tapSourceScope;
+        visualTapSourceLabOwned = tapSourceLabOwned || CensorLabCensorSession.isActive();
+    }
+
+    private void noteTextTapSource() {
+        textTapScope = tapSourceScope == Long.MIN_VALUE ? tapTracker.scope() : tapSourceScope;
+        textTapSourceLabOwned = tapSourceLabOwned || CensorLabCensorSession.isActive();
+    }
+
     void setDiagnostics(String value) {
         diagnostics = value == null ? "" : value;
         invalidate();
@@ -800,6 +842,8 @@ final class CensorOverlayView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+        displayedTapRegions.clear();
+        removeCallbacks(refreshDisplayedTapGeometry);
         activeRenderTimeMillis = renderTimeMillis();
         ViewportMotion.Position viewport = viewportMotion.position(activeRenderTimeMillis);
         if (viewportMotion.isMeasuredPresentationMode()
@@ -825,10 +869,53 @@ final class CensorOverlayView extends View {
         updatePersonDecorations();
         if (appearance.isReverseMode()) drawReverse(canvas);
         else drawNormal(canvas);
+        publishDisplayedTapGeometry();
         drawDiagnostics(canvas);
         traceRenderedMotion(viewportMotion.isAnimating(activeRenderTimeMillis));
         scheduleNextFrame(activeRenderTimeMillis);
         presentationFrameTimeMillis = -1L;
+    }
+
+    private void recordDisplayedTapRegion(RectF rect, boolean textRegion) {
+        long sourceScope = textRegion ? textTapScope : visualTapScope;
+        boolean labOwned = textRegion ? textTapSourceLabOwned : visualTapSourceLabOwned;
+        if (labOwned || sourceScope != tapTracker.scope() || rect.isEmpty()) return;
+        // All effects cover these two intersecting interior strips. Rounded transparent corners
+        // are deliberately excluded: target bounds cannot prove a touch inside those corners.
+        float radius = Math.min(dp(8), Math.min(rect.width(), rect.height()) / 2f);
+        addDisplayedTapRect(rect.left + radius, rect.top, rect.right - radius, rect.bottom);
+        addDisplayedTapRect(rect.left, rect.top + radius, rect.right, rect.bottom - radius);
+    }
+
+    private void addDisplayedTapRect(float left, float top, float right, float bottom) {
+        int x = (int) Math.ceil(left), y = (int) Math.ceil(top);
+        int endX = (int) Math.floor(right), endY = (int) Math.floor(bottom);
+        if (endX > x && endY > y) displayedTapRegions.add(new BBox(x, y, endX - x, endY - y));
+    }
+
+    private void publishDisplayedTapGeometry() {
+        if (!isAttachedToWindow() || !isShown() || getWindowVisibility() != VISIBLE
+                || CensorLabCensorSession.isActive() || !getLocalVisibleRect(tapVisibleRect)) {
+            tapTracker.clearDisplayed(this);
+            return;
+        }
+        getLocationOnScreen(tapScreenLocation);
+        BBox viewport = new BBox(tapVisibleRect.left + tapScreenLocation[0],
+                tapVisibleRect.top + tapScreenLocation[1], tapVisibleRect.width(), tapVisibleRect.height());
+        List<BBox> screenRegions = new ArrayList<>(displayedTapRegions.size());
+        for (BBox box : displayedTapRegions) {
+            int left = Math.max(viewport.getX(), box.getX() + tapScreenLocation[0]);
+            int top = Math.max(viewport.getY(), box.getY() + tapScreenLocation[1]);
+            int right = Math.min(viewport.getRight(), box.getRight() + tapScreenLocation[0]);
+            int bottom = Math.min(viewport.getBottom(), box.getBottom() + tapScreenLocation[1]);
+            if (right > left && bottom > top) screenRegions.add(new BBox(left, top, right - left, bottom - top));
+        }
+        tapTracker.publishDisplayed(this, tapTracker.scope(), screenRegions, viewport,
+                SystemClock.uptimeMillis(), false);
+        // A stationary BOX still has visible pixels. Renew only through another actual draw,
+        // at a bounded cadence; this does not request captures or run any detector.
+        if (!screenRegions.isEmpty()) postDelayed(refreshDisplayedTapGeometry,
+                CensorTapTracker.DISPLAY_REFRESH_MILLIS);
     }
 
     private void drawDiagnostics(Canvas canvas) {
@@ -877,6 +964,7 @@ final class CensorOverlayView extends View {
                     renderContentOffsetX, renderContentOffsetY, worldSpaceTracks);
             drawEffect(canvas, drawRect, track.id(), effectTypeFor(track),
                     appearance.getIntensity());
+            recordDisplayedTapRegion(drawRect, false);
             if (appearance.isShowBorder() && !suppressedPersonDecorations.contains(track.id())) {
                 drawBorder(canvas, drawRect);
             }
@@ -909,6 +997,7 @@ final class CensorOverlayView extends View {
                     renderContentOffsetX, renderContentOffsetY, worldSpaceText);
             drawEffect(canvas, drawRect, track.id(), appearance.getType(),
                     appearance.getIntensity());
+            recordDisplayedTapRegion(drawRect, true);
             if (appearance.isShowBorder()) drawBorder(canvas, drawRect);
         }
         renderContentOffsetX = savedOffsetX;
@@ -943,6 +1032,7 @@ final class CensorOverlayView extends View {
             int top = Math.round(drawRect.top);
             layer.node.setPosition(left, top, left + width, top + height);
             canvas.drawRenderNode(layer.node);
+            recordDisplayedTapRegion(new RectF(left, top, left + width, top + height), false);
         }
     }
 
@@ -972,6 +1062,7 @@ final class CensorOverlayView extends View {
             int top = Math.round(drawRect.top);
             layer.node.setPosition(left, top, left + width, top + height);
             canvas.drawRenderNode(layer.node);
+            recordDisplayedTapRegion(new RectF(left, top, left + width, top + height), true);
         }
         renderContentOffsetX = savedOffsetX;
         renderContentOffsetY = savedOffsetY;
@@ -1002,6 +1093,8 @@ final class CensorOverlayView extends View {
     }
 
     private void drawReverse(Canvas canvas) {
+        // Reverse detections describe revealed holes, not censored targets. Do not attribute
+        // clicks from those bounds; a future complement-region contract can prove that case.
         RectF whole = new RectF(0, 0, getWidth(), getHeight());
         int layer = canvas.saveLayer(whole, null);
         CensorAppearance.Type type = appearance.getType();
@@ -1819,6 +1912,8 @@ final class CensorOverlayView extends View {
     }
 
     void release() {
+        tapTracker.clearDisplayed(this);
+        removeCallbacks(refreshDisplayedTapGeometry);
         clearPersonCoverage();
         stopFrameCallback();
         releaseFrame();
@@ -1860,6 +1955,22 @@ final class CensorOverlayView extends View {
     protected void onDetachedFromWindow() {
         release();
         super.onDetachedFromWindow();
+    }
+
+    @Override protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (tapTracker != null && !isShown()) {
+            tapTracker.clearDisplayed(this);
+            removeCallbacks(refreshDisplayedTapGeometry);
+        }
+    }
+
+    @Override protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (tapTracker != null && visibility != VISIBLE) {
+            tapTracker.clearDisplayed(this);
+            removeCallbacks(refreshDisplayedTapGeometry);
+        }
     }
 
     private float dp(float value) {

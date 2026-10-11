@@ -312,7 +312,6 @@ public final class ScreenCaptureService extends Service {
             }
             int width = capture.getCaptureWidth();
             int height = capture.getCaptureHeight();
-            tapTracker.update(tracks, width, height, now);
             PopupStormManager.get().updateTrackedObjects(tracks, width, height);
             DiagnosticsRepository.Snapshot diagnostics = DiagnosticsRepository.recordFrame(
                     DIAGNOSTICS_MODE,
@@ -339,6 +338,7 @@ public final class ScreenCaptureService extends Service {
                 if (overlay != null && censorConfigured()
                                 && ForegroundAppState.isCurrent(candidate.scope)) {
                     overlay.setDiagnostics(diagnosticText);
+                    overlay.setTapSourceLabOwned(false);
                     if (overlayFrameRelease == null) {
                         overlay.update(tracks, width, height, overlayFrame);
                     } else {

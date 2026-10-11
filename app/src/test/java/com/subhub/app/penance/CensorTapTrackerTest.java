@@ -1,0 +1,97 @@
+package com.subhub.app.penance;
+
+import static org.junit.Assert.*;
+
+import com.subhub.app.detection.BBox;
+import java.util.List;
+import org.junit.Test;
+
+public final class CensorTapTrackerTest {
+    @Test public void partiallyCoveredClickDoesNotProveWhereTheFingerLanded() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(100, 200, 100, 100)), 1000L);
+        assertFalse(tracker.matchesClick(90, 190, 240, 340, 1000, 2000, 1200L));
+    }
+
+    @Test public void likeOrReplyEdgeOverlapDoesNotBecomeACensorTap() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(100, 200, 200, 200)), 1000L);
+        assertFalse(tracker.matchesClick(280, 240, 360, 360, 1000, 2000, 1200L));
+    }
+
+    @Test public void completeUnionCoverageCanProveAClickAcrossSeparateRegions() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(100, 200, 50, 100), new BBox(150, 200, 50, 100)), 1000L);
+        assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1200L));
+    }
+
+    @Test public void evenOneUncoveredPixelRejectsAmbiguousUnionCoverage() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(100, 200, 50, 100), new BBox(151, 200, 49, 100)), 1000L);
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1200L));
+    }
+
+    @Test public void offscreenRegionsAreClippedAndCannotMatchAnOffscreenTarget() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(-100, 200, 200, 100)), 1000L);
+        assertTrue(tracker.matchesClickAt(0, 210, 90, 290, 1100L, 1200L));
+        assertFalse(tracker.matchesClickAt(-10, 210, 90, 290, 1100L, 1200L));
+        assertFalse(tracker.matchesPoint(-1f, 250f, 1000, 2000, 1200L));
+    }
+
+    @Test public void freshnessUsesBoundedMonotonicDrawTime() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(100, 200, 100, 100)), 1000L);
+        assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 2400L, 2500L));
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 2400L, 2501L));
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 900L, 1200L));
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 1300L, 1200L));
+    }
+
+    @Test public void stationaryRedrawRetainsTheGeometryStartForDelayedClicks() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        List<BBox> regions = List.of(new BBox(100, 200, 100, 100));
+        publish(tracker, regions, 1000L);
+        publish(tracker, regions, 2000L);
+        assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 1900L, 2050L));
+        publish(tracker, List.of(new BBox(100, 100, 100, 100)), 2100L);
+        assertFalse(tracker.matchesClickAt(110, 110, 190, 190, 2050L, 2200L));
+    }
+
+    @Test public void oldScopeCannotRearmAfterStopOrForegroundChange() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        Object publisher = new Object();
+        long oldScope = tracker.scope();
+        tracker.publishDisplayed(publisher, oldScope, List.of(new BBox(100, 200, 100, 100)), viewport(), 1000L, false);
+        tracker.clear();
+        tracker.publishDisplayed(publisher, oldScope, List.of(new BBox(100, 200, 100, 100)), viewport(), 1100L, false);
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 1200L, 1250L));
+    }
+
+    @Test public void oldDetachedPublisherCannotClearTheCurrentOverlay() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        Object oldPublisher = new Object();
+        publish(tracker, List.of(new BBox(100, 200, 100, 100)), 1000L);
+        tracker.clearDisplayed(oldPublisher);
+        assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1200L));
+    }
+
+    @Test public void labOwnedSourceRemainsUnbillableAfterItsRecordingStops() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        tracker.publishDisplayed(tracker, tracker.scope(), List.of(new BBox(100, 200, 100, 100)), viewport(), 1000L, true);
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1200L));
+    }
+
+    @Test public void emptyOrOversizedClickTargetsCannotBorrowAContainingCensor() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(100, 200, 100, 100)), 1000L);
+        assertFalse(tracker.matchesClickAt(100, 200, 100, 200, 1100L, 1200L));
+        assertFalse(tracker.matchesClickAt(0, 0, 1000, 2000, 1100L, 1200L));
+    }
+
+    private static void publish(CensorTapTracker tracker, List<BBox> regions, long drawnAt) {
+        tracker.publishDisplayed(tracker, tracker.scope(), regions, viewport(), drawnAt, false);
+    }
+
+    private static BBox viewport() { return new BBox(0, 0, 1000, 2000); }
+}

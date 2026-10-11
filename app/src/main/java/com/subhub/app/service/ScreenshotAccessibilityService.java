@@ -360,7 +360,8 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     private PenanceManager penance;
     private final DwellInfractionTracker dwellTracker = new DwellInfractionTracker();
     private final CensorTapTracker tapTracker = CensorTapTracker.shared();
-    private long lastMatchedTapMillis;
+    private long lastMatchedTapUptimeMillis;
+    private long lastMatchedTapEventUptimeMillis;
     private long foregroundSinceMillis;
     private String lastBlockedPackage = "";
     private long lastBlockedAtMillis;
@@ -478,6 +479,11 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             if (!running || labCensorSubscription == null) return;
             // Detach usage at the session boundary; Lab must not count as normal Limits time.
             foregroundSinceMillis = System.currentTimeMillis();
+            captureEpoch.invalidate();
+            invalidateWorldCache("lab-boundary");
+            resetTextSnapshots();
+            if (overlay != null) overlay.clear();
+            if (worker != null) worker.execute(() -> { if (tracker != null) tracker.clear(); });
             reevaluateRecognition();
             reevaluateSubliminals();
             dwellTracker.clear();
@@ -2246,7 +2252,8 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         long trackCameraY = worldFrame.cameraY;
         Rect viewport = screenBounds();
         main.post(() -> {
-            if (isCurrentCapture(candidate.epoch) && overlay != null) {
+            if (isCurrentCapture(candidate.epoch) && overlay != null
+                    && isCurrentVisualDocument(candidate.visualDocumentEpoch, candidate.scrollSurfaceKey)) {
                         // A scroll callback may have arrived after the screenshot callback but
                         // before an
                         // optional quality pass yielded. The retained bitmap still belongs to the
@@ -2254,6 +2261,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                         // capture timestamp, not to the callback's first estimate of that
                         // timestamp.
                         CaptureScrollTimeline.Phase sourcePhase = resolveCapturePhase(candidate);
+                overlay.setTapSourceLabOwned(candidate.labCensorFrame);
                 overlay.updateWorld(
                         currentTracks, candidate.sourceWidth, candidate.sourceHeight,
                         sourceFrame, trackCameraX, trackCameraY,
@@ -2614,6 +2622,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                             && inferenceMotionGeneration == motionGeneration.get()
                             && candidate.fastSubmissionSequence
                                     == fastSubmissionSequence.get()) {
+                        overlay.setTapSourceLabOwned(candidate.labCensorFrame);
                         if (qualityOverlayFrame != null) {
                             overlay.updateWorld(currentTracks, width, height,
                                     qualityOverlayFrame,
@@ -2806,7 +2815,6 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                     PenanceInfraction.CENSORED_DWELL, charged, now);
         }
         if (recordNormalEffects) {
-            tapTracker.update(tracks, width, height, now);
             PopupStormManager.get().updateTrackedObjects(tracks, width, height);
         }
         DiagnosticsRepository.Snapshot diagnostics = DiagnosticsRepository.recordFrame(
@@ -2888,6 +2896,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                                 candidate.scene == null ? null : candidate.scene.spatialFrame,
                                 publishedAt, cachedRenderRegions, eligiblePresentationRegions)
                         : eligiblePresentationRegions;
+                overlay.setTapSourceLabOwned(candidate.labCensorFrame);
                 overlay.updateWorldWithCache(
                         renderTracks, regionsForView, width, height, overlayFrame,
                         alignment.scrollX, alignment.scrollY,
@@ -3172,7 +3181,6 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             PenanceChargeNotifier.show(this, penance,
                     PenanceInfraction.CENSORED_DWELL, charged, now);
         }
-        tapTracker.update(tracks, width, height, now);
         PopupStormManager.get().updateTrackedObjects(tracks, width, height);
     }
 
@@ -3442,6 +3450,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     }
 
     private void invalidateWorldCache(String reason) {
+        tapTracker.clear();
         main.post(() -> { if (overlay != null) overlay.clearPersonCoverage(); });
         int removed;
         long document;
@@ -3784,9 +3793,6 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                     -dx, -dy, motionGeneration.get());
         }
         offsetVisualGeometryHistory(dx, dy);
-        android.util.DisplayMetrics tapMetrics = getResources().getDisplayMetrics();
-        tapTracker.offsetContent(dx, dy, tapMetrics.widthPixels, tapMetrics.heightPixels,
-                System.currentTimeMillis());
         if (!usesContinuousMotionInference(detectorConfig)) discardPendingInference();
         dwellTracker.onScroll();
         textRefreshRequested.set(true);
@@ -4570,6 +4576,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             long expectedMotionGeneration,
             long expectedSceneGeneration,
             long expectedContentGeneration) {
+        long sourceTapScope = tapTracker.scope();
         main.post(() -> {
             if (!isCurrentCapture(epoch) || overlay == null) return;
             if ((expectedMotionGeneration >= 0L
@@ -4595,6 +4602,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             }
             lastPublishedTextFingerprint = fingerprint;
             Rect viewport = screenBounds();
+            overlay.setTapSource(CensorLabCensorSession.isActive(), sourceTapScope);
             overlay.updateWorldText(detections, width, height,
                     current.scrollX, current.scrollY,
                     viewport.width(), viewport.height());
@@ -5574,24 +5582,31 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     }
 
     private void recordCensoredTap(AccessibilityEvent event, String packageName) {
-        if ((!recognitionActive && !ScreenCaptureService.isRunning())
-                || !packageName.equals(foregroundPackage) || penance == null) return;
-        long now = System.currentTimeMillis();
-        if (now - lastMatchedTapMillis < 500L) return;
-        android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
-        boolean matched = matchesTapSource(event.getSource(), metrics, now);
-        for (int index = 0; !matched && index < event.getRecordCount(); index++) {
-            matched = matchesTapSource(event.getRecord(index).getSource(), metrics, now);
-        }
-        if (matched) {
-            chargeCensoredTap(now);
+        if (event == null || event.getEventType() != AccessibilityEvent.TYPE_VIEW_CLICKED
+                || (!recognitionActive && !ScreenCaptureService.isRunning())
+                || packageName.isEmpty() || !packageName.equals(foregroundPackage)
+                || penance == null || CensorLabCensorSession.isActive()
+                || ControllerPinManager.isDomModeActive()) return;
+        long nowUptime = SystemClock.uptimeMillis();
+        long eventUptime = event.getEventTime();
+        if (eventUptime <= lastMatchedTapEventUptimeMillis
+                || (lastMatchedTapUptimeMillis > 0L
+                && nowUptime - lastMatchedTapUptimeMillis < 500L)) return;
+        int activeWindow = activeApplicationWindowId.get();
+        if (activeWindow >= 0 && event.getWindowId() != activeWindow) return;
+        if (matchesTapSource(event.getSource(), packageName, eventUptime, nowUptime)) {
+            chargeCensoredTap(System.currentTimeMillis(), eventUptime, nowUptime);
         }
     }
 
-    private void chargeCensoredTap(long nowMillis) {
+    private void chargeCensoredTap(long nowMillis, long eventUptime, long nowUptime) {
         if (CensorLabCensorSession.isActive()
-                || penance == null || nowMillis - lastMatchedTapMillis < 500L) return;
-        lastMatchedTapMillis = nowMillis;
+                || ControllerPinManager.isDomModeActive() || penance == null
+                || eventUptime <= lastMatchedTapEventUptimeMillis
+                || (lastMatchedTapUptimeMillis > 0L
+                && nowUptime - lastMatchedTapUptimeMillis < 500L)) return;
+        lastMatchedTapUptimeMillis = nowUptime;
+        lastMatchedTapEventUptimeMillis = eventUptime;
         int charged = penance.recordInfraction(PenanceInfraction.CENSORED_TAP, 1, nowMillis);
         PenanceChargeNotifier.show(this, penance,
                 PenanceInfraction.CENSORED_TAP, charged, nowMillis);
@@ -5599,30 +5614,20 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
 
     private boolean matchesTapSource(
             AccessibilityNodeInfo source,
-            android.util.DisplayMetrics metrics,
-            long nowMillis) {
+            String packageName,
+            long eventUptime,
+            long nowUptime) {
         if (source == null) return false;
-        AccessibilityNodeInfo node = source;
         Rect bounds = new Rect();
         try {
-            // A few custom views put the event source on an empty virtual child. Only in that
-            // invalid-bounds case, try its immediate parents; valid unrelated child targets are
-            // never broadened to a whole post, which keeps Like/Reply taps from false charging.
-            for (int depth = 0; node != null && depth < 3; depth++) {
-                bounds.setEmpty();
-                node.getBoundsInScreen(bounds);
-                if (!bounds.isEmpty()) {
-                    return tapTracker.matchesClick(
-                            bounds.left, bounds.top, bounds.right, bounds.bottom,
-                            metrics.widthPixels, metrics.heightPixels, nowMillis);
-                }
-                AccessibilityNodeInfo parent = node.getParent();
-                if (node != source) node.recycle();
-                node = parent;
-            }
-            return false;
+            if (!source.isVisibleToUser() || source.getPackageName() == null
+                    || !packageName.contentEquals(source.getPackageName())) return false;
+            source.getBoundsInScreen(bounds);
+            // Source bounds contain no finger coordinates. Never substitute an ancestor or a
+            // companion record when this clicked target is empty or only partly censored.
+            return tapTracker.matchesClickAt(bounds.left, bounds.top, bounds.right, bounds.bottom,
+                    eventUptime, nowUptime);
         } finally {
-            if (node != null && node != source) node.recycle();
             source.recycle();
         }
     }
