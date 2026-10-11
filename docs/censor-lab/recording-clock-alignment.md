@@ -7,6 +7,12 @@ valid size/count, and increasing timestamps. Compare the metadata count to every
 before matching indexes. Keep elapsed, uptime and wall clocks distinct and report clock-fit spread
 and nearest-frame error. An accepted nearest timestamp does not prove identical compositor content.
 
+Censor Lab event sequence IDs come from a process-wide counter and need not restart at one for
+each recording. Validate ordering, uniqueness and continuity from the observed first ID, compare
+raw and parsed record counts with the manifest, and retain the reported drop count. A later
+session starting above one is not missing data; gaps, duplicates or reordering still require an
+explicit incomplete-evidence result rather than silently renumbering or discarding records.
+
 Accessibility screenshot timestamps are not automatically pixel timestamps. In Android15,
 window results are stamped on client receipt in [AccessibilityInteractionClient](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/core/java/android/view/accessibility/AccessibilityInteractionClient.java#L1354),
 and display results on server completion. Keep request, reported, callback and verified pixel time
