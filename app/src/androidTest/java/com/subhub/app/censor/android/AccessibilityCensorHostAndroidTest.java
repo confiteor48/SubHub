@@ -250,6 +250,36 @@ public final class AccessibilityCensorHostAndroidTest {
         }
     }
 
+    @Test public void atomicAndroidPairQualifiesHeaderAndBodyBeforeFirstFastAndKeepsOriginalSampling() throws Exception {
+        try (Harness h = new Harness()) {
+            h.mixedEvidence = true; h.blockInference = true;
+            h.holdSecondInference = true; h.failSecondInference = true;
+            h.start(10, config(2, .3f)); Call first = h.next(); Bitmap evidence = first.deliver();
+            assertTrue(h.inferenceEntered.await(5, TimeUnit.SECONDS));
+            Call second = h.next(); Bitmap later = second.deliver(); h.next(); // Fence B adoption.
+            SceneEngine.MotionPair pair = new SceneEngine.MotionPair(Arrays.asList(
+                    new SceneEngine.Motion(first.request.epoch, first.request.identity, second.request.identity,
+                            AccessibilityCensorHost.VISUAL_PARTITION, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE,
+                            new SceneEngine.Region(0, 0, 64, 16), 0, 0),
+                    new SceneEngine.Motion(first.request.epoch, first.request.identity, second.request.identity,
+                            AccessibilityCensorHost.VISUAL_PARTITION, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE,
+                            new SceneEngine.Region(0, 50, 64, 128), 0, -32)));
+            assertTrue(h.host.motion(pair)); assertEquals(0, h.acceptedFast.get());
+            assertNull(h.host.acquireRenderView());
+            h.inferenceRelease.countDown(); assertTrue(h.secondInferenceEntered.await(5, TimeUnit.SECONDS));
+            h.awaitAtomicMixedEvidence(first.request.identity, second.request.identity);
+            try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
+                assertEquals(first.request.identity, view.snapshot.destination.sequence);
+                assertSame(evidence, view.sourcePixels(first.request.identity).bitmap);
+                assertNull("B geometry is not B sampling", view.sourcePixels(second.request.identity));
+                assertEquals(1, h.acceptedFast.get()); assertEquals(1, h.secondInferenceRelease.getCount());
+            }
+            h.secondInferenceRelease.countDown(); awaitRecycled(later);
+            assertFalse(evidence.isRecycled());
+            h.awaitAtomicMixedEvidence(first.request.identity, second.request.identity);
+        }
+    }
+
     @Test public void partialAndroidBasisHoldsBothHeaderAndPreviouslyMovedBodyOnOriginalPixels() throws Exception {
         try (Harness h = new Harness()) {
             h.mixedEvidence = true;
@@ -533,6 +563,26 @@ public final class AccessibilityCensorHostAndroidTest {
                 Thread.sleep(10);
             }
             fail("Android partial-support hold lost the header or rolled the moved body back");
+        }
+        void awaitAtomicMixedEvidence(long evidence, long geometry) throws InterruptedException {
+            long deadline = SystemClock.uptimeMillis() + 5000;
+            while (SystemClock.uptimeMillis() < deadline) {
+                try (CensorEngine<PixelFrame>.RenderView view = host.acquireRenderView()) {
+                    int count = 0; boolean header = false, body = false, qualified = true;
+                    if (view != null) for (SceneEngine.Group group : view.snapshot.groups) {
+                        for (SceneEngine.Mask mask : group.members) {
+                            count++;
+                            qualified &= mask.evidenceSource.sequence == evidence && mask.geometrySource.sequence == geometry
+                                    && !mask.estimatedMotion && !mask.heldGeometry;
+                            header |= mask.evidenceRegion.top == 5 && mask.displayRegion.top == 5;
+                            body |= mask.evidenceRegion.top == 50 && mask.displayRegion.top == 18;
+                        }
+                    }
+                    if (count == 2 && qualified && header && body && acceptedFast.get() == 1) return;
+                }
+                Thread.sleep(10);
+            }
+            fail("Atomic Android source pair did not qualify both actual-partition members together");
         }
         void failUndelivered() { for (Call call : calls) call.fail(); }
         @Override public void close() throws Exception {

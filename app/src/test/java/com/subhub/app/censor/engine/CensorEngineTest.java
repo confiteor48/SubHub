@@ -701,6 +701,55 @@ public class CensorEngineTest {
         held.close(); assertEquals(1, first.closes); assertEquals(1, fresh.closes); assertEquals(1, h.drained);
     }
 
+    @Test public void anAtomicPairMapsBothMembersBeforeTheNextInferenceWithoutAHalfPublishedBasis() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel evidence = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fire(334); Pixel later = h.deliver(1, 2);
+        long epoch = h.engine.currentEpoch();
+        SceneEngine.MotionPair pair = new SceneEngine.MotionPair(Arrays.asList(
+                new SceneEngine.Motion(epoch, 1, 2, 1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE,
+                        new SceneEngine.Region(0, 0, 1000, 80), 0, 0),
+                new SceneEngine.Motion(epoch, 1, 2, 1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE,
+                        new SceneEngine.Region(0, 500, 1000, 2400), 0, -400)));
+        assertTrue(h.engine.motion(pair)); assertNull(h.engine.acquireRenderView());
+        h.fast.succeed(0, new SceneEngine.Observation("HEADER", 1, 0, new SceneEngine.Region(100, 50, 200, 70), .9f), face(500));
+        h.fastExecutor.runOne(); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(2, masks(view.snapshot).size()); assertEquals(1, view.snapshot.destination.sequence);
+            for (SceneEngine.Mask mask : masks(view.snapshot)) {
+                assertEquals(2, mask.geometrySource.sequence); assertEquals(1, mask.evidenceSource.sequence);
+                assertFalse(mask.heldGeometry); assertFalse(mask.estimatedMotion);
+                assertEquals("HEADER".equals(mask.category) ? 50 : 100, mask.displayRegion.top, 0);
+            }
+            assertSame(evidence, view.sourcePixels(1)); assertNull(view.sourcePixels(2));
+        }
+        assertEquals(1, h.accepted.size()); assertEquals(1, h.engine.activeCount(FAST));
+        assertFalse(evidence.closed); assertFalse(later.closed);
+        h.engine.close(); assertFalse(later.closed); h.fast.calls.get(1).completion.cancelled();
+        assertEquals(1, evidence.closes); assertEquals(1, later.closes); assertEquals(1, h.drained);
+    }
+
+    @Test public void aRejectedAtomicPairRollsBackItsBasisPinAndCannotConsumeTheValidPair() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel evidence = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne(); long epoch = h.engine.currentEpoch();
+        SceneEngine.Snapshot prior;
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { prior = view.snapshot; }
+        int presentations = h.presentations;
+        assertFalse(h.engine.motion(new SceneEngine.MotionPair(Arrays.asList(
+                new SceneEngine.Motion(epoch, 1, 2, 1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE,
+                        new SceneEngine.Region(0, 0, 1000, 80), 0, 0),
+                new SceneEngine.Motion(epoch, 1, 2, 1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE,
+                        new SceneEngine.Region(0, 500, 1000, 2400), 0, -500)))));
+        assertEquals(0, h.engine.renderBasisCount()); assertEquals(epoch, h.engine.currentEpoch());
+        assertEquals(presentations, h.presentations);
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertSame(prior, view.snapshot); }
+        assertTrue(h.engine.motion(motion(epoch, 1, 2, -400))); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(100, masks(view.snapshot).get(0).displayRegion.top, 0); assertSame(evidence, view.sourcePixels(1));
+        }
+        h.engine.close(); h.fast.calls.get(1).completion.cancelled(); assertEquals(1, h.drained);
+    }
+
     @Test public void aMapBeforeTheFirstFastResultDoesNotDelayOrDoubleRebaseFirstCoverage() {
         Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
         h.fire(334); h.deliver(1, 2);

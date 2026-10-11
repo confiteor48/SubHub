@@ -2,6 +2,7 @@ package com.subhub.app.censor.engine;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -134,6 +135,52 @@ public final class SceneEngine {
             this.dx = dx;
             this.dy = dy;
         }
+    }
+
+    /**
+     * One atomic source-pair result. Every piece shares its actual source/epoch/partition and
+     * revision. Outside those supports is UNKNOWN, not zero motion. Admission bounds all pieces
+     * and rejects overlapping source or destination domains before consuming any of them.
+     */
+    public static final class MotionPair {
+        /** Hard result-construction ceiling; scene admission may enforce a smaller total budget. */
+        public static final int MAXIMUM_PIECES = 64;
+        public final long epoch, from, to, partition, revision;
+        public final MotionAuthority authority;
+        public final List<Motion> pieces;
+
+        public MotionPair(List<Motion> pieces) {
+            Objects.requireNonNull(pieces);
+            int count = pieces.size();
+            if (count < 1 || count > MAXIMUM_PIECES) throw new IllegalArgumentException("motion pair size");
+            List<Motion> copied = new ArrayList<>(count);
+            // A collection's toArray/iterator could allocate or traverse far beyond that count.
+            for (int i = 0; i < count; i++) copied.add(Objects.requireNonNull(pieces.get(i)));
+            if (pieces.size() != count) throw new IllegalArgumentException("motion pair changed during construction");
+            Motion first = Objects.requireNonNull(copied.get(0));
+            epoch = first.epoch; from = first.from; to = first.to;
+            partition = first.partition; revision = first.revision; authority = first.authority;
+            if (authority == MotionAuthority.EVENT_ESTIMATE && copied.size() != 1) {
+                throw new IllegalArgumentException("event estimate must remain a singleton");
+            }
+            for (Motion piece : copied) {
+                Objects.requireNonNull(piece);
+                if (piece.epoch != epoch || piece.from != from || piece.to != to || piece.partition != partition
+                        || piece.revision != revision || piece.authority != authority) {
+                    throw new IllegalArgumentException("mixed motion pair identity");
+                }
+            }
+            // Semantic duplicates are independent of producer list order and signed zero.
+            copied.sort(Comparator.comparingDouble((Motion value) -> canonical(value.support.left))
+                    .thenComparingDouble(value -> canonical(value.support.top))
+                    .thenComparingDouble(value -> canonical(value.support.right))
+                    .thenComparingDouble(value -> canonical(value.support.bottom))
+                    .thenComparingDouble(value -> canonical(value.dx))
+                    .thenComparingDouble(value -> canonical(value.dy)));
+            this.pieces = Collections.unmodifiableList(copied);
+        }
+
+        private static double canonical(double value) { return value == 0 ? 0 : value; }
     }
 
     /** Detector or classified text evidence. No mutable legacy Detection is stored. */
@@ -338,6 +385,13 @@ public final class SceneEngine {
         }
     }
 
+    /** One aggregate budget for a whole result, including both endpoint domains and comparisons. */
+    private final class MotionBudget {
+        long states, checks;
+        boolean state() { return ++states <= policy.maximumMotionPathStates; }
+        boolean check() { return ++checks <= policy.maximumMotionEdgeChecks; }
+    }
+
     private static final class Track {
         final long identity;
         final String category;
@@ -383,7 +437,7 @@ public final class SceneEngine {
     private final Policy policy;
     private final LinkedHashMap<Long, Source> sources = new LinkedHashMap<>();
     private final Map<Long, Integer> pins = new HashMap<>();
-    private final List<Motion> motions = new ArrayList<>();
+    private final List<MotionPair> motions = new ArrayList<>();
     private final List<Track> tracks = new ArrayList<>();
     private final List<Batch> qualityHistory = new ArrayList<>();
     private final Set<String> delivered = new HashSet<>();
@@ -462,49 +516,85 @@ public final class SceneEngine {
         return admitMotion(motion) == MotionAdmission.ADMITTED;
     }
 
-    /** No geometry/identity derived from conflicting authority survives until an explicit reset. */
+    public synchronized boolean motion(MotionPair pair) {
+        return admitMotion(pair) == MotionAdmission.ADMITTED;
+    }
+
     public synchronized MotionAdmission admitMotion(Motion motion) {
-        Objects.requireNonNull(motion);
-        Source from = sources.get(motion.from);
-        Source to = sources.get(motion.to);
-        if (motionConflict || motion.epoch != epoch || from == null || to == null || from.geometry != to.geometry
+        return admitMotion(new MotionPair(Collections.singletonList(Objects.requireNonNull(motion))));
+    }
+
+    /** No geometry/identity derived from conflicting authority survives until an explicit reset. */
+    public synchronized MotionAdmission admitMotion(MotionPair pair) {
+        Objects.requireNonNull(pair);
+        Source from = sources.get(pair.from);
+        Source to = sources.get(pair.to);
+        if (motionConflict || pair.epoch != epoch || from == null || to == null || from.geometry != to.geometry
                 || from.width != to.width || from.height != to.height) return MotionAdmission.INVALID;
+        int existingIndex = -1;
+        long pieces = 0;
         for (int i = 0; i < motions.size(); i++) {
-            Motion old = motions.get(i);
-            if (old.from != motion.from || old.to != motion.to || old.partition != motion.partition) continue;
-            if (old.authority == MotionAuthority.IMAGE_CORRESPONDENCE) {
-                if (motion.authority != MotionAuthority.IMAGE_CORRESPONDENCE) return MotionAdmission.INVALID;
-                if (motion.revision < old.revision) return MotionAdmission.STALE;
-                if (sameGeometry(old, motion)) {
-                    // Advance only the stale-result watermark, never geometry, evidence age or identity.
-                    if (motion.revision > old.revision) motions.set(i, motion);
-                    return MotionAdmission.DUPLICATE;
-                }
-                // A changed support alone does not contradict the measured translation. The
-                // immutable single-domain key cannot consume it; reject without destroying the
-                // valid scene. Atomic piecewise support requires a separate admission contract.
-                if (old.dx == motion.dx && old.dy == motion.dy) return MotionAdmission.INVALID;
-                // The single-edge API cannot add a disjoint second domain. Do not confuse this
-                // unsupported representation with a correction to overlapping image authority.
-                if (intersection(old.support, motion.support) == null) return MotionAdmission.INVALID;
-                return invalidateMotionAuthority();
-            }
-            if (old.authority == motion.authority && old.revision >= motion.revision) return MotionAdmission.STALE;
-            MotionAdmission checked = checkMeasuredPaths(motion);
-            if (checked != MotionAdmission.ADMITTED) return checked;
-            motions.set(i, motion);
-            revision++;
-            mergeCorrespondingTracks();
-            replayNegativeEvidence();
-            return MotionAdmission.ADMITTED;
+            MotionPair old = motions.get(i);
+            pieces += old.pieces.size();
+            if (old.from == pair.from && old.to == pair.to && old.partition == pair.partition) existingIndex = i;
         }
-        if (motions.size() >= policy.maximumCorrespondences) { capacityDrops++; return MotionAdmission.CAPACITY; }
-        MotionAdmission checked = checkMeasuredPaths(motion);
+        MotionPair old = existingIndex < 0 ? null : motions.get(existingIndex);
+        if (old != null && old.authority == MotionAuthority.IMAGE_CORRESPONDENCE) {
+            if (pair.authority != MotionAuthority.IMAGE_CORRESPONDENCE) return MotionAdmission.INVALID;
+            if (pair.revision < old.revision) return MotionAdmission.STALE;
+        } else if (old != null && old.authority == pair.authority && old.revision >= pair.revision) {
+            return MotionAdmission.STALE;
+        }
+        if (pieces - (old == null ? 0 : old.pieces.size()) + pair.pieces.size() > policy.maximumCorrespondences) {
+            return rejectedMotionCheck(MotionAdmission.CAPACITY);
+        }
+        MotionBudget budget = new MotionBudget();
+        MotionAdmission checked = checkPairDomains(pair, budget);
         if (checked != MotionAdmission.ADMITTED) return checked;
-        motions.add(motion);
+        if (old != null && old.authority == MotionAuthority.IMAGE_CORRESPONDENCE) {
+            boolean duplicate = old.pieces.size() == pair.pieces.size();
+            for (int i = 0; duplicate && i < old.pieces.size(); i++) {
+                if (!budget.check()) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+                duplicate = sameGeometry(old.pieces.get(i), pair.pieces.get(i));
+            }
+            if (duplicate) {
+                // Advance only the stale-result watermark, never geometry, evidence age or identity.
+                if (pair.revision > old.revision) motions.set(existingIndex, pair);
+                return MotionAdmission.DUPLICATE;
+            }
+            for (Motion before : old.pieces) for (Motion after : pair.pieces) {
+                if (!budget.check()) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+                if (before.dx == after.dx && before.dy == after.dy) continue;
+                if (intersection(before.support, after.support) != null
+                        || intersection(before.support.translated(before.dx, before.dy),
+                                after.support.translated(after.dx, after.dy)) != null) {
+                    return invalidateMotionAuthority();
+                }
+            }
+            // Admitted geometry is immutable. A consistent support change cannot append another
+            // domain or incrementally expose a physical result; it also cannot destroy valid state.
+            return MotionAdmission.INVALID;
+        }
+        checked = checkMeasuredPair(pair, budget);
+        if (checked != MotionAdmission.ADMITTED) return checked;
+        if (existingIndex < 0) motions.add(pair); else motions.set(existingIndex, pair);
         revision++;
         mergeCorrespondingTracks();
         replayNegativeEvidence();
+        return MotionAdmission.ADMITTED;
+    }
+
+    private MotionAdmission checkPairDomains(MotionPair pair, MotionBudget budget) {
+        for (int i = 0; i < pair.pieces.size(); i++) {
+            Motion first = pair.pieces.get(i);
+            for (int j = i + 1; j < pair.pieces.size(); j++) {
+                if (!budget.check()) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+                Motion second = pair.pieces.get(j);
+                if (intersection(first.support, second.support) != null
+                        || intersection(first.support.translated(first.dx, first.dy),
+                                second.support.translated(second.dx, second.dy)) != null) return MotionAdmission.INVALID;
+            }
+        }
         return MotionAdmission.ADMITTED;
     }
 
@@ -530,34 +620,43 @@ public final class SceneEngine {
         return right <= left || bottom <= top ? null : new Region(left, top, right, bottom);
     }
 
-    private MotionAdmission checkMeasuredPaths(Motion candidate) {
+    private MotionAdmission checkMeasuredPair(MotionPair candidate, MotionBudget budget) {
         if (candidate.authority != MotionAuthority.IMAGE_CORRESPONDENCE) return MotionAdmission.ADMITTED;
+        List<Motion> graph = new ArrayList<>();
+        for (MotionPair existing : motions) {
+            if (existing.authority == MotionAuthority.IMAGE_CORRESPONDENCE) graph.addAll(existing.pieces);
+        }
+        graph.addAll(candidate.pieces);
+        for (Motion piece : candidate.pieces) {
+            MotionAdmission checked = checkMeasuredPaths(piece.from, piece.support, piece.partition, graph, budget);
+            if (checked != MotionAdmission.ADMITTED) return checked;
+            checked = checkMeasuredPaths(piece.to, piece.support.translated(piece.dx, piece.dy),
+                    piece.partition, graph, budget);
+            if (checked != MotionAdmission.ADMITTED) return checked;
+        }
+        return MotionAdmission.ADMITTED;
+    }
+
+    private MotionAdmission checkMeasuredPaths(long origin, Region support, long partition,
+            List<Motion> graph, MotionBudget budget) {
         List<MotionPath> queue = new ArrayList<>();
-        queue.add(new MotionPath(candidate.from, candidate.support, 0, 0, 0, 0,
-                Collections.singleton(candidate.from)));
-        int edgeChecks = 0;
+        Map<Long, List<MotionPath>> reached = new HashMap<>();
+        if (!budget.state()) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+        MotionPath initial = new MotionPath(origin, support, 0, 0, 0, 0, Collections.singleton(origin));
+        queue.add(initial); reached.put(origin, new ArrayList<>(Collections.singletonList(initial)));
         for (int index = 0; index < queue.size(); index++) {
             MotionPath current = queue.get(index);
-            if (current.source == candidate.to) {
-                // This bound covers floating-point addition only, not physical matcher uncertainty.
-                if (Math.abs(current.dx - candidate.dx) > current.roundoffX + 2 * Math.ulp(candidate.dx)
-                        || Math.abs(current.dy - candidate.dy) > current.roundoffY + 2 * Math.ulp(candidate.dy)) {
-                    return invalidateMotionAuthority();
-                }
-                continue;
-            }
-            for (Motion edge : motions) {
-                if (++edgeChecks > policy.maximumMotionEdgeChecks) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
-                if (edge.partition != candidate.partition || edge.authority != MotionAuthority.IMAGE_CORRESPONDENCE) continue;
+            for (Motion edge : graph) {
+                if (!budget.check()) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+                if (edge.partition != partition) continue;
                 boolean forward = edge.from == current.source;
                 if (!forward && edge.to != current.source) continue;
                 long next = forward ? edge.to : edge.from;
-                if (current.visited.contains(next)) continue;
                 double dx = forward ? edge.dx : -edge.dx, dy = forward ? edge.dy : -edge.dy;
                 Region common;
                 try {
-                    Region support = forward ? edge.support : edge.support.translated(edge.dx, edge.dy);
-                    common = intersection(current.support, support.translated(-current.dx, -current.dy));
+                    Region edgeSupport = forward ? edge.support : edge.support.translated(edge.dx, edge.dy);
+                    common = intersection(current.support, edgeSupport.translated(-current.dx, -current.dy));
                 } catch (IllegalArgumentException unrepresentable) {
                     return rejectedMotionCheck(MotionAdmission.UNREPRESENTABLE);
                 }
@@ -569,12 +668,29 @@ public final class SceneEngine {
                         || !Double.isFinite(errorX) || !Double.isFinite(errorY)) {
                     return rejectedMotionCheck(MotionAdmission.UNREPRESENTABLE);
                 }
-                if (queue.size() >= policy.maximumMotionPathStates
-                        || current.visited.size() >= policy.maximumSources) {
+                List<MotionPath> prior = reached.get(next);
+                if (prior != null) for (MotionPath other : prior) {
+                    if (!budget.check()) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+                    if (intersection(common, other.support) == null) continue;
+                    double boundX = errorX + other.roundoffX, boundY = errorY + other.roundoffY;
+                    if (!Double.isFinite(boundX) || !Double.isFinite(boundY)) {
+                        return rejectedMotionCheck(MotionAdmission.UNREPRESENTABLE);
+                    }
+                    // Compare every reached node, including inverse convergence and a return to
+                    // origin. Numerical addition roundoff is not physical matcher uncertainty.
+                    if (Math.abs(nextX - other.dx) > boundX || Math.abs(nextY - other.dy) > boundY) {
+                        return invalidateMotionAuthority();
+                    }
+                }
+                // A cyclic derived relation was checked above; revisiting it cannot add support.
+                if (current.visited.contains(next)) continue;
+                if (current.visited.size() >= policy.maximumSources || !budget.state()) {
                     return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
                 }
                 Set<Long> visited = new HashSet<>(current.visited); visited.add(next);
-                queue.add(new MotionPath(next, common, nextX, nextY, errorX, errorY, visited));
+                MotionPath derived = new MotionPath(next, common, nextX, nextY, errorX, errorY, visited);
+                queue.add(derived);
+                reached.computeIfAbsent(next, ignored -> new ArrayList<>()).add(derived);
             }
         }
         return MotionAdmission.ADMITTED;
@@ -815,7 +931,7 @@ public final class SceneEngine {
         for (int index = 0; index < queue.size(); index++) {
             Projection current = queue.get(index);
             if (current.source == to) return current;
-            for (Motion motion : motions) {
+            for (MotionPair pair : motions) for (Motion motion : pair.pieces) {
                 if (motion.partition != partition
                         || (!estimates && motion.authority != MotionAuthority.IMAGE_CORRESPONDENCE)) continue;
                 boolean forward = motion.from == current.source;

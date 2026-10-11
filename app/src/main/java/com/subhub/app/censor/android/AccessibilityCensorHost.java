@@ -144,6 +144,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public boolean captureInFlight() { return engine.captureInFlight(); }
     public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return engine.acquireRenderView(); }
     public boolean motion(SceneEngine.Motion motion) { return engine.motion(motion); }
+    public boolean motion(SceneEngine.MotionPair pair) { return engine.motion(pair); }
     public void requestCapture() { onMain(); engine.requestCaptureAt(SystemClock.uptimeMillis()); }
     public void drawn(long revision) { engine.drawn(revision); }
 

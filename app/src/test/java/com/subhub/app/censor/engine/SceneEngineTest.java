@@ -177,11 +177,13 @@ public class SceneEngineTest {
         positions(engine.snapshot(1, 410, false));
     }
 
-    @Test public void disjointMeasuredPathsWithDifferentTranslationsAreNotAGlobalConflict() {
+    @Test public void sourceAndDestinationDisjointMeasuredPathsAreNotAGlobalConflict() {
         SceneEngine engine = engine(); register(engine, 4);
-        engine.observe(batch(source(1), FAST, face(50), face(500)));
-        SceneEngine.Region header = new SceneEngine.Region(0, 0, 1000, 200);
-        SceneEngine.Region body = new SceneEngine.Region(0, 400, 1000, 2400);
+        engine.observe(batch(source(1), FAST, new SceneEngine.Observation("HEADER", 1, 0,
+                new SceneEngine.Region(100, 50, 200, 70), .9f), face(500)));
+        // Source-disjoint alone is insufficient: the shifted body must not converge into header pixels.
+        SceneEngine.Region header = new SceneEngine.Region(0, 0, 1000, 80);
+        SceneEngine.Region body = new SceneEngine.Region(0, 500, 1000, 2400);
         assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE, header, 0, 0)));
         assertTrue(engine.motion(new SceneEngine.Motion(1, 2, 4, 1, 1, IMAGE_CORRESPONDENCE, header, 0, 0)));
         assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 3, 1, 1, IMAGE_CORRESPONDENCE, body, 0, 0)));
@@ -190,7 +192,9 @@ public class SceneEngineTest {
     }
 
     @Test public void exhaustedMotionValidationRejectsWithoutDeclaringConsistencyOrInvalidatingValidCoverage() {
-        for (int[] limits : new int[][]{{1, 64}, {64, 1}}) {
+        // One singleton now inspects both endpoint domains (4 states/6 checks). The next relation
+        // must exhaust these whole-result bounds, rather than resetting them for each direction.
+        for (int[] limits : new int[][]{{4, 64}, {64, 6}}) {
             SceneEngine engine = new SceneEngine(1,
                     new SceneEngine.Policy(16, 100, 64, 256, 500, 5000, .5, limits[0], limits[1]));
             register(engine, 3); engine.observe(batch(source(1), FAST, face(500)));
@@ -309,12 +313,12 @@ public class SceneEngineTest {
         SceneEngine engine = engine(); register(engine, 3);
         assertEquals(SceneEngine.MotionAdmission.ADMITTED, engine.admitMotion(new SceneEngine.Motion(
                 1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE, new SceneEngine.Region(-1e308, 0, -.9e308, 100), 1e308, 0)));
-        assertEquals(SceneEngine.MotionAdmission.ADMITTED, engine.admitMotion(new SceneEngine.Motion(
-                1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE, new SceneEngine.Region(0, 0, .1e308, 100), 1e308, 0)));
         engine.observe(batch(source(1), FAST, face(500)));
         SceneEngine.Snapshot prior = engine.snapshot(1, 310, false);
+        // Bidirectional provisional validation detects composition overflow before storing B-to-C,
+        // not only when a later third edge happens to inspect that already-unrepresentable route.
         assertEquals(SceneEngine.MotionAdmission.UNREPRESENTABLE, engine.admitMotion(new SceneEngine.Motion(
-                1, 1, 3, 1, 1, IMAGE_CORRESPONDENCE, new SceneEngine.Region(-1e308, 0, -.9e308, 100), 0, 0)));
+                1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE, new SceneEngine.Region(0, 0, .1e308, 100), 1e308, 0)));
         assertSame(prior, engine.ready()); assertFalse(engine.hasMotionConflict());
         positions(engine.snapshot(1, 310, false), 500);
     }

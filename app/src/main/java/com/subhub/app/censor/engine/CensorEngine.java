@@ -485,6 +485,11 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     public boolean motion(SceneEngine.Motion motion) {
+        return motion(new SceneEngine.MotionPair(Collections.singletonList(Objects.requireNonNull(motion))));
+    }
+
+    public boolean motion(SceneEngine.MotionPair motion) {
+        Objects.requireNonNull(motion);
         List<Runnable> actions = new ArrayList<>();
         boolean accepted;
         synchronized (this) {
