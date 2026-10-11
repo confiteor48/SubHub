@@ -2473,7 +2473,8 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             }
             cachedQualityCount = qualityForScene.size();
             VisualIdentityReconciler.Result identity = VisualIdentityReconciler.reconcile(
-                    visualDetections, qualityForScene, tracker.activeTracks());
+                    visualDetections, qualityForScene,
+                    identityTracksForSource(width, height, requestedScrollX, requestedScrollY));
             visualDetections = identity.detections();
             identityRealtimeLinked = identity.realtimeLinked();
             identityQualityLinked = identity.qualityLinked();
@@ -2499,7 +2500,8 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                     || inferenceMotionGeneration != motionGeneration.get()) return;
             List<Detection> qualityCoverage = markQualityCoverage(visualDetections);
             VisualIdentityReconciler.Result identity = VisualIdentityReconciler.reconcile(
-                    Collections.emptyList(), qualityCoverage, tracker.activeTracks());
+                    Collections.emptyList(), qualityCoverage,
+                    identityTracksForSource(width, height, requestedScrollX, requestedScrollY));
             qualityCoverage = identity.detections();
             int reconciledCoverageCount = qualityCoverage.size();
             boolean batchAlreadyCommitted = qualityBatchCommittedGeneration.get()
@@ -3927,6 +3929,19 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         cachedAccessibilityText = snapshot == null ? TextDetectionSnapshot.EMPTY : snapshot;
         accessibilityTextInvalidatedAtUptime = 0L;
         main.removeCallbacks(staleAccessibilityTextExpiry);
+    }
+
+    /** Capture geometry and its consumed camera together; pending motion is not applied here. */
+    private List<TrackedObject> identityTracksForSource(
+            int width, int height, long sourceCameraX, long sourceCameraY) {
+        ObjectTracker currentTracker = tracker;
+        if (currentTracker == null) return Collections.emptyList();
+        Rect viewport = screenBounds();
+        synchronized (currentTracker) {
+            return TrackerPhaseProjection.forSource(currentTracker.activeTracks(),
+                    trackerScrollX, trackerScrollY, sourceCameraX, sourceCameraY,
+                    width, height, viewport.width(), viewport.height());
+        }
     }
 
     private ScrollAlignment consumeTrackerMotion(int width, int height, SpatialRegionCache.Frame frame,

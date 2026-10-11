@@ -221,6 +221,52 @@ public final class SceneMotionIntegrationAndroidTest {
         assertEquals(before.get(0).getBox(), after.get(0).getBox());
     }
 
+    @Test public void sourceIdentitySnapshotDoesNotConsumeMotionOrSwapFastScrollNeighbors() throws Exception {
+        for (int scroll : new int[] {400, -400}) {
+            ScreenshotAccessibilityService service = new ScreenshotAccessibilityService();
+            Method attach = android.content.ContextWrapper.class.getDeclaredMethod(
+                    "attachBaseContext", android.content.Context.class);
+            attach.setAccessible(true);
+            attach.invoke(service, androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+                    .getTargetContext());
+            Method bounds = ScreenshotAccessibilityService.class.getDeclaredMethod("screenBounds");
+            bounds.setAccessible(true);
+            android.graphics.Rect viewport = (android.graphics.Rect) bounds.invoke(service);
+            assertTrue(viewport.height() > 1600);
+            ObjectTracker tracker = new ObjectTracker(DetectorConfig.builder().motionPrediction(false).build());
+            tracker.update(List.of(phaseFace(500), phaseFace(900)), 1_000_000_000L);
+            tracker.update(List.of(phaseFace(500), phaseFace(900)), 1_100_000_000L);
+            Field trackerField = ScreenshotAccessibilityService.class.getDeclaredField("tracker");
+            trackerField.setAccessible(true);
+            trackerField.set(service, tracker);
+            ((AtomicLong) field(service, "cumulativeScrollY")).set(scroll);
+            ((AtomicLong) field(service, "pendingTrackerOffsetY")).set(-scroll);
+            Method snapshot = ScreenshotAccessibilityService.class.getDeclaredMethod(
+                    "identityTracksForSource", int.class, int.class, long.class, long.class);
+            snapshot.setAccessible(true);
+            @SuppressWarnings("unchecked") List<TrackedObject> sourceTracks = (List<TrackedObject>)
+                    snapshot.invoke(service, viewport.width(), viewport.height(), 0L, (long) scroll);
+            List<Detection> observations = List.of(phaseFace(500 - scroll), phaseFace(900 - scroll));
+            com.subhub.app.detection.VisualIdentityReconciler.Result identity =
+                    com.subhub.app.detection.VisualIdentityReconciler.reconcile(observations,
+                            Collections.emptyList(), sourceTracks);
+            assertEquals(1, identity.detections().get(0).getTrackId());
+            assertEquals(2, identity.detections().get(1).getTrackId());
+            assertEquals(-scroll, ((AtomicLong) field(service, "pendingTrackerOffsetY")).get());
+            assertEquals(scroll, ((AtomicLong) field(service, "cumulativeScrollY")).get());
+            assertEquals(500, tracker.activeTracks().get(0).getRawBox().getY());
+            tracker.offsetActiveTracks(0, -scroll, viewport.width(), viewport.height());
+            List<TrackedObject> updated = tracker.update(identity.detections(), 1_430_000_000L);
+            assertEquals(2, updated.size());
+            assertEquals(0, updated.get(0).getFramesMissing());
+            assertEquals(0, updated.get(1).getFramesMissing());
+        }
+    }
+
+    private static Detection phaseFace(int y) {
+        return new Detection("FACE_FEMALE", "face", .99f, new BBox(160, y, 277, 255), true, false);
+    }
+
     private static Detection face(int x) {
         return new Detection("FACE_FEMALE", "face", .99f, new BBox(x, 80, 20, 20), true, false);
     }

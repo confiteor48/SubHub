@@ -89,6 +89,13 @@ public final class TrackedObject {
     /** Immutable-by-convention renderer handoff detached from subsequent tracker mutation. */
     public TrackedObject snapshot() { return new TrackedObject(this); }
 
+    /** Detached identity evidence in another viewport; never moves the owned tracker. */
+    public TrackedObject snapshotOffsetToViewport(int dx, int dy, int width, int height) {
+        TrackedObject projected = new TrackedObject(this);
+        projected.offset(dx, dy, width, height);
+        return projected;
+    }
+
     /**
      * Preserves this stable identity while presenting geometry from a freshly reacquired track.
      * Used only by render arbitration; tracker state and detection bookkeeping remain untouched.
@@ -158,10 +165,10 @@ public final class TrackedObject {
     }
 
     private static BBox shifted(BBox value, int dx, int dy, int width, int height) {
-        int left = Math.max(0, value.getX() + dx);
-        int top = Math.max(0, value.getY() + dy);
-        int right = Math.min(width, value.getRight() + dx);
-        int bottom = Math.min(height, value.getBottom() + dy);
+        int left = (int) Math.max(0L, Math.min(width, (long) value.getX() + dx));
+        int top = (int) Math.max(0L, Math.min(height, (long) value.getY() + dy));
+        int right = (int) Math.max(0L, Math.min(width, (long) value.getRight() + dx));
+        int bottom = (int) Math.max(0L, Math.min(height, (long) value.getBottom() + dy));
         return new BBox(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
     }
 
