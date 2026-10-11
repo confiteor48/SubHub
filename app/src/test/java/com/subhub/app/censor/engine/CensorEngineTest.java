@@ -444,6 +444,31 @@ public class CensorEngineTest {
         view.close(); assertEquals(1, h.drained);
     }
 
+    @Test public void requestFreezesGeometryAndPlatformCleanupFaultCannotPretendDrain() {
+        Harness h = new Harness(); h.start(); h.fire(0);
+        assertEquals(42, h.captures.get(0).request.geometry);
+        h.captures.get(0).callback.resourceFailure();
+        assertEquals(1, h.engine.resourceFailures()); assertFalse(h.engine.captureInFlight());
+        assertEquals(Long.MAX_VALUE, h.timer.nextAt()); h.engine.close(); assertEquals(0, h.drained);
+    }
+
+    @Test public void workerCleanupFaultCannotBecomeSuccessfulCoverageOrDrain() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel pixel = h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fast.calls.get(0).completion.resourceFailure();
+        assertEquals(1, pixel.closes); assertEquals(1, h.engine.resourceFailures());
+        assertEquals(Long.MAX_VALUE, h.timer.nextAt()); h.ui.runAll(); assertNull(h.engine.acquireRenderView());
+        h.engine.close(); assertEquals(0, h.drained);
+    }
+
+    @Test public void cleanupFaultDoesNotLaunchPendingWorkOnAnotherLane() {
+        Harness h = new Harness(true, false, false, 8, 0, 16); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.qualityExecutor.runOne();
+        h.fire(334); Pixel pending = h.deliver(1, 2); h.quality.calls.get(0).completion.resourceFailure();
+        assertEquals(1, h.engine.resourceFailures()); assertEquals(0, h.engine.activeCount(FAST));
+        assertEquals(0, h.engine.pendingCount(FAST)); assertEquals(0, h.fastExecutor.size());
+        h.engine.close(); assertEquals(1, pending.closes); assertEquals(0, h.drained);
+    }
+
     private static void awaitRelease(CountDownLatch release) {
         try { assertTrue("disposal release timed out", release.await(5, TimeUnit.SECONDS)); }
         catch (InterruptedException interrupted) {
@@ -518,6 +543,7 @@ public class CensorEngineTest {
                 }
                 @Override public void failure() { terminal = true; completion.failure(); }
                 @Override public void cancelled() { terminal = true; completion.cancelled(); }
+                @Override public void resourceFailure() { terminal = true; completion.resourceFailure(); }
             };
         }
     }

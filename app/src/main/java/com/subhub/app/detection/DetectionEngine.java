@@ -22,6 +22,8 @@ import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.IdentityHashMap;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -29,6 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OnnxValue;
@@ -78,6 +81,7 @@ public final class DetectionEngine implements AutoCloseable {
     private long lastRuntimeMs;
     private long lastPostprocessMs;
     private volatile boolean lastRunCancelled;
+    private boolean lastRunComplete;
     private volatile long lastCancellationMs;
     private final AtomicReference<InferenceRun> activeInference = new AtomicReference<>();
 
@@ -240,6 +244,67 @@ public final class DetectionEngine implements AutoCloseable {
                 frame, sourceWidth, sourceHeight, size, size, cancellationProbe, false);
     }
 
+    public interface RunCancellation { boolean cancel(); }
+
+    public static final class ResourceCleanupFailure extends RuntimeException {
+        ResourceCleanupFailure(RuntimeException cause) { super("Native inference resource cleanup failed", cause); }
+    }
+
+    /** Try-with-resources can suppress a cleanup fault beneath the original decode exception. */
+    public static boolean resourceCleanupFailed(Throwable failure) {
+        return resourceCleanupFailed(failure, Collections.newSetFromMap(new IdentityHashMap<>()));
+    }
+
+    private static boolean resourceCleanupFailed(Throwable failure, Set<Throwable> visited) {
+        if (failure == null || visited.contains(failure)) return false;
+        if (failure instanceof ResourceCleanupFailure) return true;
+        if (visited.size() >= 32) return true; // Unsupported exception depth cannot prove clean resources.
+        visited.add(failure);
+        if (resourceCleanupFailed(failure.getCause(), visited)) return true;
+        for (Throwable suppressed : failure.getSuppressed()) if (resourceCleanupFailed(suppressed, visited)) return true;
+        return false;
+    }
+
+    /** Immutable outcome of one controlled call, including whether its crop was actually inspected. */
+    public static final class ControlledResult {
+        public final List<Detection> detections;
+        public final boolean complete;
+        public final boolean cancelled;
+        public final long preprocessMillis;
+        public final long runtimeMillis;
+        public final long postprocessMillis;
+
+        private ControlledResult(List<Detection> detections, boolean complete, boolean cancelled,
+                long preprocessMillis, long runtimeMillis, long postprocessMillis) {
+            this.detections = Collections.unmodifiableList(new java.util.ArrayList<>(detections));
+            this.complete = complete;
+            this.cancelled = cancelled;
+            this.preprocessMillis = complete ? preprocessMillis : 0;
+            this.runtimeMillis = complete ? runtimeMillis : 0;
+            this.postprocessMillis = complete ? postprocessMillis : 0;
+        }
+    }
+
+    /**
+     * Replacement-worker entry point. Bind cancellation to this run, never to the lane's current
+     * session. A handle remains safe after its own completion/close and cannot cancel another run.
+     */
+    public synchronized ControlledResult detectControlled(Bitmap frame, int sourceWidth, int sourceHeight,
+            int inputWidth, int inputHeight, BooleanSupplier cancellationProbe,
+            Consumer<RunCancellation> cancellationBinding) throws OrtException {
+        java.util.Objects.requireNonNull(cancellationProbe);
+        java.util.Objects.requireNonNull(cancellationBinding);
+        if (inputWidth <= 0 || inputHeight <= 0) throw new IllegalArgumentException("input dimensions");
+        boolean rectangular = inputWidth != inputHeight;
+        if (rectangular && !"CPU".equals(activeProvider)) {
+            throw new IllegalStateException("Rectangular inference requires the CPU provider");
+        }
+        List<Detection> detected = detectInternal(frame, sourceWidth, sourceHeight, inputWidth, inputHeight,
+                cancellationProbe, rectangular, cancellationBinding);
+        return new ControlledResult(detected, lastRunComplete, lastRunCancelled,
+                lastPreprocessMs, lastRuntimeMs, lastPostprocessMs);
+    }
+
     /**
      * Runs an opt-in rectangular input through the CPU execution provider.
      *
@@ -286,19 +351,28 @@ public final class DetectionEngine implements AutoCloseable {
             int inputHeight,
             BooleanSupplier cancellationProbe,
             boolean rectangularInput) throws OrtException {
+        return detectInternal(frame, sourceWidth, sourceHeight, inputWidth, inputHeight,
+                cancellationProbe, rectangularInput, null);
+    }
+
+    private List<Detection> detectInternal(Bitmap frame, int sourceWidth, int sourceHeight,
+            int inputWidth, int inputHeight, BooleanSupplier cancellationProbe, boolean rectangularInput,
+            Consumer<RunCancellation> cancellationBinding) throws OrtException {
+        lastRunComplete = false;
+        lastRunCancelled = false;
         if (session == null || frame == null || frame.getWidth() <= 0 || frame.getHeight() <= 0) {
             return Collections.emptyList();
         }
         sourceWidth = Math.max(1, sourceWidth);
         sourceHeight = Math.max(1, sourceHeight);
-        InferenceRun inferenceRun = latencyPriority ? null : new InferenceRun();
-        lastRunCancelled = false;
+        InferenceRun inferenceRun = latencyPriority && cancellationBinding == null ? null : new InferenceRun();
         if (inferenceRun != null && !activeInference.compareAndSet(null, inferenceRun)) {
             inferenceRun.close();
             throw new IllegalStateException("Quality inference is already active");
         }
         long started = SystemClock.elapsedRealtimeNanos();
         try {
+            if (cancellationBinding != null) cancellationBinding.accept(inferenceRun::cancel);
             if (shouldCancel(inferenceRun, cancellationProbe)) {
                 return recordCancelledRun(started);
             }
@@ -370,7 +444,8 @@ public final class DetectionEngine implements AutoCloseable {
                         + " durationMs=" + nanosToMillis(nativeEnded - runtimeStarted)
                         + " uptimeNanos=" + nativeEnded);
             }
-            try (OrtSession.Result result = nativeResult) {
+            try (OutputLease lease = new OutputLease(nativeResult, cancellationBinding != null)) {
+                OrtSession.Result result = lease.result;
                 long runtimeFinished = SystemClock.elapsedRealtimeNanos();
                 if (inferenceRun != null && inferenceRun.isCancellationRequested()) {
                     return recordCancelledRun(started);
@@ -392,6 +467,10 @@ public final class DetectionEngine implements AutoCloseable {
                     return Collections.emptyList();
                 }
                 FloatBuffer outputBuffer = output.getFloatBuffer();
+                if (cancellationBinding != null && !TensorInspection.complete(outputBuffer, shape[1], shape[2])) {
+                    Log.e(TAG, "Controlled inference returned an incomplete or nonfinite tensor");
+                    return Collections.emptyList();
+                }
                 List<Detection> detections = rectangularInput
                         ? postProcessor.decode(
                                 outputBuffer,
@@ -422,6 +501,7 @@ public final class DetectionEngine implements AutoCloseable {
                 lastRuntimeMs = nanosToMillis(runtimeFinished - runtimeStarted);
                 lastPostprocessMs = nanosToMillis(finished - runtimeFinished);
                 lastInferenceMs = nanosToMillis(finished - started);
+                lastRunComplete = true;
                 performanceHints.report(finished - started);
                 return detections;
             }
@@ -705,6 +785,19 @@ public final class DetectionEngine implements AutoCloseable {
         }
     }
 
+    private static final class OutputLease implements AutoCloseable {
+        final OrtSession.Result result;
+        final boolean controlled;
+        OutputLease(OrtSession.Result result, boolean controlled) { this.result = result; this.controlled = controlled; }
+        @Override public void close() {
+            try { result.close(); }
+            catch (RuntimeException cleanupFailure) {
+                if (controlled) throw new ResourceCleanupFailure(cleanupFailure);
+                throw cleanupFailure;
+            }
+        }
+    }
+
     private static final class InferenceRun implements AutoCloseable {
         final OrtSession.RunOptions options;
         private final AtomicBoolean cancellationRequested = new AtomicBoolean();
@@ -744,7 +837,8 @@ public final class DetectionEngine implements AutoCloseable {
         public synchronized void close() {
             if (closed) return;
             closed = true;
-            options.close();
+            try { options.close(); }
+            catch (RuntimeException cleanupFailure) { throw new ResourceCleanupFailure(cleanupFailure); }
         }
     }
 

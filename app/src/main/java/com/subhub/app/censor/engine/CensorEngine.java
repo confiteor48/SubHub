@@ -32,6 +32,8 @@ public final class CensorEngine<P> implements AutoCloseable {
     public interface CaptureCallback<P> {
         void success(Captured<P> captured);
         void failure(long retryAfterMillis);
+        /** A platform-owned temporary could not be disposed; ordinary retry cannot prove drain. */
+        void resourceFailure();
     }
     public interface Worker<P> {
         /**
@@ -44,6 +46,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         void success(SceneEngine.Batch batch, WorkTiming timing);
         void failure();
         void cancelled();
+        /** Worker-owned temporary/native cleanup failed; an ordinary failed result is insufficient. */
+        void resourceFailure();
     }
     public interface Observer {
         default void trace(Trace trace) { }
@@ -136,12 +140,14 @@ public final class CensorEngine<P> implements AutoCloseable {
     public static final class CaptureRequest {
         public final long identity;
         public final long epoch;
+        public final long geometry;
         public final long requestedAtMillis;
         private final BooleanSupplier gate;
 
-        private CaptureRequest(long identity, long epoch, long requestedAtMillis, BooleanSupplier gate) {
+        private CaptureRequest(long identity, long epoch, long geometry, long requestedAtMillis, BooleanSupplier gate) {
             this.identity = identity;
             this.epoch = epoch;
+            this.geometry = geometry;
             this.requestedAtMillis = requestedAtMillis;
             this.gate = gate;
         }
@@ -282,7 +288,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         Captured<P> captured;
 
         Ticket(long identity, long at) {
-            request = new CaptureRequest(identity, epoch, at, () -> beginDispatch(this));
+            request = new CaptureRequest(identity, epoch, geometry, at, () -> beginDispatch(this));
         }
     }
 
@@ -541,6 +547,10 @@ public final class CensorEngine<P> implements AutoCloseable {
                 @Override public void failure(long retryAfterMillis) {
                     captureResult(ticket, null, Math.max(policy.failureBackoffMillis, Math.max(0, retryAfterMillis)));
                 }
+                @Override public void resourceFailure() {
+                    resourceFailed(ticket.request.epoch, ticket.request.identity);
+                    captureResult(ticket, null, policy.failureBackoffMillis);
+                }
             });
         } catch (RuntimeException failure) { captureResult(ticket, null, policy.failureBackoffMillis); }
         finally { captureReturned(ticket); }
@@ -647,7 +657,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     private void pump(List<Runnable> actions) {
-        if (!active || closed) return;
+        if (!active || closed || resourceFailures != 0) return;
         LaneState fast = lanes.get(SceneEngine.Lane.FAST);
         LaneState quality = lanes.get(SceneEngine.Lane.QUALITY);
         boolean qualityBusy = quality != null && quality.active != null;
@@ -698,6 +708,10 @@ public final class CensorEngine<P> implements AutoCloseable {
                 }
                 @Override public void failure() { complete(job, null, null, Stage.JOB_FAILED); }
                 @Override public void cancelled() { complete(job, null, null, Stage.JOB_CANCELLED); }
+                @Override public void resourceFailure() {
+                    resourceFailed(job.frame.source);
+                    complete(job, null, null, Stage.JOB_FAILED);
+                }
             });
         } catch (RuntimeException failed) { complete(job, null, null, Stage.JOB_FAILED); }
     }
@@ -872,8 +886,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     private void resourceFailed(long failedEpoch, long failedSource) {
         List<Runnable> actions = new ArrayList<>();
         synchronized (this) {
-            resourceFailures++;
-            cancelTimer(actions);
+            if (resourceFailures++ == 0) invalidate(actions);
             Trace value = new Trace(Stage.RESOURCE_FAILED, failedEpoch, failedSource, null,
                     clock.getAsLong(), 0, -1, null);
             actions.add(() -> observer.trace(value));

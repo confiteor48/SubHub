@@ -5,10 +5,10 @@ import android.graphics.ColorSpace;
 import android.graphics.Matrix;
 
 /** Converts a hardware screenshot into the smallest software bitmap needed by ONNX. */
-final class InferenceBitmapPreparer {
+public final class InferenceBitmapPreparer {
     private InferenceBitmapPreparer() {}
 
-    static Prepared prepare(Bitmap source, int inferenceResolution, boolean retainSourceFrame) {
+    public static Prepared prepare(Bitmap source, int inferenceResolution, boolean retainSourceFrame) {
         if (source == null || source.isRecycled()
                 || source.getWidth() <= 0 || source.getHeight() <= 0) return null;
         int sourceWidth = source.getWidth();
@@ -71,7 +71,7 @@ final class InferenceBitmapPreparer {
                 inferenceResolution);
     }
 
-    static Prepared prepareRegion(Bitmap source, int left, int top, int width, int height,
+    public static Prepared prepareRegion(Bitmap source, int left, int top, int width, int height,
                                   int inferenceResolution) {
         if (source == null || source.isRecycled() || left < 0 || top < 0
                 || width <= 0 || height <= 0 || left > source.getWidth()
@@ -140,14 +140,14 @@ final class InferenceBitmapPreparer {
         };
     }
 
-    static final class Prepared {
-        final Bitmap bitmap;
-        final int sourceWidth;
-        final int sourceHeight;
-        final boolean retainedSourceFrame;
-        final long scaleNanos;
-        final long readbackNanos;
-        final boolean hardwareReadback;
+    public static final class Prepared {
+        public final Bitmap bitmap;
+        public final int sourceWidth;
+        public final int sourceHeight;
+        public final boolean retainedSourceFrame;
+        public final long scaleNanos;
+        public final long readbackNanos;
+        public final boolean hardwareReadback;
 
         Prepared(Bitmap bitmap, int sourceWidth, int sourceHeight,
                 boolean retainedSourceFrame) {
