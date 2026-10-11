@@ -165,6 +165,10 @@
                     android:orientation="vertical" android:padding="@dimen/ui_gap_group">
                     <TextView style="@style/Widget.SubHub.SectionHeader"
                         android:text="@string/studio_preview" />
+                    <ImageView android:id="@+id/preview_cover" android:layout_width="match_parent"
+                        android:layout_height="160dp" android:layout_marginTop="@dimen/ui_gap_control"
+                        android:scaleType="fitCenter" android:importantForAccessibility="no"
+                        android:visibility="gone" />
                     <TextView android:id="@+id/preview_text" android:layout_width="match_parent"
                         android:layout_height="wrap_content" android:layout_marginTop="@dimen/ui_gap_control"
                         android:background="@drawable/bg_card" android:padding="@dimen/ui_gap_group"

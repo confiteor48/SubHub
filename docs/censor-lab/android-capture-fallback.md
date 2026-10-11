@@ -47,6 +47,10 @@ test pass: that bypasses the touch-routing failure. If a later matcher reports t
 check the actual foreground activity and the preceding tap's geometry before blaming the missing
 control or weakening its assertion. Retain failed-run results separately from a corrected run.
 
+Native ScrollView fixtures should use `NativeUiActions.revealAboveNavigation()` before an
+Espresso `click()`. The shared helper scrolls the actual control and asserts clearance above
+`bottom_navigation`; keep the injected tap so the test still verifies touch routing.
+
 When launching `MainActivity` with a custom `ActivityScenario` intent, set `Intent.ACTION_MAIN`
 before launch. Home normalizes shortcut intents to that action; an initially null action makes
 ActivityScenario reject subsequent lifecycle events as belonging to a different intent and time

@@ -61,6 +61,36 @@ public final class SubHubPackArchive {
         catch (Exception invalid) { throw new IOException("Invalid local pack metadata", invalid); }
     }
 
+    /** Read only decorative cover bytes; unrelated pack artwork is never inflated for a card. */
+    static byte[] readCover(java.io.File file) throws IOException {
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(file, StandardCharsets.UTF_8)) {
+            JSONObject manifest = readJsonEntry(zip, "manifest.json", MAX_MANIFEST_BYTES);
+            JSONObject hashes = manifest.optJSONObject("assetHashes");
+            if (hashes == null) return null;
+            List<String> covers = new ArrayList<>();
+            java.util.Iterator<String> keys = hashes.keys();
+            while (keys.hasNext()) {
+                String path = keys.next();
+                if (path.startsWith("assets/cover/") && isSafeAssetPath(path)) covers.add(path);
+            }
+            Collections.sort(covers);
+            if (covers.isEmpty()) return null;
+            String path = covers.get(0);
+            ZipEntry entry = zip.getEntry(path);
+            if (entry == null || entry.isDirectory()) throw new IOException("Missing cover image");
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            try (InputStream input = zip.getInputStream(entry)) {
+                PackInputLimiter.copy(input, bytes, MAX_ASSET_BYTES, "Pack cover");
+            }
+            byte[] cover = bytes.toByteArray();
+            if (!constantEquals(hashes.optString(path, ""), sha256(cover))) {
+                throw new IOException("Cover image integrity check failed");
+            }
+            return cover;
+        } catch (IOException error) { throw error; }
+        catch (Exception invalid) { throw new IOException("Invalid cover image", invalid); }
+    }
+
     private static JSONObject readJsonEntry(java.util.zip.ZipFile zip, String name, long limit)
             throws Exception {
         ZipEntry entry = zip.getEntry(name);

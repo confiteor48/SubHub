@@ -137,6 +137,49 @@ public final class SubHubPackArchiveTest {
         assertEquals(.25, imported.getSection("censor").getDouble("censor_size_padding"), .00001);
     }
 
+    @Test public void coverPreviewReadsOnlyHashVerifiedCoverWhileActivationStillValidatesAllAssets() throws Exception {
+        byte[] cover = "cover-artwork".getBytes(StandardCharsets.UTF_8);
+        SubHubPack source = SubHubPack.blank("synthetic");
+        source.putAsset("assets/cover/art.png", cover);
+        source.putAsset("assets/censor/art.png", new byte[]{1});
+        java.io.File archive = coverFixture(source, "assets/censor/art.png");
+        try {
+            assertArrayEquals(cover, SubHubPackArchive.readCover(archive));
+            try (java.io.FileInputStream input = new java.io.FileInputStream(archive)) {
+                assertThrows(java.io.IOException.class, () -> SubHubPackArchive.read(input));
+            }
+        } finally { assertTrue(archive.delete()); }
+    }
+
+    @Test public void coverPreviewRejectsAlteredBytesAndMissingCoverReturnsNothing() throws Exception {
+        SubHubPack source = SubHubPack.blank("synthetic");
+        source.putAsset("assets/cover/art.png", new byte[]{1});
+        java.io.File altered = coverFixture(source, "assets/cover/art.png");
+        java.io.File missing = coverFixture(SubHubPack.blank("synthetic"), null);
+        try {
+            assertThrows(java.io.IOException.class, () -> SubHubPackArchive.readCover(altered));
+            assertEquals(null, SubHubPackArchive.readCover(missing));
+        } finally { assertTrue(altered.delete()); assertTrue(missing.delete()); }
+    }
+
+    private static java.io.File coverFixture(SubHubPack pack, String alteredPath) throws Exception {
+        ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        SubHubPackArchive.write(pack, encoded);
+        java.io.File file = java.io.File.createTempFile("pack-cover-", ".sub");
+        try (java.util.zip.ZipInputStream input = new java.util.zip.ZipInputStream(
+                new ByteArrayInputStream(encoded.toByteArray()));
+                ZipOutputStream output = new ZipOutputStream(new java.io.FileOutputStream(file))) {
+            ZipEntry entry;
+            while ((entry = input.getNextEntry()) != null) {
+                output.putNextEntry(new ZipEntry(entry.getName()));
+                byte[] bytes = input.readAllBytes();
+                output.write(entry.getName().equals(alteredPath) ? new byte[]{2} : bytes);
+                output.closeEntry();
+            }
+        }
+        return file;
+    }
+
     private static byte[] legacyArchive(JSONObject manifest, Map<String, JSONObject> sections) throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(output)) {

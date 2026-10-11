@@ -181,6 +181,14 @@ public final class SubHubPackManager {
     public List<Record> listDrafts() { return list(drafts, true); }
     public List<Record> listLibrary() { return list(library, false); }
 
+    /** Optional local thumbnail input, loaded separately from the full activation archive. */
+    public byte[] readCover(Record record) {
+        if (record == null) return null;
+        try {
+            return SubHubPackArchive.readCover(fileFor(record.draft ? drafts : library, record.pack.getId()));
+        } catch (IOException invalid) { return null; }
+    }
+
     public SubHubPack findDraft(String id) { return read(fileFor(drafts, id)); }
     public SubHubPack findLibrary(String id) { return read(fileFor(library, id)); }
 
