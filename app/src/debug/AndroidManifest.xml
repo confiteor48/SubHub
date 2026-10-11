@@ -3,5 +3,6 @@
     <application android:networkSecurityConfig="@xml/debug_network_security_config">
         <activity android:name=".overlay.CensorTapFixtureActivity" android:exported="false" />
         <activity android:name=".censor.android.NativeTextFixtureActivity" android:exported="false" />
+        <activity android:name=".censor.android.SnapshotPaintFixtureActivity" android:exported="false" />
     </application>
 </manifest>
