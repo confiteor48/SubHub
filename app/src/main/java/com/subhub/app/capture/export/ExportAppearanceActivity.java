@@ -15,6 +15,10 @@ import java.util.*;
 public final class ExportAppearanceActivity extends PreferencePage {
     public static final String EXTRA_SHOW_CATEGORIES = "export_show_categories";
     private SettingsRepository settings;
+    @Override protected void onResume() {
+        super.onResume();
+        if (ControllerPinManager.isDomModeActive()) render();
+    }
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state); page(R.string.export_appearance_title);
         ControllerPinGate.require(this,
@@ -32,6 +36,9 @@ public final class ExportAppearanceActivity extends PreferencePage {
         page(R.string.export_appearance_title);
         fieldHelp(page, getString(R.string.export_independent_help));
         CensorAppearance appearance = settings.loadAppearance();
+        button(page, getString(R.string.censor_presets_title), () -> startActivity(
+                new android.content.Intent(this, com.subhub.app.settings.CensorPresetsActivity.class)
+                        .putExtra(com.subhub.app.settings.CensorPresetsActivity.EXTRA_EXPORT, true)));
         LinearLayout style = card(page);
         button(style, getString(R.string.export_style_value, label(appearance.getType().getPreferenceValue())), () -> {
             CensorAppearance.Type[] types = CensorAppearance.Type.values(); String[] labels = new String[types.length];
@@ -109,5 +116,5 @@ public final class ExportAppearanceActivity extends PreferencePage {
             public void onStopTrackingTouch(SeekBar s) { }
         });
     }
-    static String label(String value) { String spaced = value.replace('_', ' '); return spaced.substring(0, 1).toUpperCase(Locale.getDefault()) + spaced.substring(1); }
+    static String label(String value) { if ("error_popup".equals(value)) return "Lockpad"; String spaced = value.replace('_', ' '); return spaced.substring(0, 1).toUpperCase(Locale.getDefault()) + spaced.substring(1); }
 }

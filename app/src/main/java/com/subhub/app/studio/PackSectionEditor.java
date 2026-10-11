@@ -71,6 +71,8 @@ final class PackSectionEditor {
             content.addView(label(activity.getString(R.string.pack_editor_popup_note), false));
         }
         for (PackSettingCatalog.Field field : PackSettingCatalog.fields(section)) {
+            // Retain these in import/export for compatibility; Lockpad uses ordinary censor phrases.
+            if ("error_popup_title".equals(field.key) || "error_popup_text".equals(field.key)) continue;
             CompactFieldLayout group = groups.get(field.group);
             if (group == null) {
                 group = new CompactFieldLayout(activity);

@@ -58,6 +58,7 @@ public final class CensorPreviewView extends View {
     private final RectF scene = new RectF();
     private final RectF target = new RectF();
     private final Path path = new Path();
+    private final LockpadArtwork lockpad = new LockpadArtwork();
 
     public CensorPreviewView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -591,57 +592,8 @@ public final class CensorPreviewView extends View {
     }
 
     private void drawError(Canvas canvas) {
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Color.rgb(232, 228, 234));
-        RectF dialog =
-                new RectF(
-                        target.left + target.width() * 0.05f,
-                        target.top + target.height() * 0.10f,
-                        target.right - target.width() * 0.05f,
-                        target.bottom - target.height() * 0.10f);
-        canvas.drawRoundRect(dialog, target.height() * 0.08f, target.height() * 0.08f, paint);
-        paint.setColor(Color.rgb(215, 38, 48));
-        canvas.drawCircle(
-                dialog.left + dialog.width() * 0.22f,
-                dialog.centerY(),
-                dialog.height() * 0.22f,
-                paint);
-        paint.setColor(Color.WHITE);
-        paint.setStrokeWidth(Math.max(1.5f, dialog.height() * 0.06f));
-        paint.setStyle(Paint.Style.STROKE);
-        canvas.drawLine(
-                dialog.left + dialog.width() * 0.16f,
-                dialog.centerY() - dialog.height() * 0.08f,
-                dialog.left + dialog.width() * 0.28f,
-                dialog.centerY() + dialog.height() * 0.08f,
-                paint);
-        canvas.drawLine(
-                dialog.left + dialog.width() * 0.28f,
-                dialog.centerY() - dialog.height() * 0.08f,
-                dialog.left + dialog.width() * 0.16f,
-                dialog.centerY() + dialog.height() * 0.08f,
-                paint);
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(Color.rgb(74, 62, 80));
-        canvas.drawRect(
-                dialog.left + dialog.width() * 0.42f,
-                dialog.top + dialog.height() * 0.30f,
-                dialog.right - dialog.width() * 0.12f,
-                dialog.top + dialog.height() * 0.37f,
-                paint);
-        canvas.drawRect(
-                dialog.left + dialog.width() * 0.42f,
-                dialog.top + dialog.height() * 0.48f,
-                dialog.right - dialog.width() * 0.24f,
-                dialog.top + dialog.height() * 0.55f,
-                paint);
-        paint.setColor(Color.rgb(0, 120, 215));
-        canvas.drawRect(
-                dialog.left + dialog.width() * 0.66f,
-                dialog.bottom - dialog.height() * 0.20f,
-                dialog.right - dialog.width() * 0.12f,
-                dialog.bottom - dialog.height() * 0.08f,
-                paint);
+        lockpad.draw(canvas, target, EffectPalette.defaultsFor(
+                CensorAppearance.Type.ERROR_POPUP), 1800);
     }
 
     private void drawBlockedWord(Canvas canvas, float centerX, float centerY) {
