@@ -61,6 +61,9 @@ focus check does not verify recreated screens.
 Gate Android instrumentation tests that require newer platform APIs with
 `@SdkSuppress(minSdkVersion = ...)`, not `@RequiresApi`. The latter describes production
 API contracts rather than runtime test eligibility and fails Android lint's `UseSdkSuppress` check.
+Controlled scheduler fixtures must execute only due, uncancelled tasks in deadline
+order. Capture and display-expiry wakes are independent; insertion order can fire an
+expiry in place of a capture and invalidate an otherwise unrelated adapter test.
 Spinner value and option TextViews must not inherit interactive EditText flags.
 Keep them nonfocusable and nonclickable so taps reach the spinner or option list;
 verify opening, choosing, and saving with native taps rather than `setSelection` alone.
