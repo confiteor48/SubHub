@@ -280,6 +280,94 @@ public final class AccessibilityCensorHostAndroidTest {
         }
     }
 
+    @Test public void uncertainAndroidPairBeforeFirstFastStaysPerMemberAndOwnsOnlyOriginalPixels() throws Exception {
+        try (Harness h = new Harness()) {
+            h.mixedEvidence = true; h.blockInference = true;
+            h.holdSecondInference = true; h.failSecondInference = true;
+            h.start(10, config(2, .3f)); Call first = h.next(); Bitmap evidence = first.deliver();
+            assertTrue(h.inferenceEntered.await(5, TimeUnit.SECONDS));
+            Call second = h.next(); Bitmap later = second.deliver(); h.next();
+            com.subhub.app.censor.engine.ImagePresentationEstimate estimate =
+                    new com.subhub.app.censor.engine.ImagePresentationEstimate(first.request.epoch,
+                            first.request.identity, second.request.identity, AccessibilityCensorHost.VISUAL_PARTITION, 1,
+                            Arrays.asList(
+                                    new com.subhub.app.censor.engine.ImagePresentationEstimate.Piece(
+                                            new SceneEngine.Region(0, 0, 64, 16), 0, 0, 0, 0),
+                                    new com.subhub.app.censor.engine.ImagePresentationEstimate.Piece(
+                                            new SceneEngine.Region(8, 50, 40, 100), 0, 0, -33, -31)));
+            assertTrue(h.host.presentationEstimate(estimate)); assertEquals(0, h.acceptedFast.get());
+            assertNull(h.host.acquireRenderView());
+            h.inferenceRelease.countDown(); assertTrue(h.secondInferenceEntered.await(5, TimeUnit.SECONDS));
+            awaitUncertainMixed(h, first.request.identity, second.request.identity, evidence);
+            assertEquals(1, h.acceptedFast.get()); assertEquals(1, h.secondInferenceRelease.getCount());
+            h.secondInferenceRelease.countDown(); awaitRecycled(later);
+            assertFalse(evidence.isRecycled());
+            awaitUncertainMixed(h, first.request.identity, second.request.identity, evidence);
+        }
+    }
+
+    private static void awaitUncertainMixed(Harness h, long evidenceSource, long geometry, Bitmap evidence)
+            throws InterruptedException {
+        long deadline = SystemClock.uptimeMillis() + 5000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
+                if (view != null) {
+                    int count = 0; boolean header = false, body = false, typed = true;
+                    for (SceneEngine.Group group : view.snapshot.groups) for (SceneEngine.Mask mask : group.members) {
+                        count++;
+                        typed &= mask.imageEstimated && mask.estimatedMotion && !mask.physicalErrorKnown
+                                && !mask.heldGeometry && mask.evidenceSource.sequence == evidenceSource
+                                && mask.geometrySource.sequence == geometry;
+                        header |= mask.evidenceRegion.top == 5 && mask.displayRegion.top == 5;
+                        body |= mask.evidenceRegion.top == 50 && mask.displayRegion.top == 17 && mask.displayRegion.bottom == 29;
+                    }
+                    if (count == 2 && typed && header && body) {
+                        assertEquals(evidenceSource, view.snapshot.destination.sequence);
+                        assertSame(evidence, view.sourcePixels(evidenceSource).bitmap);
+                        assertNull(view.sourcePixels(geometry));
+                        return;
+                    }
+                }
+            }
+            Thread.sleep(10);
+        }
+        fail("Uncertain Android pair lost typed per-member geometry or original sampling");
+    }
+
+    @Test public void changedAndroidDisplayDimensionsResetImagePoseWithoutRecyclingActiveReaders() throws Exception {
+        try (Harness h = new Harness()) {
+            h.holdSecondInference = true;
+            h.start(10, config(2, .3f)); Call first = h.next(); Bitmap evidence = first.deliver(); h.awaitView(10);
+            Call second = h.next(); Bitmap running = second.deliver();
+            assertTrue(h.secondInferenceEntered.await(5, TimeUnit.SECONDS));
+            assertTrue(h.host.presentationEstimate(new com.subhub.app.censor.engine.ImagePresentationEstimate(
+                    first.request.epoch, first.request.identity, second.request.identity,
+                    AccessibilityCensorHost.VISUAL_PARTITION, 1, Collections.singletonList(
+                            new com.subhub.app.censor.engine.ImagePresentationEstimate.Piece(
+                                    new SceneEngine.Region(0, 0, 64, 128), 0, 0, 0, 0)))));
+            h.awaitMappedEvidence(first.request.identity, second.request.identity, 20);
+            CensorEngine<PixelFrame>.RenderView held = h.host.acquireRenderView();
+            try {
+                Call changed = h.next(); Bitmap discarded = changed.deliver(128, 64); awaitRecycled(discarded);
+                assertNull(h.host.acquireRenderView());
+                assertFalse(evidence.isRecycled()); assertFalse(running.isRecycled());
+                assertSame(evidence, held.sourcePixels(first.request.identity).bitmap);
+                Call fresh = h.next(); assertEquals(changed.request.epoch + 1, fresh.request.epoch);
+                assertEquals(10, fresh.request.geometry); Bitmap current = fresh.deliver(128, 64);
+                h.secondInferenceRelease.countDown(); awaitRecycled(running); h.awaitView(10);
+                assertTrue(h.secondWasCancelled.get());
+                try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
+                    assertEquals(fresh.request.epoch, view.snapshot.destination.epoch);
+                    assertEquals(128, view.snapshot.destination.width); assertEquals(64, view.snapshot.destination.height);
+                    assertFalse(onlyMask(view).imageEstimated);
+                    assertSame(current, view.sourcePixels(fresh.request.identity).bitmap);
+                }
+                assertFalse(evidence.isRecycled());
+            } finally { held.close(); }
+            awaitRecycled(evidence);
+        }
+    }
+
     @Test public void partialAndroidBasisHoldsBothHeaderAndPreviouslyMovedBodyOnOriginalPixels() throws Exception {
         try (Harness h = new Harness()) {
             h.mixedEvidence = true;
@@ -376,13 +464,14 @@ public final class AccessibilityCensorHostAndroidTest {
         final AtomicBoolean delivered = new AtomicBoolean();
         Call(CensorEngine.CaptureRequest request, CensorEngine.CaptureCallback<PixelFrame> callback,
                 Executor callbacks) { this.request = request; this.callback = callback; this.callbacks = callbacks; }
-        Bitmap deliver() {
+        Bitmap deliver() { return deliver(64, 128); }
+        Bitmap deliver(int width, int height) {
             assertTrue(delivered.compareAndSet(false, true));
-            Bitmap bitmap = Bitmap.createBitmap(64, 128, Bitmap.Config.ARGB_8888);
-            PixelFrame frame = new PixelFrame(bitmap, PixelGeometry.display(64, 128, 64, 128),
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            PixelFrame frame = new PixelFrame(bitmap, PixelGeometry.display(width, height, width, height),
                     PixelFrame.Kind.ACCESSIBILITY_DISPLAY, -1, SystemClock.uptimeMillis(), 0);
             callbacks.execute(() -> {
-                CensorEngine.Captured<PixelFrame> value = new CensorEngine.Captured<>(frame, 64, 128, -1, bitmap::recycle);
+                CensorEngine.Captured<PixelFrame> value = new CensorEngine.Captured<>(frame, width, height, -1, bitmap::recycle);
                 try { callback.success(value); } finally { value.close(); }
             });
             return bitmap;

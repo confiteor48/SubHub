@@ -22,6 +22,121 @@ public class CensorEngineTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(3, 10, 2);
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    private static ImagePresentationEstimate imageHint(Harness h, long from, long to, double dy) {
+        return new ImagePresentationEstimate(h.engine.currentEpoch(), from, to, 1, 1,
+                Collections.singletonList(new ImagePresentationEstimate.Piece(
+                        new SceneEngine.Region(100, 500, 200, 600), 0, 0, dy, dy)));
+    }
+
+    @Test public void imageHintBeforeFirstFastUsesActualBWithoutBAiOrBEffectPixels() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel a = h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fire(334); Pixel b = h.deliver(1, 2);
+        assertTrue(h.engine.presentationEstimate(imageHint(h, 1, 2, -400)));
+        assertEquals(0, h.engine.renderBasisCount()); assertEquals(1, h.fast.calls.size());
+        h.fast.succeed(0, face(500)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            SceneEngine.Mask mask = view.snapshot.groups.get(0).members.get(0);
+            assertEquals(1, view.snapshot.destination.sequence);
+            assertEquals(100, mask.displayRegion.top, 0); assertEquals(2, mask.geometrySource.sequence);
+            assertTrue(mask.imageEstimated); assertSame(a, view.sourcePixels(1)); assertNull(view.sourcePixels(2));
+        }
+        assertFalse(a.closed); assertFalse(b.closed);
+        h.engine.close(); h.fastExecutor.runAll();
+        assertEquals(1, a.closes); assertEquals(1, b.closes);
+    }
+
+    @Test public void lateEmptyFastKeepsTypedImageHoldWithoutRollingBackOrBorrowingPixels() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel a = h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fire(334); Pixel b = h.deliver(1, 2); h.engine.presentationEstimate(imageHint(h, 1, 2, -400));
+        h.fast.succeed(0, face(500)); h.ui.runAll(); h.fastExecutor.runOne(); h.fast.succeed(1); h.ui.runAll();
+        h.fire(668); Pixel c = h.deliver(2, 3); h.fastExecutor.runOne(); h.fast.succeed(2); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            SceneEngine.Mask mask = view.snapshot.groups.get(0).members.get(0);
+            assertEquals(3, view.snapshot.destination.sequence); assertEquals(2, mask.geometrySource.sequence);
+            assertEquals(100, mask.displayRegion.top, 0); assertTrue(mask.imageEstimated); assertTrue(mask.heldGeometry);
+            assertEquals(1, mask.evidenceSource.sequence); assertSame(a, view.sourcePixels(1));
+            assertNull(view.sourcePixels(2)); assertNull(view.sourcePixels(3));
+        }
+        assertEquals(0, h.engine.renderBasisCount()); h.engine.close();
+        assertEquals(1, a.closes); assertEquals(1, b.closes); assertEquals(1, c.closes);
+    }
+
+    @Test public void aRetainedOldDrawRevisionCannotDescribeANewImageOnlyPresentation() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel a = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine<Pixel>.RenderView old = h.engine.acquireRenderView();
+        h.fire(334); Pixel b = h.deliver(1, 2); assertTrue(h.engine.presentationEstimate(imageHint(h, 1, 2, -400)));
+        h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView current = h.engine.acquireRenderView()) {
+            assertNotEquals(old.snapshot.revision, current.snapshot.revision);
+            long before = h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.DRAWN).count();
+            h.engine.drawn(old.snapshot.revision);
+            assertEquals(before, h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.DRAWN).count());
+            h.engine.drawn(current.snapshot.revision);
+            assertEquals(before + 1, h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.DRAWN).count());
+        }
+        h.engine.close(); assertFalse(a.closed); old.close(); h.fastExecutor.runAll();
+        assertEquals(1, a.closes); assertEquals(1, b.closes);
+    }
+
+    @Test public void stoppedScopeRejectsOldImageHintsAndKeepsActualReadLifetime() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel a = h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fire(334); Pixel b = h.deliver(1, 2); ImagePresentationEstimate hint = imageHint(h, 1, 2, -400);
+        h.engine.presentationEstimate(hint); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine<Pixel>.RenderView held = h.engine.acquireRenderView();
+        h.engine.changeScope(77); assertFalse(h.engine.presentationEstimate(hint)); assertNull(h.engine.acquireRenderView());
+        assertFalse(a.closed); assertSame(a, held.sourcePixels(1)); held.close();
+        h.engine.close(); h.fastExecutor.runAll(); assertEquals(1, a.closes); assertEquals(1, b.closes);
+    }
+
+    @Test public void lateBTextCannotRetargetTheActualCImageOrReadmitAnObsoleteHint() {
+        Harness h = new Harness(false, true, false, 8, 2, 16);
+        h.start(); h.fire(0); Pixel a = h.deliver(0, 1); h.fastExecutor.runOne(); h.textExecutor.runOne();
+        h.text.succeed(0); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); Pixel b = h.deliver(1, 2); h.fastExecutor.runOne(); h.textExecutor.runOne();
+        ImagePresentationEstimate old = imageHint(h, 1, 2, -400);
+        assertTrue(h.engine.presentationEstimate(old)); h.ui.runAll();
+        h.fire(668); Pixel c = h.deliver(2, 3);
+        assertFalse(h.engine.presentationEstimate(old)); h.text.succeed(1); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            SceneEngine.Mask mask = view.snapshot.groups.get(0).members.get(0);
+            assertTrue(mask.imageEstimated); assertTrue(mask.heldGeometry);
+            assertEquals(2, mask.geometrySource.sequence); assertEquals(100, mask.displayRegion.top, 0);
+            assertSame(a, view.sourcePixels(1)); assertNull(view.sourcePixels(2)); assertNull(view.sourcePixels(3));
+        }
+        h.fast.succeed(1); h.engine.close(); h.fastExecutor.runAll(); h.textExecutor.runAll();
+        assertEquals(1, a.closes); assertEquals(1, b.closes); assertEquals(1, c.closes);
+    }
+
+    @Test public void displayDimensionChangeFencesOldImagePoseWithoutStrandingCapturePixels() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel a = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); Pixel b = h.deliver(1, 2); h.fastExecutor.runOne();
+        ImagePresentationEstimate oldHint = imageHint(h, 1, 2, -400);
+        assertTrue(h.engine.presentationEstimate(oldHint)); h.ui.runAll();
+        CensorEngine<Pixel>.RenderView held = h.engine.acquireRenderView();
+        long oldEpoch = h.engine.currentEpoch();
+        h.fire(668); Pixel changed = new Pixel(3);
+        h.captures.get(2).callback.success(changed.payload(900, 1600));
+        assertEquals(oldEpoch + 1, h.engine.currentEpoch());
+        assertEquals(1, changed.closes); assertFalse(h.engine.captureInFlight());
+        assertNull(h.engine.acquireRenderView()); assertFalse(h.engine.presentationEstimate(oldHint));
+        assertEquals(0, h.engine.pendingCount(FAST)); assertTrue(h.fast.calls.get(1).input.cancelled());
+        assertFalse(a.closed); assertFalse(b.closed); assertSame(a, held.sourcePixels(1));
+        h.fast.calls.get(1).completion.cancelled(); assertEquals(1, b.closes);
+        assertEquals(1002, h.timer.nextAt()); h.fire(1002); Pixel fresh = new Pixel(4);
+        h.captures.get(3).callback.success(fresh.payload(900, 1600)); h.fastExecutor.runOne();
+        assertEquals(oldEpoch + 1, h.fast.calls.get(2).input.source.epoch);
+        h.fast.succeed(2, face(200)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView current = h.engine.acquireRenderView()) {
+            assertEquals(900, current.snapshot.destination.width); assertEquals(1600, current.snapshot.destination.height);
+            assertFalse(masks(current.snapshot).get(0).imageEstimated); assertSame(fresh, current.sourcePixels(4));
+        }
+        assertEquals(0, h.engine.callbackFailures()); h.engine.close(); assertEquals(0, h.drained);
+        held.close(); assertEquals(1, a.closes); assertEquals(1, fresh.closes);
+        assertEquals(0, h.engine.livePixelFrames()); assertEquals(1, h.drained);
+    }
+
     @Test public void callbackBeforeApiReturnKeepsSlotAndSpacingFromActualReturn() {
         Harness h = new Harness(); Pixel pixel = new Pixel(1);
         h.behavior = (request, callback) -> {
@@ -936,7 +1051,11 @@ public class CensorEngineTest {
         Pixel(int id) { this.id = id; }
         CensorEngine.Captured<Pixel> payload() { return payload(-1); }
         CensorEngine.Captured<Pixel> payload(long pixelAtMillis) {
-            return new CensorEngine.Captured<>(this, 1000, 2400, pixelAtMillis, () -> {
+            return payload(1000, 2400, pixelAtMillis);
+        }
+        CensorEngine.Captured<Pixel> payload(int width, int height) { return payload(width, height, -1); }
+        CensorEngine.Captured<Pixel> payload(int width, int height, long pixelAtMillis) {
+            return new CensorEngine.Captured<>(this, width, height, pixelAtMillis, () -> {
                 disposalAttempts++;
                 if (throwBeforeDispose) throw new IllegalStateException("before actual pixel disposal");
                 assertFalse("pixels released twice", closed); closed = true; closes++;

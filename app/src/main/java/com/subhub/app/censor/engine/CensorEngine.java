@@ -361,6 +361,8 @@ public final class CensorEngine<P> implements AutoCloseable {
     private long retryNotBefore;
     private long destination;
     private SceneEngine.Source destinationSource;
+    /** Actual successful image acquisition, independent of FAST/QUALITY/TEXT completion. */
+    private SceneEngine.Source latestImageSource;
     private boolean active;
     private boolean closed;
     private boolean firstFastCompleted;
@@ -554,6 +556,22 @@ public final class CensorEngine<P> implements AutoCloseable {
         return view;
     }
 
+    /** Direct per-member drawing metadata, never a graph edge, destination or basis pin. */
+    public boolean presentationEstimate(ImagePresentationEstimate estimate) {
+        Objects.requireNonNull(estimate);
+        List<Runnable> actions = new ArrayList<>();
+        boolean accepted;
+        synchronized (this) {
+            SceneEngine.PresentationAdmission admission = active && !closed && latestImageSource != null
+                    && latestImageSource.sequence == estimate.to
+                    ? scene.admitPresentation(estimate) : SceneEngine.PresentationAdmission.INVALID;
+            accepted = admission == SceneEngine.PresentationAdmission.ADMITTED;
+            if (accepted && destination != 0) queuePresentation(actions);
+        }
+        run(actions);
+        return accepted;
+    }
+
     private boolean expired(Presentation value, long now) {
         return value != null && value.snapshot.nextChangeAtMillis != Long.MAX_VALUE
                 && value.snapshot.nextChangeAtMillis <= now;
@@ -596,6 +614,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         basisAdmissionDrops = 0;
         destination = 0;
         destinationSource = null;
+        latestImageSource = null;
         firstFastCompleted = false;
         cancelTimer(actions);
         cancelPresentationTimer(actions);
@@ -739,13 +758,26 @@ public final class CensorEngine<P> implements AutoCloseable {
         Captured<P> payload = ticket.captured;
         if (payload != null) {
             if (active && !closed && ticket.dispatched && ticket.request.epoch == epoch
+                    && latestImageSource != null
+                    && (payload.width != latestImageSource.width || payload.height != latestImageSource.height)) {
+                // A display change cannot share scene/presentation coordinates with this epoch.
+                // The old request's payload is discarded below; existing readers finish normally.
+                invalidate(actions);
+            }
+            if (active && !closed && ticket.dispatched && ticket.request.epoch == epoch
                     && frames.size() < policy.maximumPixelFrames) {
                 SceneEngine.Source source = new SceneEngine.Source(epoch, ticket.request.identity, geometry,
                         payload.width, payload.height, ticket.receivedAt, payload.pixelAtMillis);
                 if (scene.register(source) && scene.pin(source)) {
                     Frame frame = new Frame(source, payload);
                     frames.put(source.sequence, frame);
+                    latestImageSource = source;
+                    scene.advanceImageTarget(source.sequence);
                     offer(frame, actions);
+                    if (destination != 0 && (scene.hasConstructedImagePose()
+                            || hasImageEstimate(currentPresentation) || hasImageEstimate(pendingPresentation))) {
+                        queuePresentation(actions);
+                    }
                     actions.add(frame::release); // Initial capture ownership transfers to lane leases.
                 } else {
                     discard(payload, true, ticket, actions);
@@ -886,7 +918,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         for (Map.Entry<Long, SceneEngine.Source> entry : renderBases.entrySet()) {
             bases.put(entry.getKey(), entry.getValue().sequence);
         }
-        SceneEngine.Snapshot snapshot = scene.snapshot(destination, clock.getAsLong(), true, bases);
+        SceneEngine.Snapshot snapshot = scene.snapshot(destination, clock.getAsLong(), true, bases,
+                latestImageSource == null ? 0 : latestImageSource.sequence);
         Set<Long> activePartitions = scene.activePartitions();
         for (Iterator<Map.Entry<Long, SceneEngine.Source>> iterator = renderBases.entrySet().iterator(); iterator.hasNext();) {
             Map.Entry<Long, SceneEngine.Source> entry = iterator.next();
@@ -904,6 +937,14 @@ public final class CensorEngine<P> implements AutoCloseable {
         effects.removeIf(frame -> !frame.retain());
         schedulePresentationExpiry(snapshot.nextChangeAtMillis, actions);
         return new Presentation(snapshot, effects);
+    }
+
+    private boolean hasImageEstimate(Presentation value) {
+        if (value == null) return false;
+        for (SceneEngine.Group group : value.snapshot.groups) for (SceneEngine.Mask mask : group.members) {
+            if (mask.imageEstimated) return true;
+        }
+        return false;
     }
 
     private void installPresentation(Presentation value, List<Runnable> actions) {

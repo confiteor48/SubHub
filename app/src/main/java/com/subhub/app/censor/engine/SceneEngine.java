@@ -23,6 +23,7 @@ public final class SceneEngine {
     public enum Lane { FAST, QUALITY, TEXT }
     public enum MotionAuthority { EVENT_ESTIMATE, IMAGE_CORRESPONDENCE }
     public enum MotionAdmission { ADMITTED, DUPLICATE, STALE, INVALID, CAPACITY, CHECK_BUDGET, UNREPRESENTABLE, CONFLICT }
+    public enum PresentationAdmission { ADMITTED, DUPLICATE, STALE, INVALID, CAPACITY }
 
     /** Immutable source descriptor. Sequence orders acquisition, not result delivery. */
     public static final class Source {
@@ -291,6 +292,10 @@ public final class SceneEngine {
         public final long textGroup;
         public final boolean confirmed;
         public final boolean estimatedMotion;
+        /** IMAGE appearance hint, distinct from event continuation and exact correspondence. */
+        public final boolean imageEstimated;
+        /** No physical localization bound is supplied by this scene's current input contracts. */
+        public final boolean physicalErrorKnown = false;
         /** A bounded hold at an older supported source, never correspondence to the requested basis. */
         public final boolean heldGeometry;
         public final Region displayRegion;
@@ -311,6 +316,7 @@ public final class SceneEngine {
             textGroup = track.textGroup;
             confirmed = track.confirmed;
             estimatedMotion = projected.estimated;
+            imageEstimated = projected.imageEstimated;
             this.heldGeometry = heldGeometry;
             displayRegion = projected.region;
             this.geometrySource = geometrySource;
@@ -364,11 +370,17 @@ public final class SceneEngine {
         final long source;
         final Region region;
         final boolean estimated;
+        final boolean imageEstimated;
 
         Projection(long source, Region region, boolean estimated) {
+            this(source, region, estimated, false);
+        }
+
+        Projection(long source, Region region, boolean estimated, boolean imageEstimated) {
             this.source = source;
             this.region = region;
             this.estimated = estimated;
+            this.imageEstimated = imageEstimated;
         }
     }
 
@@ -438,6 +450,12 @@ public final class SceneEngine {
     private final LinkedHashMap<Long, Source> sources = new LinkedHashMap<>();
     private final Map<Long, Integer> pins = new HashMap<>();
     private final List<MotionPair> motions = new ArrayList<>();
+    // Optional metadata has its own finite reservation, so hints cannot starve exact edges.
+    // This is not another graph, source pin, pixel owner or canonical track basis.
+    private final List<ImagePresentationEstimate> imagePresentations = new ArrayList<>();
+    /** Bounded last constructed IMAGE pose, before display-only duplicate suppression. */
+    private final Map<Long, Mask> constructedImageMasks = new HashMap<>();
+    private long imageEligibilityTarget;
     private final List<Track> tracks = new ArrayList<>();
     private final List<Batch> qualityHistory = new ArrayList<>();
     private final Set<String> delivered = new HashSet<>();
@@ -463,6 +481,9 @@ public final class SceneEngine {
         sources.clear();
         pins.clear();
         motions.clear();
+        imagePresentations.clear();
+        constructedImageMasks.clear();
+        imageEligibilityTarget = 0;
         tracks.clear();
         qualityHistory.clear();
         delivered.clear();
@@ -600,9 +621,71 @@ public final class SceneEngine {
 
     public synchronized boolean hasMotionConflict() { return motionConflict; }
 
+    public synchronized PresentationAdmission admitPresentation(ImagePresentationEstimate estimate) {
+        Objects.requireNonNull(estimate);
+        if (motionConflict || estimate.epoch != epoch) return PresentationAdmission.INVALID;
+        if (estimate.to < imageEligibilityTarget) return PresentationAdmission.STALE;
+        Source from = sources.get(estimate.from), to = sources.get(estimate.to);
+        if (motionConflict || estimate.epoch != epoch || from == null || to == null
+                || from.geometry != to.geometry || from.width != to.width || from.height != to.height) {
+            return PresentationAdmission.INVALID;
+        }
+        int oldIndex = -1, count = 0;
+        for (int i = 0; i < imagePresentations.size(); i++) {
+            ImagePresentationEstimate old = imagePresentations.get(i);
+            count += old.pieces.size();
+            if (old.sameKey(estimate)) oldIndex = i;
+        }
+        if (oldIndex >= 0) {
+            ImagePresentationEstimate old = imagePresentations.get(oldIndex);
+            if (estimate.revision < old.revision) return PresentationAdmission.STALE;
+            if (!old.samePieces(estimate)) return PresentationAdmission.INVALID;
+            if (estimate.revision > old.revision) imagePresentations.set(oldIndex, estimate);
+            return PresentationAdmission.DUPLICATE;
+        }
+        if ((long) count + estimate.pieces.size() > Math.min(ImagePresentationEstimate.MAXIMUM_PIECES,
+                policy.maximumCorrespondences)) return PresentationAdmission.CAPACITY;
+        Region fromBounds = new Region(0, 0, from.width, from.height);
+        Region toBounds = new Region(0, 0, to.width, to.height);
+        for (int i = 0; i < estimate.pieces.size(); i++) {
+            ImagePresentationEstimate.Piece first = estimate.pieces.get(i);
+            if (!fromBounds.contains(first.support) || !toBounds.contains(first.destinationEnvelope)) {
+                return PresentationAdmission.INVALID;
+            }
+            for (int j = i + 1; j < estimate.pieces.size(); j++) {
+                ImagePresentationEstimate.Piece second = estimate.pieces.get(j);
+                if (intersection(first.support, second.support) != null
+                        || intersection(first.destinationEnvelope, second.destinationEnvelope) != null) {
+                    return PresentationAdmission.INVALID;
+                }
+            }
+        }
+        imagePresentations.add(estimate);
+        revision++;
+        // Never associate, confirm, replay negatives, rebase Track or invalidate exact authority.
+        return PresentationAdmission.ADMITTED;
+    }
+
+    public synchronized int presentationPieceCount() {
+        int count = 0;
+        for (ImagePresentationEstimate value : imagePresentations) count += value.pieces.size();
+        return count;
+    }
+
+    /** Called only with an actual acquired image, never a generic highest-source/text sequence. */
+    public synchronized boolean advanceImageTarget(long sequence) {
+        if (sequence < imageEligibilityTarget || !sources.containsKey(sequence)) return false;
+        imageEligibilityTarget = sequence;
+        if (imagePresentations.removeIf(estimate -> estimate.to < sequence)) revision++;
+        return true;
+    }
+
+    public synchronized boolean hasConstructedImagePose() { return !constructedImageMasks.isEmpty(); }
+
     private MotionAdmission invalidateMotionAuthority() {
         motionConflict = true;
         tracks.clear(); motions.clear(); qualityHistory.clear(); delivered.clear(); ready = null;
+        imagePresentations.clear(); constructedImageMasks.clear();
         // Resource pins/descriptors remain owned until the runtime performs its own epoch reset.
         revision++;
         return MotionAdmission.CONFLICT;
@@ -767,12 +850,18 @@ public final class SceneEngine {
      */
     public synchronized Snapshot snapshot(long destination, long nowMillis, boolean allowEventEstimates,
             Map<Long, Long> partitionBases) {
+        return snapshot(destination, nowMillis, allowEventEstimates, partitionBases, 0);
+    }
+
+    /** Actual acquired image target is an eligibility fence, NOT a global rendering basis. */
+    public synchronized Snapshot snapshot(long destination, long nowMillis, boolean allowEventEstimates,
+            Map<Long, Long> partitionBases, long imageTarget) {
         Source source = sources.get(destination);
         if (source == null) throw new IllegalArgumentException("unknown destination");
-        if (motionConflict) {
-            ready = new Snapshot(source, Collections.emptyList(), 0, 0, revision, capacityDrops,
-                    sourceEvictions, Long.MAX_VALUE, 0);
-            return ready;
+        Source target = imageTarget == 0 ? null : sources.get(imageTarget);
+        if (target != null && (target.epoch != source.epoch || target.geometry != source.geometry
+                || target.width != source.width || target.height != source.height)) {
+            throw new IllegalArgumentException("incompatible image presentation target");
         }
         Map<Long, Long> bases = new HashMap<>(Objects.requireNonNull(partitionBases));
         Map<Long, Source> selectedSources = new HashMap<>();
@@ -785,6 +874,14 @@ public final class SceneEngine {
             }
         }
         for (Map.Entry<Long, Long> entry : bases.entrySet()) selectedSources.put(entry.getKey(), sources.get(entry.getValue()));
+        // Reject every invalid input before retiring hints or changing the ready packet.
+        if (imageTarget != 0) advanceImageTarget(imageTarget);
+        if (target != null && target.sequence < imageEligibilityTarget) target = null;
+        if (motionConflict) {
+            ready = new Snapshot(source, Collections.emptyList(), 0, 0, revision, capacityDrops,
+                    sourceEvictions, Long.MAX_VALUE, 0);
+            return ready;
+        }
         // An explicit carried basis cannot force fresher visible geometry backward, even when
         // an inverse estimate/image path exists. Tentative optional quality cannot move FAST.
         for (Track track : tracks) {
@@ -824,9 +921,15 @@ public final class SceneEngine {
             if (optionalImageBasis) {
                 mask = supportedOrHeldMask(track, source, selected, mask);
             }
+            if (imageTarget != 0) mask = imagePresentedMask(track, source, target, mask);
             if (mask == null) { unresolved++; continue; }
+            if (mask.imageEstimated) constructedImageMasks.put(mask.identity, mask);
+            else constructedImageMasks.remove(mask.identity);
             if (mask.displayRegion.visible(source)) masks.add(mask);
         }
+        Set<Long> livingImageMembers = new HashSet<>();
+        for (Track track : tracks) livingImageMembers.add(track.identity);
+        constructedImageMasks.keySet().retainAll(livingImageMembers);
         int redundantEstimated = 0;
         List<Mask> supported = new ArrayList<>(masks);
         for (Iterator<Mask> iterator = masks.iterator(); iterator.hasNext();) {
@@ -915,6 +1018,50 @@ public final class SceneEngine {
         long hold = track.confirmed ? policy.retainedMillis : policy.transientMillis;
         return nowMillis > track.evidenceSource.receivedAtMillis
                 && nowMillis - track.evidenceSource.receivedAtMillis > hold;
+    }
+
+    private Mask imagePresentedMask(Track track, Source canvas, Source target, Mask existing) {
+        Mask previous = constructedImageMasks.get(track.identity);
+        if (previous != null && (!compatibleCanvas(previous.evidenceSource, canvas)
+                || previous.evidenceSource != track.evidenceSource
+                || previous.evidenceRegion != track.evidenceRegion)) {
+            constructedImageMasks.remove(track.identity);
+            previous = null;
+        }
+        ImagePresentationEstimate.Piece applicable = null;
+        if (target != null && target.sequence >= track.evidenceSource.sequence) {
+            for (ImagePresentationEstimate estimate : imagePresentations) {
+                if (estimate.from != track.evidenceSource.sequence || estimate.to != target.sequence
+                        || estimate.partition != track.partition) continue;
+                for (ImagePresentationEstimate.Piece piece : estimate.pieces) {
+                    if (piece.support.contains(track.evidenceRegion)) applicable = piece;
+                }
+            }
+            // A raw target alone is not permission to select an unrequested hard basis.
+            if (applicable != null || previous != null) {
+                Mask exact = projectedMask(track, target, false, false);
+                if (exact != null) return exact;
+            }
+            if (applicable != null) {
+                try {
+                    return new Mask(track, new Projection(target.sequence,
+                            applicable.envelope(track.evidenceRegion), true, true), target);
+                } catch (IllegalArgumentException unrepresentable) { /* Explicit unknown. */ }
+            }
+        }
+        // Hold a constructed IMAGE packet without inventing correspondence to the new canvas.
+        // Metadata may outlive graph-node eviction; it owns no extra pixels and renews no age.
+        if (previous != null && (existing == null || existing.estimatedMotion
+                || existing.geometrySource.sequence <= previous.geometrySource.sequence)) {
+            return new Mask(track, new Projection(previous.geometrySource.sequence,
+                    previous.displayRegion, true, true), previous.geometrySource, true);
+        }
+        return existing;
+    }
+
+    private static boolean compatibleCanvas(Source first, Source second) {
+        return first.epoch == second.epoch && first.geometry == second.geometry
+                && first.width == second.width && first.height == second.height;
     }
 
     private Projection project(long from, long to, long partition, Region region, boolean estimates) {
@@ -1083,6 +1230,7 @@ public final class SceneEngine {
         }
         sources.remove(sequence);
         motions.removeIf(motion -> motion.from == sequence || motion.to == sequence);
+        imagePresentations.removeIf(estimate -> estimate.from == sequence || estimate.to == sequence);
         qualityHistory.removeIf(batch -> batch.source.sequence == sequence);
         delivered.removeIf(key -> key.startsWith(sequence + ":"));
         // Metadata in ready/effect provenance is immutable and contains no pixel resources.
