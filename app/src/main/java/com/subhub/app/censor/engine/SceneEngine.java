@@ -21,11 +21,12 @@ import java.util.Set;
  */
 public final class SceneEngine {
     public enum Lane { FAST, QUALITY, TEXT }
+    public enum SourceKind { IMAGE, NATIVE_TEXT }
     public enum MotionAuthority { EVENT_ESTIMATE, IMAGE_CORRESPONDENCE }
     public enum MotionAdmission { ADMITTED, DUPLICATE, STALE, INVALID, CAPACITY, CHECK_BUDGET, UNREPRESENTABLE, CONFLICT }
     public enum PresentationAdmission { ADMITTED, DUPLICATE, STALE, INVALID, CAPACITY }
 
-    /** Immutable source descriptor. Sequence orders acquisition, not result delivery. */
+    /** Immutable origin. Sequence orders owner admission, never physical pixel/read time. */
     public static final class Source {
         public final long epoch;
         public final long sequence;
@@ -35,11 +36,29 @@ public final class SceneEngine {
         public final long receivedAtMillis;
         /** -1 means unknown. Receipt time is never substituted for this value. */
         public final long pixelAtMillis;
+        public final SourceKind kind;
+        /** IMAGE request lineage; zero for a native read with no image request. */
+        public final long imageRequestIdentity;
+        public final long readStartedAtMillis;
+        public final long readFinishedAtMillis;
+        public final int windowId;
 
         public Source(long epoch, long sequence, long geometry, int width, int height,
                 long receivedAtMillis, long pixelAtMillis) {
+            this(epoch, sequence, geometry, width, height, receivedAtMillis, pixelAtMillis,
+                    SourceKind.IMAGE, sequence, -1, -1, -1);
+        }
+
+        private Source(long epoch, long sequence, long geometry, int width, int height,
+                long receivedAtMillis, long pixelAtMillis, SourceKind kind, long imageRequestIdentity,
+                long readStartedAtMillis, long readFinishedAtMillis, int windowId) {
             if (epoch < 0 || sequence <= 0 || width <= 0 || height <= 0
-                    || receivedAtMillis < 0 || pixelAtMillis < -1) {
+                    || receivedAtMillis < 0 || pixelAtMillis < -1
+                    || (kind == SourceKind.IMAGE && (imageRequestIdentity <= 0
+                    || readStartedAtMillis != -1 || readFinishedAtMillis != -1 || windowId != -1))
+                    || (kind == SourceKind.NATIVE_TEXT && (pixelAtMillis != -1 || imageRequestIdentity != 0
+                    || readStartedAtMillis < 0 || readFinishedAtMillis < readStartedAtMillis
+                    || readFinishedAtMillis > receivedAtMillis || windowId < 0))) {
                 throw new IllegalArgumentException("source");
             }
             this.epoch = epoch;
@@ -49,12 +68,32 @@ public final class SceneEngine {
             this.height = height;
             this.receivedAtMillis = receivedAtMillis;
             this.pixelAtMillis = pixelAtMillis;
+            this.kind = Objects.requireNonNull(kind);
+            this.imageRequestIdentity = imageRequestIdentity;
+            this.readStartedAtMillis = readStartedAtMillis;
+            this.readFinishedAtMillis = readFinishedAtMillis;
+            this.windowId = windowId;
+        }
+
+        public static Source image(long epoch, long sequence, long requestIdentity, long geometry,
+                int width, int height, long receivedAtMillis, long pixelAtMillis) {
+            return new Source(epoch, sequence, geometry, width, height, receivedAtMillis, pixelAtMillis,
+                    SourceKind.IMAGE, requestIdentity, -1, -1, -1);
+        }
+
+        public static Source nativeText(long epoch, long sequence, long geometry, int width, int height,
+                int windowId, long readStartedAtMillis, long readFinishedAtMillis, long receivedAtMillis) {
+            return new Source(epoch, sequence, geometry, width, height, receivedAtMillis, -1,
+                    SourceKind.NATIVE_TEXT, 0, readStartedAtMillis, readFinishedAtMillis, windowId);
         }
 
         private boolean sameDescriptor(Source other) {
             return epoch == other.epoch && sequence == other.sequence && geometry == other.geometry
                     && width == other.width && height == other.height
-                    && receivedAtMillis == other.receivedAtMillis && pixelAtMillis == other.pixelAtMillis;
+                    && receivedAtMillis == other.receivedAtMillis && pixelAtMillis == other.pixelAtMillis
+                    && kind == other.kind && imageRequestIdentity == other.imageRequestIdentity
+                    && readStartedAtMillis == other.readStartedAtMillis
+                    && readFinishedAtMillis == other.readFinishedAtMillis && windowId == other.windowId;
         }
     }
 
@@ -296,6 +335,8 @@ public final class SceneEngine {
         public final boolean imageEstimated;
         /** No physical localization bound is supplied by this scene's current input contracts. */
         public final boolean physicalErrorKnown = false;
+        public final boolean nativeValidated;
+        public final boolean nativeNodeIdentityKnown;
         /** A bounded hold at an older supported source, never correspondence to the requested basis. */
         public final boolean heldGeometry;
         public final Region displayRegion;
@@ -317,6 +358,8 @@ public final class SceneEngine {
             confirmed = track.confirmed;
             estimatedMotion = projected.estimated;
             imageEstimated = projected.imageEstimated;
+            nativeValidated = track.nativeCandidate != null;
+            nativeNodeIdentityKnown = nativeValidated && track.nativeCandidate.nodeKey != null;
             this.heldGeometry = heldGeometry;
             displayRegion = projected.region;
             this.geometrySource = geometrySource;
@@ -420,6 +463,9 @@ public final class SceneEngine {
         long textGroup;
         boolean fastVisible;
         boolean confirmed;
+        NativeTextResult.Candidate nativeCandidate;
+        int nativeLine;
+        long nativeValidUntilMillis;
 
         Track(long identity, Batch batch, Observation observation) {
             this.identity = identity;
@@ -456,6 +502,8 @@ public final class SceneEngine {
     /** Bounded last constructed IMAGE pose, before display-only duplicate suppression. */
     private final Map<Long, Mask> constructedImageMasks = new HashMap<>();
     private long imageEligibilityTarget;
+    private long nextNativeGroup;
+    private final Map<Long, NativeTextFrame> nativeFrames = new HashMap<>();
     private final List<Track> tracks = new ArrayList<>();
     private final List<Batch> qualityHistory = new ArrayList<>();
     private final Set<String> delivered = new HashSet<>();
@@ -484,6 +532,7 @@ public final class SceneEngine {
         imagePresentations.clear();
         constructedImageMasks.clear();
         imageEligibilityTarget = 0;
+        nativeFrames.clear();
         tracks.clear();
         qualityHistory.clear();
         delivered.clear();
@@ -552,6 +601,9 @@ public final class SceneEngine {
         Source to = sources.get(pair.to);
         if (motionConflict || pair.epoch != epoch || from == null || to == null || from.geometry != to.geometry
                 || from.width != to.width || from.height != to.height) return MotionAdmission.INVALID;
+        // Every existing motion edge describes image/event camera motion, not native-tree poses.
+        // A native read must not become a transit node that rebases unrelated visual evidence.
+        if (from.kind != SourceKind.IMAGE || to.kind != SourceKind.IMAGE) return MotionAdmission.INVALID;
         int existingIndex = -1;
         long pieces = 0;
         for (int i = 0; i < motions.size(); i++) {
@@ -627,6 +679,7 @@ public final class SceneEngine {
         if (estimate.to < imageEligibilityTarget) return PresentationAdmission.STALE;
         Source from = sources.get(estimate.from), to = sources.get(estimate.to);
         if (motionConflict || estimate.epoch != epoch || from == null || to == null
+                || from.kind != SourceKind.IMAGE || to.kind != SourceKind.IMAGE
                 || from.geometry != to.geometry || from.width != to.width || from.height != to.height) {
             return PresentationAdmission.INVALID;
         }
@@ -674,7 +727,8 @@ public final class SceneEngine {
 
     /** Called only with an actual acquired image, never a generic highest-source/text sequence. */
     public synchronized boolean advanceImageTarget(long sequence) {
-        if (sequence < imageEligibilityTarget || !sources.containsKey(sequence)) return false;
+        Source selected = sources.get(sequence);
+        if (sequence < imageEligibilityTarget || selected == null || selected.kind != SourceKind.IMAGE) return false;
         imageEligibilityTarget = sequence;
         if (imagePresentations.removeIf(estimate -> estimate.to < sequence)) revision++;
         return true;
@@ -685,7 +739,7 @@ public final class SceneEngine {
     private MotionAdmission invalidateMotionAuthority() {
         motionConflict = true;
         tracks.clear(); motions.clear(); qualityHistory.clear(); delivered.clear(); ready = null;
-        imagePresentations.clear(); constructedImageMasks.clear();
+        imagePresentations.clear(); constructedImageMasks.clear(); nativeFrames.clear();
         // Resource pins/descriptors remain owned until the runtime performs its own epoch reset.
         revision++;
         return MotionAdmission.CONFLICT;
@@ -791,7 +845,8 @@ public final class SceneEngine {
     /** Old-epoch, evicted-source and duplicate results are rejected without mutating evidence. */
     public synchronized boolean observe(Batch batch) {
         Source source = sources.get(batch.source.sequence);
-        if (motionConflict || batch.source.epoch != epoch || source == null || !source.sameDescriptor(batch.source)) return false;
+        if (motionConflict || batch.source.epoch != epoch || source == null || source.kind != SourceKind.IMAGE
+                || !source.sameDescriptor(batch.source)) return false;
         if ((long) batch.observations.size() + batch.inspections.size() > policy.maximumBatchItems) {
             capacityDrops++;
             return false;
@@ -832,10 +887,87 @@ public final class SceneEngine {
         }
         mergeCorrespondingTracks();
         replayNegativeEvidence();
+        if (tracks.size() > policy.maximumTracks && !nativeFrames.isEmpty()) {
+            // Native publication is a complete set, never an individually evictable line subset.
+            tracks.removeIf(track -> track.nativeCandidate != null);
+            nativeFrames.clear();
+            capacityDrops++;
+        }
         trimTracks();
         pruneDistinctRelations();
         revision++;
         return true;
+    }
+
+    /** Successful atomic admission owns one metadata pin, released by the runtime's native basis. */
+    public synchronized boolean admitNativeFrame(NativeTextFrame frame) {
+        Objects.requireNonNull(frame);
+        Source source = frame.source;
+        if (motionConflict || source.epoch != epoch || source.kind != SourceKind.NATIVE_TEXT) return false;
+        NativeTextFrame previous = nativeFrames.get(frame.partition);
+        if (previous != null && (source.sequence <= previous.source.sequence
+                || source.readFinishedAtMillis < previous.source.readFinishedAtMillis)) return false;
+        int retained = 0;
+        List<Track> old = new ArrayList<>();
+        for (Track track : tracks) {
+            if (track.nativeCandidate != null && track.partition == frame.partition) {
+                if (source.sequence <= track.evidenceSource.sequence
+                        || source.readFinishedAtMillis < track.evidenceSource.readFinishedAtMillis) return false;
+                old.add(track);
+            } else retained++;
+        }
+        if (frame.read.regionCount() > policy.maximumBatchItems
+                || (long) retained + frame.read.regionCount() > policy.maximumTracks
+                || (previous == null && nativeFrames.size() >= policy.maximumSources)) {
+            capacityDrops++; return false;
+        }
+        // All frame/provenance/shape/track-capacity checks precede registration and possible eviction.
+        if (!register(source) || !pin(source)) return false;
+        List<Track> replacement = new ArrayList<>();
+        Set<Long> used = new HashSet<>();
+        for (NativeTextResult.Candidate candidate : frame.read.candidates) {
+            long group = 0;
+            for (Track track : old) {
+                if (nativeMatches(track, candidate, source)) { group = track.textGroup; break; }
+            }
+            if (group == 0) group = ++nextNativeGroup;
+            for (int line = 0; line < candidate.regions.size(); line++) {
+                Observation observation = new Observation(candidate.category, frame.partition, group,
+                        candidate.regions.get(line), candidate.confidence);
+                Track match = null;
+                for (Track track : old) {
+                    if (!used.contains(track.identity) && track.nativeLine == line
+                            && nativeMatches(track, candidate, source)) { match = track; break; }
+                }
+                Batch batch = new Batch(source, Lane.TEXT, Collections.singletonList(observation), Collections.emptyList());
+                if (match == null) match = new Track(++nextIdentity, batch, observation);
+                else match.update(batch, observation);
+                match.nativeCandidate = candidate; match.nativeLine = line;
+                match.nativeValidUntilMillis = frame.validUntilMillis;
+                match.distinctFrom.clear(); match.qualitySources.clear(); match.negativeSources.clear();
+                used.add(match.identity); replacement.add(match);
+            }
+        }
+        tracks.removeIf(track -> track.nativeCandidate != null && track.partition == frame.partition);
+        tracks.addAll(replacement);
+        nativeFrames.put(frame.partition, frame);
+        pruneDistinctRelations();
+        revision++;
+        return true;
+    }
+
+    private static boolean nativeMatches(Track track, NativeTextResult.Candidate candidate, Source source) {
+        NativeTextResult.Candidate old = track.nativeCandidate;
+        if (old == null || !old.sameContent(candidate) || track.evidenceSource.windowId != source.windowId
+                || !compatibleCanvas(track.evidenceSource, source)) return false;
+        if (old.nodeKey != null) return old.nodeKey.equals(candidate.nodeKey);
+        return candidate.nodeKey == null && old.samePose(candidate);
+    }
+
+    public synchronized void clearNative(long partition) {
+        boolean removed = tracks.removeIf(track -> track.nativeCandidate != null && track.partition == partition);
+        if (nativeFrames.remove(partition) != null || removed) revision++;
+        pruneDistinctRelations();
     }
 
     /** Only this method constructs render geometry. Unknown correspondence stays explicit. */
@@ -859,6 +991,9 @@ public final class SceneEngine {
         Source source = sources.get(destination);
         if (source == null) throw new IllegalArgumentException("unknown destination");
         Source target = imageTarget == 0 ? null : sources.get(imageTarget);
+        if (target != null && target.kind != SourceKind.IMAGE) {
+            throw new IllegalArgumentException("native source is not an image target");
+        }
         if (target != null && (target.epoch != source.epoch || target.geometry != source.geometry
                 || target.width != source.width || target.height != source.height)) {
             throw new IllegalArgumentException("incompatible image presentation target");
@@ -868,7 +1003,7 @@ public final class SceneEngine {
         if (bases.size() > policy.maximumTracks) throw new IllegalArgumentException("too many render bases");
         for (Long selected : bases.values()) {
             Source basis = sources.get(selected);
-            if (basis == null || basis.epoch != source.epoch || basis.geometry != source.geometry
+            if (basis == null || basis.kind != SourceKind.IMAGE || basis.epoch != source.epoch || basis.geometry != source.geometry
                     || basis.width != source.width || basis.height != source.height) {
                 throw new IllegalArgumentException("incompatible render basis");
             }
@@ -885,6 +1020,7 @@ public final class SceneEngine {
         // An explicit carried basis cannot force fresher visible geometry backward, even when
         // an inverse estimate/image path exists. Tentative optional quality cannot move FAST.
         for (Track track : tracks) {
+            if (track.nativeCandidate != null) continue;
             Source carried = selectedSources.get(track.partition);
             Source direct = track.evidenceSource;
             if (carried != null && (track.fastVisible || track.confirmed)
@@ -909,19 +1045,22 @@ public final class SceneEngine {
             // Retention includes the exact hold boundary. The next millisecond is the first
             // invalid display time. Saturate instead of wrapping extreme test/source clocks.
             long received = track.evidenceSource.receivedAtMillis;
-            long deadline = received >= Long.MAX_VALUE - hold
-                    ? Long.MAX_VALUE : received + hold + 1;
+            long deadline = track.nativeCandidate != null
+                    ? (track.nativeValidUntilMillis == Long.MAX_VALUE ? Long.MAX_VALUE : track.nativeValidUntilMillis + 1)
+                    : (received >= Long.MAX_VALUE - hold ? Long.MAX_VALUE : received + hold + 1);
             nextChangeAt = Math.min(nextChangeAt, deadline);
             if (!track.fastVisible && !track.confirmed) { tentative++; continue; }
-            Source selected = selectedSources.getOrDefault(track.partition, source);
+            Source selected = track.nativeCandidate != null ? track.evidenceSource
+                    : selectedSources.getOrDefault(track.partition, source);
             // Direct geometry survives graph-node eviction. Reusing that immutable observation
             // is not an invented zero-motion edge from the track's eviction-rebased coordinates.
-            boolean optionalImageBasis = selectedSources.containsKey(track.partition) && selected.sequence != source.sequence;
+            boolean optionalImageBasis = track.nativeCandidate == null
+                    && selectedSources.containsKey(track.partition) && selected.sequence != source.sequence;
             Mask mask = projectedMask(track, selected, allowEventEstimates && !optionalImageBasis, false);
             if (optionalImageBasis) {
                 mask = supportedOrHeldMask(track, source, selected, mask);
             }
-            if (imageTarget != 0) mask = imagePresentedMask(track, source, target, mask);
+            if (track.nativeCandidate == null && imageTarget != 0) mask = imagePresentedMask(track, source, target, mask);
             if (mask == null) { unresolved++; continue; }
             if (mask.imageEstimated) constructedImageMasks.put(mask.identity, mask);
             else constructedImageMasks.remove(mask.identity);
@@ -937,6 +1076,7 @@ public final class SceneEngine {
             if (!estimate.estimatedMotion) continue;
             for (Mask direct : supported) {
                 if (!direct.estimatedMotion && direct.evidenceSource.sequence > estimate.evidenceSource.sequence
+                        && direct.evidenceSource.kind == estimate.evidenceSource.kind
                         && direct.geometrySource.sequence == estimate.geometrySource.sequence
                         && direct.partition == estimate.partition && direct.textGroup == estimate.textGroup
                         && direct.category.equals(estimate.category)
@@ -953,6 +1093,7 @@ public final class SceneEngine {
                 for (List<Mask> candidate : grouped) {
                     Mask first = candidate.get(0);
                     if (first.textGroup == mask.textGroup && first.partition == mask.partition
+                            && first.evidenceSource.kind == mask.evidenceSource.kind
                             && first.category.equals(mask.category)) { group = candidate; break; }
                 }
             }
@@ -974,6 +1115,12 @@ public final class SceneEngine {
     public synchronized Set<Long> activePartitions() {
         Set<Long> partitions = new HashSet<>();
         for (Track track : tracks) partitions.add(track.partition);
+        return Collections.unmodifiableSet(partitions);
+    }
+    /** Pixel render bases must not be kept alive by a coincident native partition number. */
+    public synchronized Set<Long> activeImagePartitions() {
+        Set<Long> partitions = new HashSet<>();
+        for (Track track : tracks) if (track.nativeCandidate == null) partitions.add(track.partition);
         return Collections.unmodifiableSet(partitions);
     }
     public synchronized int sourceCount() { return sources.size(); }
@@ -1015,6 +1162,7 @@ public final class SceneEngine {
     }
 
     private boolean expired(Track track, long nowMillis) {
+        if (track.nativeCandidate != null) return nowMillis > track.nativeValidUntilMillis;
         long hold = track.confirmed ? policy.retainedMillis : policy.transientMillis;
         return nowMillis > track.evidenceSource.receivedAtMillis
                 && nowMillis - track.evidenceSource.receivedAtMillis > hold;
@@ -1153,7 +1301,7 @@ public final class SceneEngine {
     }
 
     private static boolean sameKind(Track track, Observation observation, Lane lane) {
-        return track.partition == observation.partition && track.category.equals(observation.category)
+        return track.nativeCandidate == null && track.partition == observation.partition && track.category.equals(observation.category)
                 && ((track.latestLane == Lane.TEXT) == (lane == Lane.TEXT));
     }
 
@@ -1162,7 +1310,8 @@ public final class SceneEngine {
             Track kept = tracks.get(i);
             for (int j = i + 1; j < tracks.size();) {
                 Track other = tracks.get(j);
-                if (kept.partition != other.partition || !kept.category.equals(other.category)
+                if (kept.nativeCandidate != null || other.nativeCandidate != null
+                        || kept.partition != other.partition || !kept.category.equals(other.category)
                         || ((kept.latestLane == Lane.TEXT) != (other.latestLane == Lane.TEXT))
                         || kept.distinctFrom.contains(other.identity)
                         || other.distinctFrom.contains(kept.identity)) { j++; continue; }
@@ -1229,6 +1378,7 @@ public final class SceneEngine {
             // leases on a reference image. Eviction must not erase their meaning.
         }
         sources.remove(sequence);
+        nativeFrames.entrySet().removeIf(entry -> entry.getValue().source.sequence == sequence);
         motions.removeIf(motion -> motion.from == sequence || motion.to == sequence);
         imagePresentations.removeIf(estimate -> estimate.from == sequence || estimate.to == sequence);
         qualityHistory.removeIf(batch -> batch.source.sequence == sequence);

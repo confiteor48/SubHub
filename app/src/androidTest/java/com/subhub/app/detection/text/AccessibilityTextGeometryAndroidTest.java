@@ -46,4 +46,18 @@ public final class AccessibilityTextGeometryAndroidTest {
         assertNotNull(result);
         assertEquals(new BBox(64, 420, 448, 38), result.getBox());
     }
+
+    @Test public void whollyOffscreenRowsCannotBecomePositiveOnePixelEdgeRectangles() {
+        RectF[] characters = new RectF[]{new RectF(50, 1000, 80, 1030), new RectF(80, 1000, 110, 1030)};
+        org.junit.Assert.assertTrue("Known nonintersection is not visible edge coverage",
+                AccessibilityTextGeometry.lineBoundsParts(characters, 0, 2, 500, 900).isEmpty());
+    }
+
+    @Test public void clippingKeepsOnlyKnownVisibleIntersectionsAndRejectsEveryOutsideEdge() {
+        RectF[] characters = new RectF[]{new RectF(50, -100, 80, -70), new RectF(50, 890, 80, 930),
+                new RectF(-80, 100, -50, 130), new RectF(510, 140, 540, 170)};
+        java.util.List<Rect> rows = AccessibilityTextGeometry.lineBoundsParts(characters, 0, 4, 500, 900);
+        assertEquals(1, rows.size()); assertEquals(new Rect(48, 888, 82, 900), rows.get(0));
+        org.junit.Assert.assertNull(AccessibilityTextGeometry.lineBounds(new RectF[]{characters[0]}, 0, 1, 500, 900));
+    }
 }

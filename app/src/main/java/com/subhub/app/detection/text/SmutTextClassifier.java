@@ -105,7 +105,16 @@ public final class SmutTextClassifier {
     }
 
     static String normalize(String source) {
-        String decomposed = foldHomoglyphs(Normalizer.normalize(source, Normalizer.Form.NFKD)
+        String decomposed = decomposeAndFold(source);
+        String plain = COMBINING_MARKS.matcher(decomposed).replaceAll("");
+        String words = WHITESPACE.matcher(
+                NON_WORD.matcher(plain).replaceAll(" ")).replaceAll(" ").trim();
+        return collapseLetterSpacing(words);
+    }
+
+    /** Shared unchanged prefix for normalization and original UTF-16 position mapping. */
+    static String decomposeAndFold(String source) {
+        return foldHomoglyphs(Normalizer.normalize(source, Normalizer.Form.NFKD)
                 .toLowerCase(Locale.ROOT))
                 .replace('0', 'o')
                 .replace('1', 'i')
@@ -115,10 +124,6 @@ public final class SmutTextClassifier {
                 .replace('7', 't')
                 .replace('@', 'a')
                 .replace('$', 's');
-        String plain = COMBINING_MARKS.matcher(decomposed).replaceAll("");
-        String words = WHITESPACE.matcher(
-                NON_WORD.matcher(plain).replaceAll(" ")).replaceAll(" ").trim();
-        return collapseLetterSpacing(words);
     }
 
     private static String foldHomoglyphs(String value) {
@@ -128,7 +133,7 @@ public final class SmutTextClassifier {
                 .replace('х', 'x').replace('у', 'y');
     }
 
-    private static String collapseLetterSpacing(String value) {
+    static String collapseLetterSpacing(String value) {
         Matcher matcher = LETTER_SPACED.matcher(value);
         StringBuffer result = new StringBuffer(value.length());
         while (matcher.find()) {

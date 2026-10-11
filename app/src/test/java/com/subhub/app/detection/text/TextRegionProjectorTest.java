@@ -4,6 +4,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import com.subhub.app.detection.BBox;
+import java.util.List;
 
 import org.junit.Test;
 
@@ -39,6 +40,34 @@ public final class TextRegionProjectorTest {
         assertNotNull(box);
         assertTrue(box.getHeight() >= 100);
         assertTrue(box.getHeight() <= 225);
+    }
+
+    @Test public void nativeEstimateKeepsKnownBlankRowsAndDeclaresSeparateLineMembers() {
+        List<BBox> boxes = projectLines("send nudes\n\nporn", 70, 300, 1010, 462);
+        org.junit.Assert.assertEquals(2, boxes.size());
+        assertTrue(boxes.get(0).getBottom() < boxes.get(1).getY());
+    }
+
+    @Test public void nativeEstimateDoesNotIncludeRemovedSeparatorLine() {
+        List<BBox> boxes = projectLines("porn\n\n---------------", 70, 300, 1010, 462);
+        org.junit.Assert.assertEquals(1, boxes.size());
+        assertTrue(boxes.get(0).getBottom() < 360);
+    }
+
+    @Test public void nativeEstimateClipsKnownNonintersectionWithoutMovingTextIntoView() {
+        org.junit.Assert.assertNull(projectLines("porn", 70, 2500, 1010, 2600));
+        org.junit.Assert.assertNull(projectLines("ordinary safe row\nporn", 70, -162, 1010, -54));
+    }
+
+    @Test public void nativeEstimateRejectsTooManyExplicitRowsInsteadOfCallingASubsetComplete() {
+        org.junit.Assert.assertNull(projectLines("porn\n\n\n\n\n\n\n\n\n\n\n\n\nporn", 70, 300, 1010, 1700));
+    }
+
+    private List<BBox> projectLines(String text, int left, int top, int right, int bottom) {
+        SmutTextClassifier.Match match = classifier.classify(text, new TextSmutConfig(
+                true, TextSmutConfig.SENSITIVITY_BALANCED, TextSmutConfig.DEFAULT_CATEGORIES));
+        assertTrue(match.isMatched());
+        return TextRegionProjector.projectLines(text, match, left, top, right, bottom, 1080, 2400);
     }
 
     private BBox project(String text, int left, int top, int right, int bottom) {

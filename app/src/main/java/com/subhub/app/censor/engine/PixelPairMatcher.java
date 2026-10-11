@@ -46,6 +46,7 @@ public final class PixelPairMatcher {
         public static Image copyOf(SceneEngine.Source source, PixelGeometry geometry, int width, int height,
                 Provenance provenance, Sampling sampling, int[] argb) {
             if (source == null || geometry == null || argb == null || provenance == null || sampling == null
+                    || source.kind != SceneEngine.SourceKind.IMAGE
                     || provenance == Provenance.CENSORED || width < 8 || height < 8
                     || width > MAXIMUM_WIDTH || height > MAXIMUM_HEIGHT
                     || (long) width * height != argb.length

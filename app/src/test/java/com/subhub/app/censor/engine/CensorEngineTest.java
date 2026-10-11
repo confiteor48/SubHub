@@ -28,6 +28,20 @@ public class CensorEngineTest {
                         new SceneEngine.Region(100, 500, 200, 600), 0, 0, dy, dy)));
     }
 
+    @Test public void pixelTextAliasIsNotIndependentNativeAcquisition() {
+        Harness h = new Harness(false, true, false, 8, 2, 16);
+        h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne(); h.textExecutor.runOne();
+        h.text.succeed(0); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne(); h.textExecutor.runOne();
+        h.text.succeed(1, text(1000)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            // This is legitimate image-B TEXT behavior, but an unsafe alias for an unrelated tree.
+            assertEquals(2, view.snapshot.destination.sequence);
+            assertEquals(1, masks(view.snapshot).size());
+            assertEquals("TEXT", masks(view.snapshot).get(0).category);
+        } finally { h.engine.close(); h.fast.calls.get(1).completion.cancelled(); }
+    }
+
     @Test public void imageHintBeforeFirstFastUsesActualBWithoutBAiOrBEffectPixels() {
         Harness h = new Harness(); h.start(); h.fire(0); Pixel a = h.deliver(0, 1); h.fastExecutor.runOne();
         h.fire(334); Pixel b = h.deliver(1, 2);

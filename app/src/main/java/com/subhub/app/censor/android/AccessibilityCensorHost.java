@@ -15,6 +15,10 @@ import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.censor.engine.VisualInferencePolicy;
 import com.subhub.app.detection.DetectionEngine;
 import com.subhub.app.detection.DetectorConfig;
+import com.subhub.app.detection.text.NativeTextReader;
+import com.subhub.app.detection.text.SmutTextClassifier;
+import com.subhub.app.detection.text.TextSmutConfig;
+import com.subhub.app.censor.engine.NativeTextFrame;
 
 import java.util.Arrays;
 import java.util.EnumSet;
@@ -23,6 +27,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -34,6 +39,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class AccessibilityCensorHost implements AutoCloseable {
     public static final long PLATFORM_INTERVAL_MILLIS = 334;
     public static final long VISUAL_PARTITION = 1;
+    public static final long NATIVE_TEXT_PARTITION = 2;
+    public static final long NATIVE_REFRESH_MILLIS = 120;
+    public static final long NATIVE_CONFIRMATION_MILLIS = 48;
+    public static final long NATIVE_MAXIMUM_AGE_MILLIS = 1000;
 
     public interface Observer extends CensorEngine.Observer, AccessibilityCapturer.Observer {
         default void providerReady(SceneEngine.Lane lane, String provider, long initializationMillis) { }
@@ -55,8 +64,15 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         final long token;
         final DetectorConfig detector;
         final boolean quality;
+        final TextSmutConfig text;
+        final boolean semanticText, exactText;
         Configuration(long token, DetectorConfig detector, boolean quality) {
+            this(token, detector, quality, null, false, false);
+        }
+        Configuration(long token, DetectorConfig detector, boolean quality,
+                TextSmutConfig text, boolean semanticText, boolean exactText) {
             this.token = token; this.detector = Objects.requireNonNull(detector); this.quality = quality;
+            this.text = text; this.semanticText = semanticText; this.exactText = exactText;
         }
     }
 
@@ -68,6 +84,10 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private final Slot fast = new Slot(SceneEngine.Lane.FAST);
     private final Slot quality = new Slot(SceneEngine.Lane.QUALITY);
     private final CensorEngine<PixelFrame> engine;
+    private final NativeTextReader.Provider textProvider;
+    private final ScheduledExecutorService nativeReads;
+    private NativeTextReader textReader; // Its serial executor owns access, including confirmation.
+    private Configuration textReaderConfiguration;
     private final AtomicBoolean disposing = new AtomicBoolean();
     private final AtomicBoolean disposalFailed = new AtomicBoolean();
     private volatile Configuration configuration;
@@ -85,10 +105,20 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     /** Native contract boundary. Production uses the actual service adapter above. */
     public AccessibilityCensorHost(Context context, SceneEngine.Policy scenePolicy,
             CapturerFactory capturer, WorkerFactory factory, Observer observer) {
+        this(context, scenePolicy, capturer, factory, observer, null);
+    }
+
+    public AccessibilityCensorHost(Context context, SceneEngine.Policy scenePolicy,
+            CapturerFactory capturer, WorkerFactory factory, Observer observer,
+            NativeTextReader.Provider textProvider) {
         this.context = Objects.requireNonNull(context).getApplicationContext();
         this.main = new Handler(Looper.getMainLooper());
         this.factory = Objects.requireNonNull(factory);
         this.observer = Objects.requireNonNull(observer);
+        this.textProvider = textProvider;
+        nativeReads = textProvider == null ? null : Executors.newSingleThreadScheduledExecutor(action -> new Thread(() -> {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); action.run();
+        }, "Censor-native-text"));
         Executor presentation = this::post;
         CensorEngine.Timer timer = (action, delay) -> {
             if (!main.postDelayed(action, delay)) throw new RejectedExecutionException("main looper closed");
@@ -112,27 +142,42 @@ public final class AccessibilityCensorHost implements AutoCloseable {
                         }
                         observer.batchAccepted(batch);
                     }
+                    @Override public void nativeTextAccepted(NativeTextFrame frame) { observer.nativeTextAccepted(frame); }
                     @Override public void drained() {
                         try { observer.drained(); } finally { disposeAfterDrain(); }
                     }
-                });
+                }, textProvider == null ? null : new CensorEngine.NativeTextLane(NATIVE_TEXT_PARTITION,
+                        NATIVE_REFRESH_MILLIS, NATIVE_MAXIMUM_AGE_MILLIS, nativeReads, this::readNative));
+        if (textProvider != null) engine.nativeTextControls(false);
     }
 
     /** Token identifies foreground/window/document AND inference settings, never just dimensions. */
     public void start(long token, DetectorConfig detector, boolean qualityEnabled) {
+        start(token, detector, qualityEnabled, null, false, false);
+    }
+
+    public void start(long token, DetectorConfig detector, boolean qualityEnabled,
+            TextSmutConfig text, boolean semanticText, boolean exactText) {
         onMain();
         if (closed || active) throw new IllegalStateException("host cannot start");
-        configuration = new Configuration(token, detector, qualityEnabled);
+        if (text != null && text.isEnabled() && textProvider == null) throw new IllegalStateException("native provider unavailable");
+        configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
         controls(); active = true; engine.start(token);
     }
 
     /** Same owner survives reconfiguration and waits for old callbacks/running native jobs. */
     public void changeScope(long token, DetectorConfig detector, boolean qualityEnabled) {
+        changeScope(token, detector, qualityEnabled, null, false, false);
+    }
+
+    public void changeScope(long token, DetectorConfig detector, boolean qualityEnabled,
+            TextSmutConfig text, boolean semanticText, boolean exactText) {
         onMain(); if (closed) return;
         if (configuration != null && configuration.token == token) {
             throw new IllegalArgumentException("scope/config token must change");
         }
-        configuration = new Configuration(token, detector, qualityEnabled);
+        if (text != null && text.isEnabled() && textProvider == null) throw new IllegalStateException("native provider unavailable");
+        configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
         // Fence old jobs before admitting new settings or changing provider concurrency.
         engine.changeScope(token); controls();
     }
@@ -149,11 +194,15 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         return engine.presentationEstimate(estimate);
     }
     public void requestCapture() { onMain(); engine.requestCaptureAt(SystemClock.uptimeMillis()); }
+    public void requestNativeText(boolean contentChanged) {
+        onMain(); engine.requestNativeTextAt(SystemClock.uptimeMillis(), contentChanged);
+    }
     public void drawn(long revision) { engine.drawn(revision); }
 
     private void controls() {
         Configuration value = configuration;
         if (value == null || closed) return;
+        engine.nativeTextControls(value.text != null && value.text.isEnabled());
         EnumSet<SceneEngine.Lane> enabled = EnumSet.noneOf(SceneEngine.Lane.class);
         if (!value.detector.getEnabledCategories().isEmpty()) {
             enabled.add(SceneEngine.Lane.FAST);
@@ -162,6 +211,18 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         boolean parallel = fast.sessionMatches(value.detector) && quality.sessionMatches(value.detector)
                 && "CPU".equals(fast.provider) && "NNAPI".equals(quality.provider);
         engine.executionControls(Math.max(0, value.detector.getDetectionIntervalMs()), parallel, enabled);
+    }
+
+    private void readNative(CensorEngine.NativeTextInput input, CensorEngine.NativeTextCompletion completion) {
+        Configuration value = configuration;
+        if (input.cancelled() || closed || value == null || value.text == null || !value.text.isEnabled()
+                || input.geometry != value.token) { completion.cancelled(); return; }
+        if (textReaderConfiguration != value) {
+            textReader = new NativeTextReader(textProvider, new SmutTextClassifier(context), value.text,
+                    value.semanticText, value.exactText, nativeReads, NATIVE_CONFIRMATION_MILLIS);
+            textReaderConfiguration = value;
+        }
+        textReader.start(input, completion);
     }
 
     /** Optional context initialization must not occupy a quality inference job and stall FAST. */
@@ -294,13 +355,15 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private void disposeAfterDrain() {
         if (!disposing.compareAndSet(false, true)) return;
         callbacks.shutdown();
+        if (nativeReads != null) { nativeReads.shutdown(); textReader = null; textReaderConfiguration = null; }
         AtomicInteger remaining = new AtomicInteger(2);
         Runnable done = () -> { if (remaining.decrementAndGet() == 0) post(this::awaitExecutorTermination); };
         fast.dispose(done); quality.dispose(done);
     }
 
     private void awaitExecutorTermination() {
-        if (!callbacks.isTerminated() || !fast.executor.isTerminated() || !quality.executor.isTerminated()) {
+        if (!callbacks.isTerminated() || !fast.executor.isTerminated() || !quality.executor.isTerminated()
+                || (nativeReads != null && !nativeReads.isTerminated())) {
             main.postDelayed(this::awaitExecutorTermination, 10); return;
         }
         observer.executorsTerminated(!disposalFailed.get());

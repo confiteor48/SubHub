@@ -53,12 +53,36 @@ public final class CensorEngine<P> implements AutoCloseable {
         /** Worker-owned temporary/native cleanup failed; an ordinary failed result is insufficient. */
         void resourceFailure();
     }
+    public interface NativeTextWorker {
+        /** Own roots/probes until cleanup and actual terminal completion, including cancellation. */
+        void start(NativeTextInput input, NativeTextCompletion completion);
+    }
+    public interface NativeTextCompletion {
+        void success(NativeTextResult read);
+        void failure();
+        void cancelled();
+        void resourceFailure();
+    }
+    public static final class NativeTextLane {
+        public final long partition, minimumRefreshMillis, maximumAgeMillis;
+        public final Executor executor;
+        public final NativeTextWorker worker;
+        public NativeTextLane(long partition, long minimumRefreshMillis, long maximumAgeMillis,
+                Executor executor, NativeTextWorker worker) {
+            if (minimumRefreshMillis <= 0 || maximumAgeMillis <= 0) throw new IllegalArgumentException("native policy");
+            this.partition = partition; this.minimumRefreshMillis = minimumRefreshMillis;
+            this.maximumAgeMillis = maximumAgeMillis;
+            this.executor = Objects.requireNonNull(executor); this.worker = Objects.requireNonNull(worker);
+        }
+    }
     public interface Observer {
         default void trace(Trace trace) { }
         /** Renderer must acquire a read handle, not keep/mutate runtime scene state. */
         default void presentationChanged() { }
         /** Accepted source-local evidence, not a draw/vsync or failed/incomplete worker result. */
         default void batchAccepted(SceneEngine.Batch batch) { }
+        /** Complete typed native read; no image timing/ownership is implied by this callback. */
+        default void nativeTextAccepted(NativeTextFrame frame) { }
         /** Permanent close has no remaining capture, job, pixel or draw-handle owner. */
         default void drained() { }
     }
@@ -74,6 +98,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     public static final class Trace {
         public final Stage stage;
         public final long epoch;
+        /** Exact IMAGE request lineage; zero means this row has no image-request provenance. */
         public final long source;
         public final SceneEngine.Lane lane;
         public final long atMillis;
@@ -189,24 +214,49 @@ public final class CensorEngine<P> implements AutoCloseable {
     public static final class Input<P> {
         public final SceneEngine.Source source;
         public final P pixels;
+        private final InputLifetime lifetime;
+        private Input(SceneEngine.Source source, P pixels, BooleanSupplier cancellation) {
+            this.source = source; this.pixels = pixels; lifetime = new InputLifetime(cancellation);
+        }
+        public boolean cancelled() { return lifetime.cancelled(); }
+        public void onCancellation(Cancellation handle) { lifetime.onCancellation(handle); }
+        private void signalCancellation() { lifetime.signalCancellation(); }
+        private void finish() { lifetime.finish(); }
+    }
+
+    /** Independent provider read request. It is not a captured image or a source descriptor yet. */
+    public static final class NativeTextInput {
+        public final long identity, epoch, geometry;
+        private final InputLifetime lifetime;
+        private final LongSupplier beginRead, clock;
+        private NativeTextInput(long identity, long epoch, long geometry, BooleanSupplier cancellation,
+                LongSupplier beginRead, LongSupplier clock) {
+            this.identity = identity; this.epoch = epoch; this.geometry = geometry;
+            lifetime = new InputLifetime(cancellation); this.beginRead = beginRead; this.clock = clock;
+        }
+        /** Call once immediately before root/provider access. Negative means admission was cancelled. */
+        public long beginRead() { return beginRead.getAsLong(); }
+        public long nowMillis() { return clock.getAsLong(); }
+        public boolean cancelled() { return lifetime.cancelled(); }
+        public void onCancellation(Cancellation handle) { lifetime.onCancellation(handle); }
+    }
+
+    /** One cancellation/terminal implementation for both pixel and native operation lifetimes. */
+    private static final class InputLifetime {
         private final BooleanSupplier cancellation;
         private Cancellation operationCancellation;
         private boolean signalled;
         private boolean finished;
         private boolean cancellationInvoked;
 
-        private Input(SceneEngine.Source source, P pixels, BooleanSupplier cancellation) {
-            this.source = source;
-            this.pixels = pixels;
-            this.cancellation = cancellation;
-        }
-        public boolean cancelled() { return cancellation.getAsBoolean(); }
+        private InputLifetime(BooleanSupplier cancellation) { this.cancellation = cancellation; }
+        boolean cancelled() { return cancellation.getAsBoolean(); }
 
         /**
          * Bind an exact per-operation handle, never a lane-wide "cancel current inference" call.
          * The handle must safely tolerate a race with its own terminal completion/close.
          */
-        public void onCancellation(Cancellation handle) {
+        void onCancellation(Cancellation handle) {
             boolean invoke;
             synchronized (this) {
                 if (finished) return;
@@ -284,6 +334,22 @@ public final class CensorEngine<P> implements AutoCloseable {
         }
     }
 
+    private final class NativeJob {
+        final long epoch = CensorEngine.this.epoch;
+        final long generation = nativeGeneration;
+        final NativeTextInput input;
+        final long queuedAt;
+        volatile boolean cancellation;
+        JobPhase phase = JobPhase.QUEUED;
+        long readStartedAt = -1;
+        long startedAt = -1;
+        NativeJob(long identity, long queuedAt) {
+            this.queuedAt = queuedAt;
+            input = new NativeTextInput(identity, epoch, geometry, () -> cancellation,
+                    () -> beginNativeRead(this), clock);
+        }
+    }
+
     private final class Ticket {
         final CaptureRequest request;
         boolean dispatched;
@@ -347,6 +413,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     private final Capturer<P> capturer;
     private final Executor presentationExecutor;
     private final Observer observer;
+    private final NativeTextLane nativeText;
     private final SceneEngine scene;
     private final int maximumRenderBases;
     private final int maximumBasisSources;
@@ -363,6 +430,13 @@ public final class CensorEngine<P> implements AutoCloseable {
     private SceneEngine.Source destinationSource;
     /** Actual successful image acquisition, independent of FAST/QUALITY/TEXT completion. */
     private SceneEngine.Source latestImageSource;
+    private SceneEngine.Source nativeBasis;
+    private int displayWidth, displayHeight;
+    private long nextSource, nextNativeRequest, nativeGeneration;
+    private long nativeDemandAt = Long.MAX_VALUE, lastNativeCompletedAt = -1;
+    private NativeJob nativeJob;
+    private TimerTicket nativeTimer;
+    private boolean nativeEnabled;
     private boolean active;
     private boolean closed;
     private boolean firstFastCompleted;
@@ -385,6 +459,12 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     public CensorEngine(Policy policy, SceneEngine.Policy scenePolicy, LongSupplier clock, Timer timer,
             Capturer<P> capturer, List<LaneWorker<P>> workers, Executor presentationExecutor, Observer observer) {
+        this(policy, scenePolicy, clock, timer, capturer, workers, presentationExecutor, observer, null);
+    }
+
+    public CensorEngine(Policy policy, SceneEngine.Policy scenePolicy, LongSupplier clock, Timer timer,
+            Capturer<P> capturer, List<LaneWorker<P>> workers, Executor presentationExecutor, Observer observer,
+            NativeTextLane nativeText) {
         this.policy = Objects.requireNonNull(policy);
         requestedCaptureMillis = policy.minimumCaptureMillis;
         parallelQuality = policy.parallelQuality;
@@ -393,12 +473,16 @@ public final class CensorEngine<P> implements AutoCloseable {
         this.capturer = Objects.requireNonNull(capturer);
         this.presentationExecutor = Objects.requireNonNull(presentationExecutor);
         this.observer = Objects.requireNonNull(observer);
+        this.nativeText = nativeText; nativeEnabled = nativeText != null;
         SceneEngine.Policy selectedScenePolicy = Objects.requireNonNull(scenePolicy);
         scene = new SceneEngine(epoch, selectedScenePolicy);
         maximumRenderBases = Math.min(selectedScenePolicy.maximumTracks, selectedScenePolicy.maximumCorrespondences);
         // Reserve acquisition/job/frame capacity plus the detector/canvas metadata pin. Optional
         // display metadata must not starve active work or the latest pending source after disposal.
-        maximumBasisSources = Math.max(0, selectedScenePolicy.maximumSources - policy.maximumPixelFrames - 1);
+        // Native replacement reserves one additional source beside its current basis; do not
+        // release valid current metadata or evict graph nodes just to validate a failed read.
+        maximumBasisSources = Math.max(0, selectedScenePolicy.maximumSources - policy.maximumPixelFrames
+                - 1 - (nativeText == null ? 0 : 1));
         for (LaneWorker<P> worker : workers) {
             if (lanes.put(worker.lane, new LaneState(worker)) != null) throw new IllegalArgumentException("duplicate lane");
         }
@@ -414,6 +498,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             active = true;
             invalidate(actions);
             wake(clock.getAsLong(), actions);
+            demandNative(clock.getAsLong(), actions);
         }
         run(actions);
     }
@@ -424,6 +509,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             this.geometry = geometry;
             invalidate(actions);
             wake(clock.getAsLong(), actions);
+            demandNative(clock.getAsLong(), actions);
         }
         run(actions);
     }
@@ -455,6 +541,38 @@ public final class CensorEngine<P> implements AutoCloseable {
         synchronized (this) { wake(atMillis, actions); }
         run(actions);
     }
+
+    /** Native demand is independent of image acquisition and its platform spacing. */
+    public void requestNativeTextAt(long atMillis, boolean contentChanged) {
+        if (atMillis < 0) throw new IllegalArgumentException("native request time");
+        List<Runnable> actions = new ArrayList<>();
+        synchronized (this) {
+            if (nativeText == null || !nativeEnabled || !active || closed) return;
+            if (contentChanged) { nativeGeneration++; cancelNative(actions); }
+            demandNative(atMillis, actions);
+        }
+        run(actions);
+    }
+
+    public void nativeTextControls(boolean enabled) {
+        List<Runnable> actions = new ArrayList<>();
+        synchronized (this) {
+            if (enabled && nativeText == null) throw new IllegalStateException("native reader unavailable");
+            if (closed || nativeEnabled == enabled) return;
+            nativeEnabled = enabled;
+            if (enabled) demandNative(clock.getAsLong(), actions);
+            else {
+                nativeGeneration++; nativeDemandAt = Long.MAX_VALUE;
+                cancelNativeTimer(actions); cancelNative(actions);
+                if (nativeBasis != null) { scene.unpin(nativeBasis); nativeBasis = null; }
+                scene.clearNative(nativeText.partition);
+                if (destination != 0) queuePresentation(actions);
+            }
+        }
+        run(actions);
+    }
+
+    public synchronized boolean nativeTextInFlight() { return nativeJob != null; }
 
     /**
      * Change execution controls without replacing platform/callback ownership. Disabling a lane
@@ -615,9 +733,13 @@ public final class CensorEngine<P> implements AutoCloseable {
         destination = 0;
         destinationSource = null;
         latestImageSource = null;
+        nativeBasis = null;
+        displayWidth = 0; displayHeight = 0;
+        nativeGeneration++; nativeDemandAt = Long.MAX_VALUE;
         firstFastCompleted = false;
         cancelTimer(actions);
         cancelPresentationTimer(actions);
+        cancelNativeTimer(actions); cancelNative(actions);
         for (LaneState lane : lanes.values()) {
             if (lane.pending != null) { actions.add(lane.pending::release); lane.pending = null; }
             cancelJob(lane.active, actions);
@@ -631,6 +753,137 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     private long nextCaptureAt() {
         return Math.max(retryNotBefore, lastDispatchAt < 0 ? 0 : plus(lastDispatchAt, requestedCaptureMillis));
+    }
+
+    private void demandNative(long at, List<Runnable> actions) {
+        if (nativeText == null || !nativeEnabled || !active || closed) return;
+        nativeDemandAt = Math.min(nativeDemandAt, at);
+        wakeNative(actions);
+    }
+
+    private void wakeNative(List<Runnable> actions) {
+        if (nativeText == null || !nativeEnabled || !active || closed || nativeJob != null
+                || nativeDemandAt == Long.MAX_VALUE || resourceFailures != 0 || unadoptedDisposals != 0) return;
+        long target = Math.max(clock.getAsLong(), Math.max(nativeDemandAt,
+                lastNativeCompletedAt < 0 ? 0 : plus(lastNativeCompletedAt, nativeText.minimumRefreshMillis)));
+        if (nativeTimer != null && nativeTimer.at <= target) return;
+        cancelNativeTimer(actions);
+        TimerTicket expected = new TimerTicket(target); nativeTimer = expected;
+        actions.add(() -> {
+            try { expected.attach(timer.schedule(() -> nativeTick(expected), Math.max(0, target - clock.getAsLong()))); }
+            catch (RuntimeException failure) {
+                synchronized (CensorEngine.this) { if (nativeTimer == expected) nativeTimer = null; callbackFailures++; }
+            }
+        });
+    }
+
+    private void cancelNativeTimer(List<Runnable> actions) {
+        if (nativeTimer != null) { actions.add(nativeTimer::cancel); nativeTimer = null; }
+    }
+
+    private void nativeTick(TimerTicket expected) {
+        List<Runnable> actions = new ArrayList<>();
+        synchronized (this) {
+            if (nativeTimer != expected || !active || closed || !nativeEnabled) return;
+            nativeTimer = null;
+            if (nativeJob != null) return;
+            long now = clock.getAsLong();
+            long eligible = Math.max(expected.at, Math.max(nativeDemandAt,
+                    lastNativeCompletedAt < 0 ? 0 : plus(lastNativeCompletedAt, nativeText.minimumRefreshMillis)));
+            if (now < eligible) {
+                // A timer callback is not actual provider-read eligibility.
+                wakeNative(actions);
+            } else {
+                NativeJob job = new NativeJob(++nextNativeRequest, now);
+                nativeJob = job; nativeDemandAt = Long.MAX_VALUE;
+                actions.add(() -> {
+                    try { nativeText.executor.execute(() -> invokeNative(job)); }
+                    catch (RuntimeException failure) { completeNative(job, null, false); }
+                });
+            }
+        }
+        run(actions);
+    }
+
+    private void invokeNative(NativeJob job) {
+        synchronized (this) {
+            if (job.phase != JobPhase.QUEUED) return;
+            job.phase = JobPhase.RUNNING; job.startedAt = clock.getAsLong();
+        }
+        try {
+            nativeText.worker.start(job.input, new NativeTextCompletion() {
+                @Override public void success(NativeTextResult read) { completeNative(job, read, false); }
+                @Override public void failure() { completeNative(job, null, false); }
+                @Override public void cancelled() { completeNative(job, null, false); }
+                @Override public void resourceFailure() { completeNative(job, null, true); }
+            });
+        } catch (RuntimeException failure) { completeNative(job, null, false); }
+    }
+
+    private long beginNativeRead(NativeJob job) {
+        synchronized (this) {
+            if (nativeJob != job || job.phase != JobPhase.RUNNING || job.cancellation || !active || closed
+                    || !nativeEnabled || job.epoch != epoch || job.generation != nativeGeneration
+                    || job.readStartedAt != -1 || resourceFailures != 0) return -1;
+            job.readStartedAt = clock.getAsLong();
+            return job.readStartedAt;
+        }
+    }
+
+    private void cancelNative(List<Runnable> actions) {
+        NativeJob job = nativeJob;
+        if (job == null || job.phase == JobPhase.DONE || job.cancellation) return;
+        job.cancellation = true;
+        actions.add(job.input.lifetime::signalCancellation);
+        if (job.phase == JobPhase.QUEUED) {
+            job.phase = JobPhase.DONE; job.input.lifetime.finish(); nativeJob = null;
+        }
+    }
+
+    private void completeNative(NativeJob job, NativeTextResult read, boolean unsafe) {
+        List<Runnable> actions = new ArrayList<>();
+        synchronized (this) {
+            if (job.phase == JobPhase.DONE) return;
+            job.phase = JobPhase.DONE; job.input.lifetime.finish();
+            if (nativeJob == job) nativeJob = null;
+            long now = clock.getAsLong();
+            if (job.readStartedAt >= 0) lastNativeCompletedAt = now;
+            if (unsafe) {
+                if (resourceFailures++ == 0) invalidate(actions);
+                trace(Stage.RESOURCE_FAILED, null, SceneEngine.Lane.TEXT, 0, null, actions);
+            } else if (read != null && active && !closed && nativeEnabled && !job.cancellation
+                    && job.epoch == epoch && job.generation == nativeGeneration && job.readStartedAt >= 0
+                    && read.readStartedAtMillis == job.readStartedAt && read.readFinishedAtMillis <= now
+                    && now <= plus(read.readFinishedAtMillis, nativeText.maximumAgeMillis)) {
+                if (displayWidth != 0 && (read.width != displayWidth || read.height != displayHeight)) {
+                    invalidate(actions); demandNative(now, actions); wake(now, actions);
+                } else {
+                    Set<Long> basisSources = new java.util.HashSet<>();
+                    for (SceneEngine.Source basis : renderBases.values()) basisSources.add(basis.sequence);
+                    boolean capacity = (long) basisSources.size() + 1 <= maximumBasisSources
+                            && (long) renderBases.size() + 1 <= maximumRenderBases;
+                    if (capacity) {
+                        SceneEngine.Source source = SceneEngine.Source.nativeText(epoch, ++nextSource, geometry,
+                                read.width, read.height, read.windowId, read.readStartedAtMillis, read.readFinishedAtMillis, now);
+                        NativeTextFrame frame = new NativeTextFrame(source, nativeText.partition, read,
+                                nativeText.maximumAgeMillis, job.input.identity, job.queuedAt, job.startedAt);
+                        if (scene.admitNativeFrame(frame)) {
+                            if (nativeBasis != null) scene.unpin(nativeBasis);
+                            nativeBasis = source; displayWidth = read.width; displayHeight = read.height;
+                            if (destinationSource == null || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT) {
+                                if (destinationSource != null) scene.unpin(destinationSource);
+                                if (!scene.pin(source)) throw new IllegalStateException("native canvas source lost");
+                                destinationSource = source; destination = source.sequence;
+                            }
+                            queuePresentation(actions);
+                            actions.add(() -> observer.nativeTextAccepted(frame));
+                        }
+                    }
+                }
+            }
+            wakeNative(actions); checkDrained(actions);
+        }
+        run(actions);
     }
 
     private void wake(long requested, List<Runnable> actions) {
@@ -758,20 +1011,22 @@ public final class CensorEngine<P> implements AutoCloseable {
         Captured<P> payload = ticket.captured;
         if (payload != null) {
             if (active && !closed && ticket.dispatched && ticket.request.epoch == epoch
-                    && latestImageSource != null
-                    && (payload.width != latestImageSource.width || payload.height != latestImageSource.height)) {
+                    && displayWidth != 0
+                    && (payload.width != displayWidth || payload.height != displayHeight)) {
                 // A display change cannot share scene/presentation coordinates with this epoch.
                 // The old request's payload is discarded below; existing readers finish normally.
                 invalidate(actions);
             }
             if (active && !closed && ticket.dispatched && ticket.request.epoch == epoch
                     && frames.size() < policy.maximumPixelFrames) {
-                SceneEngine.Source source = new SceneEngine.Source(epoch, ticket.request.identity, geometry,
+                nextSource = Math.max(nextSource + 1, ticket.request.identity);
+                SceneEngine.Source source = SceneEngine.Source.image(epoch, nextSource, ticket.request.identity, geometry,
                         payload.width, payload.height, ticket.receivedAt, payload.pixelAtMillis);
                 if (scene.register(source) && scene.pin(source)) {
                     Frame frame = new Frame(source, payload);
                     frames.put(source.sequence, frame);
                     latestImageSource = source;
+                    displayWidth = payload.width; displayHeight = payload.height;
                     scene.advanceImageTarget(source.sequence);
                     offer(frame, actions);
                     if (destination != 0 && (scene.hasConstructedImagePose()
@@ -789,6 +1044,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             }
         }
         wake(clock.getAsLong(), actions);
+        demandNative(clock.getAsLong(), actions);
         checkDrained(actions);
     }
 
@@ -885,7 +1141,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                     && scene.observe(batch)) {
                 if (batch.lane == SceneEngine.Lane.FAST) firstFastCompleted = true;
                 if (destination == 0 || batch.lane != SceneEngine.Lane.QUALITY) {
-                    if (batch.source.sequence > destination) {
+                    if (batch.source.sequence > destination || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT) {
                         if (destinationSource != null) scene.unpin(destinationSource);
                         if (!scene.pin(batch.source)) throw new IllegalStateException("destination source lost");
                         destinationSource = batch.source;
@@ -920,7 +1176,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         }
         SceneEngine.Snapshot snapshot = scene.snapshot(destination, clock.getAsLong(), true, bases,
                 latestImageSource == null ? 0 : latestImageSource.sequence);
-        Set<Long> activePartitions = scene.activePartitions();
+        Set<Long> activePartitions = scene.activeImagePartitions();
         for (Iterator<Map.Entry<Long, SceneEngine.Source>> iterator = renderBases.entrySet().iterator(); iterator.hasNext();) {
             Map.Entry<Long, SceneEngine.Source> entry = iterator.next();
             if (!activePartitions.contains(entry.getKey())) { scene.unpin(entry.getValue()); iterator.remove(); }
@@ -1058,7 +1314,7 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     private boolean canReportDrained() {
         if (!closed || drainedReported || capture != null || !frames.isEmpty()
-                || resourceFailures != 0 || unadoptedDisposals != 0 || renderViews != 0) return false;
+                || nativeJob != null || resourceFailures != 0 || unadoptedDisposals != 0 || renderViews != 0) return false;
         for (LaneState lane : lanes.values()) if (lane.active != null || lane.pending != null) return false;
         return true;
     }
@@ -1122,7 +1378,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         long age = source == null || source.pixelAtMillis < 0 || source.pixelAtMillis > now
                 ? -1 : now - source.pixelAtMillis;
         Trace value = new Trace(stage, source == null ? epoch : source.epoch,
-                source == null ? 0 : source.sequence, lane, now, queueMillis, age, work);
+                source == null ? 0 : source.imageRequestIdentity, lane, now, queueMillis, age, work);
         actions.add(() -> observer.trace(value));
     }
 
