@@ -42,16 +42,17 @@ public final class SceneEngine {
         public final long readStartedAtMillis;
         public final long readFinishedAtMillis;
         public final int windowId;
+        public final ProtectionScope protectionScope;
 
         public Source(long epoch, long sequence, long geometry, int width, int height,
                 long receivedAtMillis, long pixelAtMillis) {
             this(epoch, sequence, geometry, width, height, receivedAtMillis, pixelAtMillis,
-                    SourceKind.IMAGE, sequence, -1, -1, -1);
+                    SourceKind.IMAGE, sequence, -1, -1, -1, ProtectionScope.UNSPECIFIED);
         }
 
         private Source(long epoch, long sequence, long geometry, int width, int height,
                 long receivedAtMillis, long pixelAtMillis, SourceKind kind, long imageRequestIdentity,
-                long readStartedAtMillis, long readFinishedAtMillis, int windowId) {
+                long readStartedAtMillis, long readFinishedAtMillis, int windowId, ProtectionScope protectionScope) {
             if (epoch < 0 || sequence <= 0 || width <= 0 || height <= 0
                     || receivedAtMillis < 0 || pixelAtMillis < -1
                     || (kind == SourceKind.IMAGE && (imageRequestIdentity <= 0
@@ -73,18 +74,32 @@ public final class SceneEngine {
             this.readStartedAtMillis = readStartedAtMillis;
             this.readFinishedAtMillis = readFinishedAtMillis;
             this.windowId = windowId;
+            this.protectionScope = Objects.requireNonNull(protectionScope);
         }
 
         public static Source image(long epoch, long sequence, long requestIdentity, long geometry,
                 int width, int height, long receivedAtMillis, long pixelAtMillis) {
+            return image(epoch, sequence, requestIdentity, geometry, width, height, receivedAtMillis,
+                    pixelAtMillis, ProtectionScope.UNSPECIFIED);
+        }
+
+        public static Source image(long epoch, long sequence, long requestIdentity, long geometry,
+                int width, int height, long receivedAtMillis, long pixelAtMillis, ProtectionScope protectionScope) {
             return new Source(epoch, sequence, geometry, width, height, receivedAtMillis, pixelAtMillis,
-                    SourceKind.IMAGE, requestIdentity, -1, -1, -1);
+                    SourceKind.IMAGE, requestIdentity, -1, -1, -1, protectionScope);
         }
 
         public static Source nativeText(long epoch, long sequence, long geometry, int width, int height,
                 int windowId, long readStartedAtMillis, long readFinishedAtMillis, long receivedAtMillis) {
+            return nativeText(epoch, sequence, geometry, width, height, windowId, readStartedAtMillis,
+                    readFinishedAtMillis, receivedAtMillis, ProtectionScope.UNSPECIFIED);
+        }
+
+        public static Source nativeText(long epoch, long sequence, long geometry, int width, int height,
+                int windowId, long readStartedAtMillis, long readFinishedAtMillis, long receivedAtMillis,
+                ProtectionScope protectionScope) {
             return new Source(epoch, sequence, geometry, width, height, receivedAtMillis, -1,
-                    SourceKind.NATIVE_TEXT, 0, readStartedAtMillis, readFinishedAtMillis, windowId);
+                    SourceKind.NATIVE_TEXT, 0, readStartedAtMillis, readFinishedAtMillis, windowId, protectionScope);
         }
 
         private boolean sameDescriptor(Source other) {
@@ -93,7 +108,8 @@ public final class SceneEngine {
                     && receivedAtMillis == other.receivedAtMillis && pixelAtMillis == other.pixelAtMillis
                     && kind == other.kind && imageRequestIdentity == other.imageRequestIdentity
                     && readStartedAtMillis == other.readStartedAtMillis
-                    && readFinishedAtMillis == other.readFinishedAtMillis && windowId == other.windowId;
+                    && readFinishedAtMillis == other.readFinishedAtMillis && windowId == other.windowId
+                    && protectionScope.equals(other.protectionScope);
         }
     }
 

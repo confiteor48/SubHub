@@ -12,6 +12,7 @@ import androidx.annotation.RequiresApi;
 
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.SceneEngine;
+import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.VisualInferencePolicy;
 import com.subhub.app.detection.DetectionEngine;
 import com.subhub.app.detection.DetectorConfig;
@@ -95,6 +96,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private volatile boolean closed;
     private boolean qualityInitializing; // Main-looper admission; its task owns no captured pixels.
     private Configuration qualityInitializationFailed;
+    private ProtectionScope protectionScope = ProtectionScope.UNSPECIFIED;
 
     public AccessibilityCensorHost(AccessibilityService service, SceneEngine.Policy scenePolicy,
             AccessibilityCapturer.TargetResolver targets, Observer observer) {
@@ -158,11 +160,17 @@ public final class AccessibilityCensorHost implements AutoCloseable {
 
     public void start(long token, DetectorConfig detector, boolean qualityEnabled,
             TextSmutConfig text, boolean semanticText, boolean exactText) {
+        start(token, detector, qualityEnabled, text, semanticText, exactText, ProtectionScope.UNSPECIFIED);
+    }
+
+    public void start(long token, DetectorConfig detector, boolean qualityEnabled,
+            TextSmutConfig text, boolean semanticText, boolean exactText, ProtectionScope protectionScope) {
         onMain();
         if (closed || active) throw new IllegalStateException("host cannot start");
         if (text != null && text.isEnabled() && textProvider == null) throw new IllegalStateException("native provider unavailable");
+        this.protectionScope = Objects.requireNonNull(protectionScope);
         configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
-        controls(); active = true; engine.start(token);
+        controls(); active = true; engine.start(token, protectionScope);
     }
 
     /** Same owner survives reconfiguration and waits for old callbacks/running native jobs. */
@@ -179,8 +187,19 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         if (text != null && text.isEnabled() && textProvider == null) throw new IllegalStateException("native provider unavailable");
         configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
         // Fence old jobs before admitting new settings or changing provider concurrency.
-        engine.changeScope(token); controls();
+        engine.changeScope(token, protectionScope); controls();
     }
+
+    /** Lab/tap provenance changes fence the same geometry, without reinitializing model settings. */
+    public void changeProtectionScope(ProtectionScope scope) {
+        onMain(); Objects.requireNonNull(scope);
+        if (closed || protectionScope.equals(scope)) return;
+        protectionScope = scope;
+        if (configuration != null) engine.changeScope(configuration.token, scope);
+    }
+
+    /** Called by the appearance controller, never as a side effect of View.onDraw. */
+    public void canvasSamplingControls(boolean enabled) { onMain(); engine.canvasSamplingControls(enabled); }
 
     public void stop() { onMain(); if (closed) return; active = false; engine.stop(); }
     @Override public void close() { onMain(); if (closed) return; closed = true; active = false; engine.close(); }

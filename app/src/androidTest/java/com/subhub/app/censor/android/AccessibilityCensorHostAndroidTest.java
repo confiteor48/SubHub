@@ -15,6 +15,7 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.PixelGeometry;
 import com.subhub.app.censor.engine.SceneEngine;
+import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.detection.BBox;
 import com.subhub.app.detection.Detection;
 import com.subhub.app.detection.DetectionEngine;
@@ -42,6 +43,28 @@ import java.util.function.Consumer;
 @SdkSuppress(minSdkVersion = 30)
 public final class AccessibilityCensorHostAndroidTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(1, 2, 1);
+
+    @Test public void protectionScopeFencesSameTokenPreservesSpacingAndDoesNotReinitializeTheModel() throws Exception {
+        try (Harness h = new Harness()) {
+            main(() -> h.host.start(10, config(2, .3f), false, null, false, false, ProtectionScope.lab(7)));
+            Call old = h.next(); long epoch = h.host.epoch();
+            assertEquals(ProtectionScope.lab(7), old.request.protectionScope);
+            main(() -> h.host.changeProtectionScope(ProtectionScope.normal(8)));
+            assertEquals(epoch + 1, h.host.epoch()); assertTrue(h.host.captureInFlight());
+            assertNull(h.requests.poll(80, TimeUnit.MILLISECONDS));
+            Bitmap discarded = old.deliver(); Call current = h.next(); assertTrue(discarded.isRecycled());
+            assertEquals(10, current.request.geometry); assertEquals(ProtectionScope.normal(8), current.request.protectionScope);
+            assertTrue(current.request.requestedAtMillis - old.request.requestedAtMillis >= 334);
+            main(() -> h.host.canvasSamplingControls(true)); Bitmap pixels = current.deliver(); h.awaitView(10);
+            try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
+                assertEquals(ProtectionScope.normal(8), view.snapshot.destination.protectionScope);
+                assertSame(view.snapshot.destination, view.canvasSource); assertSame(pixels, view.canvasPixels().bitmap);
+            }
+            assertEquals(1, h.models.size()); long currentEpoch = h.host.epoch();
+            main(() -> h.host.changeProtectionScope(ProtectionScope.normal(8)));
+            assertEquals(currentEpoch, h.host.epoch()); // Equal value is not a new protection session.
+        }
+    }
 
     @Test public void changedScopeWaitsForTheOldCallbackAndPreservesPlatformSpacing() throws Exception {
         try (Harness h = new Harness()) {

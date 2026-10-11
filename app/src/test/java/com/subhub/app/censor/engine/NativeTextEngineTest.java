@@ -207,6 +207,38 @@ public class NativeTextEngineTest {
         h.fire(334); assertEquals(2, h.captures.size()); h.close(); assertEquals(1, h.drained);
     }
 
+    @Test public void nativeCanvasNeverBorrowsImagePixelsAndCapturesOriginalLabTapProvenance() {
+        Harness h = new Harness(); h.engine.canvasSamplingControls(true);
+        h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42, ProtectionScope.lab(9)); h.fire(0); h.nativeExecutor.runAll();
+        assertEquals(ProtectionScope.lab(9), h.nativeInputs.get(0).protectionScope);
+        h.finishNative(0, 10, 20, 1000); h.ui.runAll();
+        CensorEngine<Pixel>.RenderView held = h.engine.acquireRenderView();
+        assertEquals(ProtectionScope.lab(9), held.snapshot.destination.protectionScope);
+        assertNull(held.canvasSource); assertNull(held.canvasPixels());
+        assertNull(held.sourcePixels(held.snapshot.destination.sequence));
+        h.engine.changeScope(42, ProtectionScope.normal(10));
+        assertEquals(ProtectionScope.lab(9), masks(held).get(0).evidenceSource.protectionScope);
+        assertFalse(masks(held).get(0).evidenceSource.protectionScope.isNormal());
+        assertNull(h.engine.acquireRenderView()); h.close(); assertEquals(0, h.drained);
+        held.close(); assertEquals(1, h.drained); assertEquals(0, h.engine.livePixelFrames());
+    }
+
+    @Test public void lateNativeReadCannotBeRelabeledAfterSameGeometryProtectionChange() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42, ProtectionScope.lab(9)); h.fire(0); h.nativeExecutor.runAll();
+        long epoch = h.engine.currentEpoch(); h.now = 10; h.engine.changeScope(42, ProtectionScope.normal(10));
+        assertEquals(epoch + 1, h.engine.currentEpoch()); assertEquals(1, h.nativeCancellations);
+        assertTrue(h.engine.nativeTextInFlight()); assertEquals(ProtectionScope.lab(9), h.nativeInputs.get(0).protectionScope);
+        h.finishNative(0, 15, 20, 1000); assertTrue(h.nativeFrames.isEmpty());
+        h.fire(139); h.nativeExecutor.runAll(); assertEquals(1, h.nativeInputs.size());
+        h.fire(140); h.nativeExecutor.runAll(); assertEquals(2, h.nativeInputs.size());
+        assertEquals(ProtectionScope.normal(10), h.nativeInputs.get(1).protectionScope);
+        h.finishNative(1, 150, 160, 900); h.ui.runAll();
+        assertEquals(1, h.nativeFrames.size()); assertEquals(ProtectionScope.normal(10), h.nativeFrames.get(0).source.protectionScope);
+        h.close(); assertEquals(1, h.drained);
+    }
+
     private static final class Pixel {
         int closes;
         CensorEngine.Captured<Pixel> payload(int width, int height) {

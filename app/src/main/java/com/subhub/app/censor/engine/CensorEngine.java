@@ -173,13 +173,16 @@ public final class CensorEngine<P> implements AutoCloseable {
         public final long epoch;
         public final long geometry;
         public final long requestedAtMillis;
+        public final ProtectionScope protectionScope;
         private final BooleanSupplier gate;
 
-        private CaptureRequest(long identity, long epoch, long geometry, long requestedAtMillis, BooleanSupplier gate) {
+        private CaptureRequest(long identity, long epoch, long geometry, long requestedAtMillis,
+                ProtectionScope protectionScope, BooleanSupplier gate) {
             this.identity = identity;
             this.epoch = epoch;
             this.geometry = geometry;
             this.requestedAtMillis = requestedAtMillis;
+            this.protectionScope = protectionScope;
             this.gate = gate;
         }
 
@@ -227,11 +230,13 @@ public final class CensorEngine<P> implements AutoCloseable {
     /** Independent provider read request. It is not a captured image or a source descriptor yet. */
     public static final class NativeTextInput {
         public final long identity, epoch, geometry;
+        public final ProtectionScope protectionScope;
         private final InputLifetime lifetime;
         private final LongSupplier beginRead, clock;
-        private NativeTextInput(long identity, long epoch, long geometry, BooleanSupplier cancellation,
+        private NativeTextInput(long identity, long epoch, long geometry, ProtectionScope protectionScope, BooleanSupplier cancellation,
                 LongSupplier beginRead, LongSupplier clock) {
             this.identity = identity; this.epoch = epoch; this.geometry = geometry;
+            this.protectionScope = protectionScope;
             lifetime = new InputLifetime(cancellation); this.beginRead = beginRead; this.clock = clock;
         }
         /** Call once immediately before root/provider access. Negative means admission was cancelled. */
@@ -345,7 +350,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         long startedAt = -1;
         NativeJob(long identity, long queuedAt) {
             this.queuedAt = queuedAt;
-            input = new NativeTextInput(identity, epoch, geometry, () -> cancellation,
+            input = new NativeTextInput(identity, epoch, geometry, protectionScope, () -> cancellation,
                     () -> beginNativeRead(this), clock);
         }
     }
@@ -360,7 +365,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         Captured<P> captured;
 
         Ticket(long identity, long at) {
-            request = new CaptureRequest(identity, epoch, geometry, at, () -> beginDispatch(this));
+            request = new CaptureRequest(identity, epoch, geometry, at, protectionScope, () -> beginDispatch(this));
         }
     }
 
@@ -376,17 +381,23 @@ public final class CensorEngine<P> implements AutoCloseable {
     private final class Presentation {
         final SceneEngine.Snapshot snapshot;
         final List<Frame> effects;
-        Presentation(SceneEngine.Snapshot snapshot, List<Frame> effects) { this.snapshot = snapshot; this.effects = effects; }
+        final SceneEngine.Source canvasSource;
+        Presentation(SceneEngine.Snapshot snapshot, List<Frame> effects, SceneEngine.Source canvasSource) {
+            this.snapshot = snapshot; this.effects = effects; this.canvasSource = canvasSource;
+        }
         void release() { releaseFrames(effects); }
     }
 
     /** One read lease. A draw can finish safely after stop or presentation replacement. */
     public final class RenderView implements AutoCloseable {
         public final SceneEngine.Snapshot snapshot;
+        /** Explicit reverse-canvas descriptor. Null when disabled or the canvas is native text. */
+        public final SceneEngine.Source canvasSource;
         private final List<Frame> effects;
         private final AtomicBoolean released = new AtomicBoolean();
         private RenderView(Presentation presentation) {
             snapshot = presentation.snapshot;
+            canvasSource = presentation.canvasSource;
             effects = new ArrayList<>(presentation.effects);
             for (Frame frame : effects) {
                 if (!frame.retain()) throw new IllegalStateException("closed presentation source");
@@ -398,6 +409,11 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (released.get()) throw new IllegalStateException("closed render view");
             for (Frame frame : effects) if (frame.source.sequence == sequence) return frame.payload.pixels;
             return null;
+        }
+        /** May be absent even with an approved descriptor; never substitutes member/latest pixels. */
+        public P canvasPixels() {
+            if (released.get()) throw new IllegalStateException("closed render view");
+            return canvasSource == null ? null : sourcePixels(canvasSource.sequence);
         }
         @Override public void close() {
             if (released.compareAndSet(false, true)) {
@@ -423,6 +439,8 @@ public final class CensorEngine<P> implements AutoCloseable {
     private final Map<Long, SceneEngine.Source> renderBases = new HashMap<>();
     private long epoch = 1;
     private long geometry;
+    private ProtectionScope protectionScope = ProtectionScope.UNSPECIFIED;
+    private boolean canvasSampling;
     private long nextRequest;
     private long lastDispatchAt = -1;
     private long retryNotBefore;
@@ -490,11 +508,17 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     public void start(long geometry) {
+        start(geometry, ProtectionScope.UNSPECIFIED);
+    }
+
+    public void start(long geometry, ProtectionScope protectionScope) {
+        Objects.requireNonNull(protectionScope);
         List<Runnable> actions = new ArrayList<>();
         synchronized (this) {
             if (closed) throw new IllegalStateException("closed engine");
             if (active) throw new IllegalStateException("already active");
             this.geometry = geometry;
+            this.protectionScope = protectionScope;
             active = true;
             invalidate(actions);
             wake(clock.getAsLong(), actions);
@@ -504,12 +528,32 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     public void changeScope(long geometry) {
+        changeScopeInternal(geometry, null);
+    }
+
+    public void changeScope(long geometry, ProtectionScope protectionScope) {
+        changeScopeInternal(geometry, Objects.requireNonNull(protectionScope));
+    }
+
+    private void changeScopeInternal(long geometry, ProtectionScope protectionScope) {
         List<Runnable> actions = new ArrayList<>();
         synchronized (this) {
             this.geometry = geometry;
+            if (protectionScope != null) this.protectionScope = protectionScope;
             invalidate(actions);
             wake(clock.getAsLong(), actions);
             demandNative(clock.getAsLong(), actions);
+        }
+        run(actions);
+    }
+
+    /** Appearance resource policy only: no scene mutation, age renewal or capture demand. */
+    public void canvasSamplingControls(boolean enabled) {
+        List<Runnable> actions = new ArrayList<>();
+        synchronized (this) {
+            if (closed || canvasSampling == enabled) return;
+            canvasSampling = enabled;
+            if (active && destination != 0) queuePresentation(actions);
         }
         run(actions);
     }
@@ -863,8 +907,9 @@ public final class CensorEngine<P> implements AutoCloseable {
                     boolean capacity = (long) basisSources.size() + 1 <= maximumBasisSources
                             && (long) renderBases.size() + 1 <= maximumRenderBases;
                     if (capacity) {
-                        SceneEngine.Source source = SceneEngine.Source.nativeText(epoch, ++nextSource, geometry,
-                                read.width, read.height, read.windowId, read.readStartedAtMillis, read.readFinishedAtMillis, now);
+                        SceneEngine.Source source = SceneEngine.Source.nativeText(job.epoch, ++nextSource, job.input.geometry,
+                                read.width, read.height, read.windowId, read.readStartedAtMillis, read.readFinishedAtMillis, now,
+                                job.input.protectionScope);
                         NativeTextFrame frame = new NativeTextFrame(source, nativeText.partition, read,
                                 nativeText.maximumAgeMillis, job.input.identity, job.queuedAt, job.startedAt);
                         if (scene.admitNativeFrame(frame)) {
@@ -1020,8 +1065,8 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (active && !closed && ticket.dispatched && ticket.request.epoch == epoch
                     && frames.size() < policy.maximumPixelFrames) {
                 nextSource = Math.max(nextSource + 1, ticket.request.identity);
-                SceneEngine.Source source = SceneEngine.Source.image(epoch, nextSource, ticket.request.identity, geometry,
-                        payload.width, payload.height, ticket.receivedAt, payload.pixelAtMillis);
+                SceneEngine.Source source = SceneEngine.Source.image(ticket.request.epoch, nextSource, ticket.request.identity, ticket.request.geometry,
+                        payload.width, payload.height, ticket.receivedAt, payload.pixelAtMillis, ticket.request.protectionScope);
                 if (scene.register(source) && scene.pin(source)) {
                     Frame frame = new Frame(source, payload);
                     frames.put(source.sequence, frame);
@@ -1187,12 +1232,20 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (frame != null && !effects.contains(frame)) effects.add(frame);
         }
         effects.sort(Comparator.comparingLong((Frame frame) -> frame.source.sequence).reversed());
+        SceneEngine.Source canvasSource = canvasSampling && snapshot.destination.kind == SceneEngine.SourceKind.IMAGE
+                ? snapshot.destination : null;
+        Frame canvasFrame = canvasSource == null ? null : frames.get(canvasSource.sequence);
+        if (canvasFrame != null) {
+            // The one explicit canvas shares the existing cap; evicted member pixels use fallback.
+            effects.remove(canvasFrame);
+            effects.add(0, canvasFrame);
+        }
         if (effects.size() > policy.maximumEffectSources) {
             effects = new ArrayList<>(effects.subList(0, policy.maximumEffectSources));
         }
         effects.removeIf(frame -> !frame.retain());
         schedulePresentationExpiry(snapshot.nextChangeAtMillis, actions);
-        return new Presentation(snapshot, effects);
+        return new Presentation(snapshot, effects, canvasSource);
     }
 
     private boolean hasImageEstimate(Presentation value) {
