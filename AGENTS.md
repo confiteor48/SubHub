@@ -47,6 +47,14 @@ overriding each test's Dom/Sub state.
 For first-launch or unkeyed onboarding tests, add `-e controller_fixture false`.
 The runner otherwise prepares a PIN before activity creation, which changes the
 fresh-setup behavior being tested. Keep the fixture enabled for ordinary screen tests.
+
+For native click fixtures, initialize `UiAutomation` before creating the target Views,
+then drain the target main queue before the first click so AccessibilityManager receives
+the connection state. For pixel assertions, exclude fixture window transitions and await
+a new hardware-frame commit where supported; UI idle and a fixed sleep alone do not
+prove composition. Keep independent screenshot and hit-map assertions, and retain failed
+pixels before assertions discard their evidence. A frame commit is not a physical pixel clock.
+
 For keyboard regressions, check initial launch, activity recreation, and tap-to-edit
 separately. Android can restore an EditText's focus after `onCreate`, so a launch-only
 focus check does not verify recreated screens.
