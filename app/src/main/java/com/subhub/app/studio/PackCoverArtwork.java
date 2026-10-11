@@ -3,11 +3,11 @@ package com.subhub.app.studio;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 
-/** Bounded decorative thumbnails. Call from the Studio storage worker. */
-final class PackCoverArtwork {
+/** Bounded decorative thumbnails. Call from a background storage worker. */
+public final class PackCoverArtwork {
     private PackCoverArtwork() { }
 
-    static Bitmap decode(byte[] bytes, int maximumEdge) {
+    public static Bitmap decode(byte[] bytes, int maximumEdge) {
         if (bytes == null || bytes.length == 0) return null;
         BitmapFactory.Options options = new BitmapFactory.Options();
         options.inJustDecodeBounds = true;

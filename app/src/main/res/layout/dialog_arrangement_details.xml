@@ -43,6 +43,10 @@
                 <com.subhub.app.settings.CensorPreviewView android:id="@+id/arrangement_detail_preview"
                     android:layout_width="88dp" android:layout_height="88dp"
                     android:layout_marginStart="16dp" android:visibility="gone" />
+                <ImageView android:id="@+id/arrangement_detail_cover"
+                    android:layout_width="88dp" android:layout_height="88dp"
+                    android:layout_marginStart="16dp" android:scaleType="fitCenter"
+                    android:importantForAccessibility="no" android:visibility="gone" />
             </LinearLayout>
             <LinearLayout android:id="@+id/arrangement_detail_rows" android:layout_width="match_parent"
                 android:layout_height="wrap_content" android:orientation="vertical" />

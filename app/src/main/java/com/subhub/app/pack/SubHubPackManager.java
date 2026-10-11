@@ -189,6 +189,13 @@ public final class SubHubPackManager {
         } catch (IOException invalid) { return null; }
     }
 
+    /** Read the cover for a specific library identity without inflating the activation archive. */
+    public byte[] readLibraryCover(String id) {
+        if (id == null) return null;
+        try { return SubHubPackArchive.readCover(fileFor(library, id)); }
+        catch (IOException invalid) { return null; }
+    }
+
     public SubHubPack findDraft(String id) { return read(fileFor(drafts, id)); }
     public SubHubPack findLibrary(String id) { return read(fileFor(library, id)); }
 

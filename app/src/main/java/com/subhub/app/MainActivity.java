@@ -711,6 +711,11 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void showArrangementDetails(int title, List<ArrangementDetail> details) {
+        showArrangementDetails(title, details, null);
+    }
+
+    private void showArrangementDetails(int title, List<ArrangementDetail> details,
+            android.graphics.Bitmap packCover) {
         com.google.android.material.bottomsheet.BottomSheetDialog dialog =
                 new com.google.android.material.bottomsheet.BottomSheetDialog(this);
         View content =
@@ -728,6 +733,15 @@ public final class MainActivity extends AppCompatActivity {
                 .setText(details.get(0).label);
         com.subhub.app.settings.CensorPreviewView preview =
                 content.findViewById(R.id.arrangement_detail_preview);
+        android.widget.ImageView cover = content.findViewById(R.id.arrangement_detail_cover);
+        if (packCover != null) {
+            cover.setImageBitmap(packCover);
+            cover.setVisibility(View.VISIBLE);
+            dialog.setOnDismissListener(ignored -> {
+                cover.setImageDrawable(null);
+                packCover.recycle();
+            });
+        }
         if (title == R.string.sub_censor_title) {
             preview.setAppearance(new SettingsRepository(this).loadAppearance());
             preview.setSquarePreview(true);
@@ -847,8 +861,20 @@ public final class MainActivity extends AppCompatActivity {
     private void loadArrangementDetails(int title, boolean rituals) {
         android.content.Context app = getApplicationContext();
         uiData.load("arrangement-details",
-                () -> rituals ? atmosphereArrangementDetails(app) : limitsArrangementDetails(app),
-                rows -> { if (binding != null && uiActive) showArrangementDetails(title, rows); },
+                () -> {
+                    if (!rituals) return new ArrangementDetailsData(limitsArrangementDetails(app), null);
+                    com.subhub.app.pack.SubHubPackManager packs = new com.subhub.app.pack.SubHubPackManager(app);
+                    com.subhub.app.pack.SubHubPack pack = packs.activePackOverview();
+                    List<ArrangementDetail> rows = atmosphereArrangementDetails(app, packs, pack);
+                    android.graphics.Bitmap cover = pack == null ? null
+                            : com.subhub.app.studio.PackCoverArtwork.decode(packs.readLibraryCover(pack.getId()),
+                                    Math.min(512, Math.round(88 * app.getResources().getDisplayMetrics().density)));
+                    return new ArrangementDetailsData(rows, cover);
+                },
+                data -> {
+                    if (binding != null && uiActive) showArrangementDetails(title, data.rows, data.cover);
+                    else data.close();
+                },
                 failure -> { });
     }
 
@@ -944,13 +970,12 @@ public final class MainActivity extends AppCompatActivity {
         return lines;
     }
 
-    private static List<ArrangementDetail> atmosphereArrangementDetails(android.content.Context context) {
+    private static List<ArrangementDetail> atmosphereArrangementDetails(android.content.Context context,
+            com.subhub.app.pack.SubHubPackManager packs, com.subhub.app.pack.SubHubPack pack) {
         FeatureModuleManager modules = new FeatureModuleManager(context);
         PopupStormSettings popup = PopupStormSettings.load(context);
         SubliminalSettings whispers = new SubliminalSettingsRepository(context).load();
         List<ArrangementDetail> lines = new ArrayList<>();
-        com.subhub.app.pack.SubHubPackManager packs = new com.subhub.app.pack.SubHubPackManager(context);
-        com.subhub.app.pack.SubHubPack pack = packs.activePackOverview();
         lines.add(detailLine(R.string.arrangement_active_pack, pack == null
                 ? context.getString(packs.activePackId() == null ? R.string.arrangement_none_selected : R.string.studio_active)
                 : context.getString(R.string.arrangement_pack_version, pack.getName(), pack.getPackVersion())));
@@ -982,6 +1007,15 @@ public final class MainActivity extends AppCompatActivity {
         final int label;
         final String value;
         ArrangementDetail(int label, String value) { this.label = label; this.value = value; }
+    }
+
+    private static final class ArrangementDetailsData implements AutoCloseable {
+        final List<ArrangementDetail> rows;
+        final android.graphics.Bitmap cover;
+        ArrangementDetailsData(List<ArrangementDetail> rows, android.graphics.Bitmap cover) {
+            this.rows = rows; this.cover = cover;
+        }
+        @Override public void close() { if (cover != null && !cover.isRecycled()) cover.recycle(); }
     }
 
     private static ArrangementDetail detailLine(int label, String value) {

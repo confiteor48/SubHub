@@ -78,20 +78,29 @@ public final class HomeDetailConfigurationAndroidTest {
         ControllerPinManager.enterDomMode();
         SubHubPack pack = packs.createBlank(); id = pack.getId();
         pack.setMetadata("Native Rituals pack", "Synthetic holder", "", "2.3.0");
+        pack.putAsset("assets/cover/rituals.png", coverArtwork());
         pack.setSection(SubHubPackSchema.CENSOR, PackSettingCatalog.defaults(SubHubPackSchema.CENSOR));
         packs.addToLibrary(pack); assertTrue(packs.activate(pack, Set.of(SubHubPackSchema.CENSOR)));
         auth.edit().putString("encrypted_secret", "SYNTHETIC_SECRET_DO_NOT_SHOW").commit();
         ControllerPinManager.enterSubMode();
         try (ActivityScenario<MainActivity> scenario = launch()) {
             open(scenario, R.id.sub_atmosphere_card);
+            assertCover(true);
             inspect("home-rituals-config.png", text -> {
                 assertTrue(text.contains("Native Rituals pack · v2.3.0"));
                 assertTrue(text.contains(context.getString(R.string.keyholder_status_both)));
                 assertFalse(text.contains("SYNTHETIC_SECRET_DO_NOT_SHOW"));
             });
             onView(withId(R.id.arrangement_detail_close)).inRoot(isDialog()).perform(click());
+            ControllerPinManager.enterDomMode();
+            pack.removeAsset("assets/cover/rituals.png"); packs.addToLibrary(pack);
+            ControllerPinManager.enterSubMode();
+            open(scenario, R.id.sub_atmosphere_card);
+            assertCover(false);
+            onView(withId(R.id.arrangement_detail_close)).inRoot(isDialog()).perform(click());
             ControllerPinManager.enterDomMode(); assertTrue(packs.deactivate());
             open(scenario, R.id.sub_atmosphere_card);
+            assertCover(false);
             inspect(null, text -> assertTrue(text.contains(context.getString(R.string.arrangement_none_selected))));
             onView(withId(R.id.arrangement_detail_close)).inRoot(isDialog()).perform(click());
         }
@@ -131,20 +140,65 @@ public final class HomeDetailConfigurationAndroidTest {
         });
         if (file != null) {
             Bitmap bitmap = renderedCloseScreenshot(file);
-            try (FileOutputStream out = new FileOutputStream(new File(context.getExternalFilesDir(null), file))) {
-                assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out));
+            try {
+                try (FileOutputStream out = new FileOutputStream(new File(context.getExternalFilesDir(null), file))) {
+                    assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out));
+                }
+                if (file.equals("home-rituals-config.png")) {
+                    java.util.concurrent.atomic.AtomicReference<Rect> coverBounds = new java.util.concurrent.atomic.AtomicReference<>();
+                    onView(withId(R.id.arrangement_detail_cover)).inRoot(isDialog()).check((cover, missing) -> {
+                        if (missing != null) throw missing;
+                        int[] location = new int[2]; cover.getLocationOnScreen(location);
+                        coverBounds.set(new Rect(location[0], location[1], location[0] + cover.getWidth(),
+                                location[1] + cover.getHeight()));
+                    });
+                    Rect bounds = coverBounds.get();
+                    assertTrue("Actual compositor displays the cover's center marker",
+                            sameOpaqueColor(bitmap.getPixel(bounds.centerX(), bounds.centerY()), 0xFF4FD3C8));
+                }
             } catch (java.io.IOException failure) { throw new AssertionError(failure); }
             finally { bitmap.recycle(); }
         }
     }
+    private static byte[] coverArtwork() {
+        Bitmap image = Bitmap.createBitmap(96, 128, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(image); canvas.drawColor(0xFF693DA2);
+        android.graphics.Paint paint = new android.graphics.Paint(); paint.setColor(0xFF4FD3C8);
+        canvas.drawRect(20, 20, 76, 108, paint);
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, bytes)); image.recycle();
+        return bytes.toByteArray();
+    }
+    private static void assertCover(boolean visible) {
+        onView(withId(R.id.arrangement_detail_cover)).inRoot(isDialog()).check((view, missing) -> {
+            if (missing != null) throw missing;
+            android.widget.ImageView cover = (android.widget.ImageView) view;
+            assertEquals(visible ? View.VISIBLE : View.GONE, cover.getVisibility());
+            if (!visible) { assertNull(cover.getDrawable()); return; }
+            assertTrue(cover.getDrawable() instanceof android.graphics.drawable.BitmapDrawable);
+            Bitmap image = ((android.graphics.drawable.BitmapDrawable) cover.getDrawable()).getBitmap();
+            assertTrue(image.getWidth() <= 512 && image.getHeight() <= 512);
+            assertEquals(0xFF4FD3C8, image.getPixel(image.getWidth() / 2, image.getHeight() / 2));
+            Rect text = new Rect(), artwork = new Rect();
+            assertTrue(cover.getRootView().findViewById(R.id.arrangement_detail_summary).getGlobalVisibleRect(text));
+            assertTrue(cover.getGlobalVisibleRect(artwork));
+            assertTrue("Cover sits to the right without overlapping the pack name", text.right < artwork.left);
+        });
+    }
     private Bitmap renderedCloseScreenshot(String file) {
         java.util.concurrent.atomic.AtomicReference<Rect> bounds = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<Rect> coverBounds = new java.util.concurrent.atomic.AtomicReference<>();
         java.util.concurrent.atomic.AtomicInteger color = new java.util.concurrent.atomic.AtomicInteger();
         onView(withId(R.id.arrangement_detail_close)).inRoot(isDialog()).check((close, missing) -> {
             if (missing != null) throw missing;
             int[] point = new int[2]; close.getLocationOnScreen(point);
             bounds.set(new Rect(point[0], point[1], point[0] + close.getWidth(), point[1] + close.getHeight()));
             color.set(((TextView) close).getCurrentTextColor());
+            View cover = close.getRootView().findViewById(R.id.arrangement_detail_cover);
+            if (cover.getVisibility() == View.VISIBLE) {
+                cover.getLocationOnScreen(point);
+                coverBounds.set(new Rect(point[0], point[1], point[0] + cover.getWidth(), point[1] + cover.getHeight()));
+            }
         });
         long end = android.os.SystemClock.uptimeMillis() + 5000;
         boolean first = true;
@@ -157,12 +211,13 @@ public final class HomeDetailConfigurationAndroidTest {
             if (label.left >= 0 && label.top >= 0 && label.right <= frame.getWidth() && label.bottom <= frame.getHeight()) {
                 for (int y = label.top; y < label.bottom; y++) for (int x = label.left; x < label.right; x++) {
                     int pixel = frame.getPixel(x, y);
-                    if (Math.abs(android.graphics.Color.red(pixel) - android.graphics.Color.red(expected)) < 24
-                            && Math.abs(android.graphics.Color.green(pixel) - android.graphics.Color.green(expected)) < 24
-                            && Math.abs(android.graphics.Color.blue(pixel) - android.graphics.Color.blue(expected)) < 24) matched++;
+                    if (sameOpaqueColor(pixel, expected)) matched++;
                 }
             }
-            if (matched > 40) return frame;
+            Rect artwork = coverBounds.get();
+            boolean coverSettled = artwork == null || sameOpaqueColor(
+                    frame.getPixel(artwork.centerX(), artwork.centerY()), 0xFF4FD3C8);
+            if (matched > 40 && coverSettled) return frame;
             if (first) {
                 try (FileOutputStream out = new FileOutputStream(new File(context.getExternalFilesDir(null),
                         file.replace(".png", "-pending.png")))) { frame.compress(Bitmap.CompressFormat.PNG, 100, out); }
@@ -174,6 +229,12 @@ public final class HomeDetailConfigurationAndroidTest {
             awaitExpandedFrame();
         }
         throw new AssertionError("Close label absent from compositor at " + bounds.get());
+    }
+    private static boolean sameOpaqueColor(int actual, int expected) {
+        // Allow two levels of 8-bit compositor rounding; fading remains a failed capture.
+        return Math.abs(android.graphics.Color.red(actual) - android.graphics.Color.red(expected)) <= 2
+                && Math.abs(android.graphics.Color.green(actual) - android.graphics.Color.green(expected)) <= 2
+                && Math.abs(android.graphics.Color.blue(actual) - android.graphics.Color.blue(expected)) <= 2;
     }
     private static void awaitExpandedFrame() {
         AtomicBoolean expanded = new AtomicBoolean();
