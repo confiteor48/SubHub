@@ -4,10 +4,14 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -53,6 +57,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         default void trace(Trace trace) { }
         /** Renderer must acquire a read handle, not keep/mutate runtime scene state. */
         default void presentationChanged() { }
+        /** Accepted source-local evidence, not a draw/vsync or failed/incomplete worker result. */
+        default void batchAccepted(SceneEngine.Batch batch) { }
         /** Permanent close has no remaining capture, job, pixel or draw-handle owner. */
         default void drained() { }
     }
@@ -342,8 +348,12 @@ public final class CensorEngine<P> implements AutoCloseable {
     private final Executor presentationExecutor;
     private final Observer observer;
     private final SceneEngine scene;
+    private final int maximumRenderBases;
+    private final int maximumBasisSources;
     private final EnumMap<SceneEngine.Lane, LaneState> lanes = new EnumMap<>(SceneEngine.Lane.class);
     private final Map<Long, Frame> frames = new LinkedHashMap<>();
+    /** Metadata pins, not extra bitmap ownership or a second mutable camera/scene. */
+    private final Map<Long, SceneEngine.Source> renderBases = new HashMap<>();
     private long epoch = 1;
     private long geometry;
     private long nextRequest;
@@ -354,9 +364,13 @@ public final class CensorEngine<P> implements AutoCloseable {
     private boolean active;
     private boolean closed;
     private boolean firstFastCompleted;
+    private long requestedCaptureMillis;
+    private boolean parallelQuality;
+    private EnumSet<SceneEngine.Lane> enabledLanes = EnumSet.allOf(SceneEngine.Lane.class);
     private boolean drainedReported;
     private Ticket capture;
     private TimerTicket captureTimer;
+    private TimerTicket presentationTimer;
     private Presentation pendingPresentation;
     private Presentation currentPresentation;
     private boolean notificationQueued;
@@ -365,16 +379,24 @@ public final class CensorEngine<P> implements AutoCloseable {
     private long resourceFailures;
     private int unadoptedDisposals;
     private int renderViews;
+    private long basisAdmissionDrops;
 
     public CensorEngine(Policy policy, SceneEngine.Policy scenePolicy, LongSupplier clock, Timer timer,
             Capturer<P> capturer, List<LaneWorker<P>> workers, Executor presentationExecutor, Observer observer) {
         this.policy = Objects.requireNonNull(policy);
+        requestedCaptureMillis = policy.minimumCaptureMillis;
+        parallelQuality = policy.parallelQuality;
         this.clock = Objects.requireNonNull(clock);
         this.timer = Objects.requireNonNull(timer);
         this.capturer = Objects.requireNonNull(capturer);
         this.presentationExecutor = Objects.requireNonNull(presentationExecutor);
         this.observer = Objects.requireNonNull(observer);
-        scene = new SceneEngine(epoch, Objects.requireNonNull(scenePolicy));
+        SceneEngine.Policy selectedScenePolicy = Objects.requireNonNull(scenePolicy);
+        scene = new SceneEngine(epoch, selectedScenePolicy);
+        maximumRenderBases = Math.min(selectedScenePolicy.maximumTracks, selectedScenePolicy.maximumCorrespondences);
+        // Reserve acquisition/job/frame capacity plus the detector/canvas metadata pin. Optional
+        // display metadata must not starve active work or the latest pending source after disposal.
+        maximumBasisSources = Math.max(0, selectedScenePolicy.maximumSources - policy.maximumPixelFrames - 1);
         for (LaneWorker<P> worker : workers) {
             if (lanes.put(worker.lane, new LaneState(worker)) != null) throw new IllegalArgumentException("duplicate lane");
         }
@@ -432,19 +454,98 @@ public final class CensorEngine<P> implements AutoCloseable {
         run(actions);
     }
 
+    /**
+     * Change execution controls without replacing platform/callback ownership. Disabling a lane
+     * cancels only that lane; an executing job keeps its pixels until its real terminal callback.
+     * Scope/config changes must additionally use changeScope to reject old admitted sources.
+     */
+    public void executionControls(long captureMillis, boolean parallelQuality,
+            java.util.Set<SceneEngine.Lane> enabled) {
+        if (captureMillis < 0) throw new IllegalArgumentException("capture interval");
+        Objects.requireNonNull(enabled);
+        EnumSet<SceneEngine.Lane> selected = enabled.isEmpty()
+                ? EnumSet.noneOf(SceneEngine.Lane.class) : EnumSet.copyOf(enabled);
+        List<Runnable> actions = new ArrayList<>();
+        synchronized (this) {
+            if (closed) return;
+            selected.retainAll(lanes.keySet());
+            requestedCaptureMillis = Math.max(policy.minimumCaptureMillis, captureMillis);
+            this.parallelQuality = parallelQuality;
+            enabledLanes = selected;
+            for (LaneState lane : lanes.values()) {
+                if (selected.contains(lane.specification.lane)) continue;
+                if (lane.pending != null) { actions.add(lane.pending::release); lane.pending = null; }
+                cancelJob(lane.active, actions);
+            }
+            cancelTimer(actions);
+            pump(actions);
+            wake(clock.getAsLong(), actions);
+        }
+        run(actions);
+    }
+
     public boolean motion(SceneEngine.Motion motion) {
         List<Runnable> actions = new ArrayList<>();
         boolean accepted;
         synchronized (this) {
+            SceneEngine.Source selected = scene.source(motion.to);
+            SceneEngine.Source previous = renderBases.get(motion.partition);
+            boolean advance = active && motion.authority == SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE
+                    && selected != null && (previous == null || selected.sequence > previous.sequence);
+            boolean basisRejected = false;
+            if (advance) {
+                Set<Long> basisSources = new java.util.HashSet<>();
+                for (Map.Entry<Long, SceneEngine.Source> entry : renderBases.entrySet()) {
+                    if (entry.getKey() != motion.partition) basisSources.add(entry.getValue().sequence);
+                }
+                basisSources.add(selected.sequence);
+                if ((previous == null && renderBases.size() >= maximumRenderBases)
+                        || basisSources.size() > maximumBasisSources || !scene.pin(selected)) {
+                    basisRejected = true;
+                    advance = false; // A valid spatial map can still help later detector/quality work.
+                }
+            }
             accepted = active && scene.motion(motion);
+            if (accepted && basisRejected) basisAdmissionDrops++;
+            if (advance) {
+                if (accepted) {
+                    renderBases.put(motion.partition, selected);
+                    if (previous != null) scene.unpin(previous);
+                } else scene.unpin(selected);
+            }
             if (accepted && destination != 0) queuePresentation(actions);
         }
         run(actions);
         return accepted;
     }
 
-    public synchronized RenderView acquireRenderView() {
-        return currentPresentation == null ? null : new RenderView(currentPresentation);
+    public RenderView acquireRenderView() {
+        List<Runnable> actions = new ArrayList<>();
+        RenderView view;
+        synchronized (this) {
+            // A late Handler/timer callback must not permit one expired draw. Refresh from the
+            // owner clock without demanding another capture, detector completion or UI post.
+            long now = clock.getAsLong();
+            if (active && !closed && destination != 0
+                    && (expired(currentPresentation, now) || expired(pendingPresentation, now))) {
+                queuePresentation(actions);
+                installPresentation(pendingPresentation, actions);
+                pendingPresentation = null;
+            }
+            view = currentPresentation == null ? null : new RenderView(currentPresentation);
+        }
+        run(actions);
+        // Observer callbacks run outside the owner lock and may synchronously stop/change scope.
+        // Do not return a stale draw admitted before those callbacks invalidated its epoch.
+        boolean invalid;
+        synchronized (this) { invalid = view != null && (!active || closed || view.snapshot.destination.epoch != epoch); }
+        if (invalid) { view.close(); return null; }
+        return view;
+    }
+
+    private boolean expired(Presentation value, long now) {
+        return value != null && value.snapshot.nextChangeAtMillis != Long.MAX_VALUE
+                && value.snapshot.nextChangeAtMillis <= now;
     }
 
     /** Actual renderer hook, not an inference/UI-publication proxy for first-censor arrival. */
@@ -464,8 +565,12 @@ public final class CensorEngine<P> implements AutoCloseable {
         return frames.size() + unadoptedDisposals + (capture != null && capture.captured != null ? 1 : 0);
     }
     public synchronized long currentEpoch() { return epoch; }
+    public synchronized int renderBasisCount() { return renderBases.size(); }
+    public synchronized long basisAdmissionDrops() { return basisAdmissionDrops; }
     public synchronized long callbackFailures() { return callbackFailures; }
     public synchronized long resourceFailures() { return resourceFailures; }
+    /** A host-owned native context failed disposal outside a pixel job, such as model startup. */
+    public void nativeResourceFailure() { resourceFailed(currentEpoch(), 0); }
     public synchronized int pendingCount(SceneEngine.Lane lane) {
         LaneState state = lanes.get(lane); return state != null && state.pending != null ? 1 : 0;
     }
@@ -476,10 +581,13 @@ public final class CensorEngine<P> implements AutoCloseable {
     private void invalidate(List<Runnable> actions) {
         epoch++;
         scene.reset(epoch);
+        renderBases.clear();
+        basisAdmissionDrops = 0;
         destination = 0;
         destinationSource = null;
         firstFastCompleted = false;
         cancelTimer(actions);
+        cancelPresentationTimer(actions);
         for (LaneState lane : lanes.values()) {
             if (lane.pending != null) { actions.add(lane.pending::release); lane.pending = null; }
             cancelJob(lane.active, actions);
@@ -492,11 +600,12 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     private long nextCaptureAt() {
-        return Math.max(retryNotBefore, lastDispatchAt < 0 ? 0 : plus(lastDispatchAt, policy.minimumCaptureMillis));
+        return Math.max(retryNotBefore, lastDispatchAt < 0 ? 0 : plus(lastDispatchAt, requestedCaptureMillis));
     }
 
     private void wake(long requested, List<Runnable> actions) {
-        if (!active || closed || capture != null || resourceFailures != 0 || unadoptedDisposals != 0) return;
+        if (!active || closed || enabledLanes.isEmpty() || capture != null
+                || resourceFailures != 0 || unadoptedDisposals != 0) return;
         if (frames.size() >= policy.maximumPixelFrames) {
             trace(Stage.CAPTURE_BACKPRESSURE, null, null, 0, null, actions);
             return;
@@ -524,7 +633,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     private void captureTick(TimerTicket expected) {
         List<Runnable> actions = new ArrayList<>();
         synchronized (this) {
-            if (captureTimer != expected || !active || closed) return;
+            if (captureTimer != expected || !active || closed || enabledLanes.isEmpty()) return;
             captureTimer = null;
             long now = clock.getAsLong();
             if (capture != null) return;
@@ -562,7 +671,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         synchronized (this) {
             long now = clock.getAsLong();
             permitted = capture == ticket && !ticket.callback && !ticket.dispatched
-                    && active && !closed && resourceFailures == 0 && unadoptedDisposals == 0
+                    && active && !closed && !enabledLanes.isEmpty()
+                    && resourceFailures == 0 && unadoptedDisposals == 0
                     && ticket.request.epoch == epoch && now >= nextCaptureAt();
             if (permitted) {
                 ticket.dispatched = true;
@@ -641,6 +751,7 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     private void offer(Frame frame, List<Runnable> actions) {
         for (LaneState lane : lanes.values()) {
+            if (!enabledLanes.contains(lane.specification.lane)) continue;
             if (lane.pending != null) {
                 Frame replaced = lane.pending;
                 actions.add(replaced::release);
@@ -652,7 +763,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             trace(Stage.JOB_QUEUED, frame.source, lane.specification.lane, 0, null, actions);
         }
         LaneState quality = lanes.get(SceneEngine.Lane.QUALITY);
-        if (!policy.parallelQuality && quality != null) cancelJob(quality.active, actions);
+        if (!parallelQuality && quality != null) cancelJob(quality.active, actions);
         pump(actions);
     }
 
@@ -661,15 +772,15 @@ public final class CensorEngine<P> implements AutoCloseable {
         LaneState fast = lanes.get(SceneEngine.Lane.FAST);
         LaneState quality = lanes.get(SceneEngine.Lane.QUALITY);
         boolean qualityBusy = quality != null && quality.active != null;
-        if (policy.parallelQuality || !qualityBusy) launch(fast, actions);
+        if (parallelQuality || !qualityBusy) launch(fast, actions);
         LaneState text = lanes.get(SceneEngine.Lane.TEXT);
         if (text != null) launch(text, actions);
-        if (quality != null && firstFastCompleted
-                && (policy.parallelQuality || (fast.active == null && fast.pending == null))) launch(quality, actions);
+        if (quality != null && (firstFastCompleted || !enabledLanes.contains(SceneEngine.Lane.FAST))
+                && (parallelQuality || (fast.active == null && fast.pending == null))) launch(quality, actions);
     }
 
     private void launch(LaneState lane, List<Runnable> actions) {
-        if (lane.active != null || lane.pending == null) return;
+        if (!enabledLanes.contains(lane.specification.lane) || lane.active != null || lane.pending == null) return;
         Job job = new Job(lane, lane.pending, lane.pendingAt);
         lane.pending = null;
         lane.active = job;
@@ -725,7 +836,8 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (job.lane.active == job) job.lane.active = null;
             trace(terminal, job.frame.source, job.lane.specification.lane,
                     Math.max(0, job.startedAt - job.queuedAt), timing, actions);
-            if (batch != null && active && !closed && job.frame.source.epoch == epoch
+            if (batch != null && !job.cancellation && active && !closed && job.frame.source.epoch == epoch
+                    && enabledLanes.contains(job.lane.specification.lane)
                     && batch.source == job.frame.source && batch.lane == job.lane.specification.lane
                     && scene.observe(batch)) {
                 if (batch.lane == SceneEngine.Lane.FAST) firstFastCompleted = true;
@@ -738,6 +850,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                     }
                 }
                 queuePresentation(actions);
+                actions.add(() -> observer.batchAccepted(batch));
             } else if (batch != null) trace(Stage.RESULT_REJECTED, job.frame.source,
                     job.lane.specification.lane, 0, null, actions);
             actions.add(job.frame::release);
@@ -748,7 +861,26 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     private void queuePresentation(List<Runnable> actions) {
-        SceneEngine.Snapshot snapshot = scene.snapshot(destination, clock.getAsLong(), true);
+        Presentation value = buildPresentation(actions);
+        if (pendingPresentation != null) {
+            actions.add(pendingPresentation::release);
+            trace(Stage.PRESENTATION_REPLACED, pendingPresentation.snapshot.destination, null, 0, null, actions);
+        }
+        pendingPresentation = value;
+        notifyPresentation(actions);
+    }
+
+    private Presentation buildPresentation(List<Runnable> actions) {
+        Map<Long, Long> bases = new HashMap<>();
+        for (Map.Entry<Long, SceneEngine.Source> entry : renderBases.entrySet()) {
+            bases.put(entry.getKey(), entry.getValue().sequence);
+        }
+        SceneEngine.Snapshot snapshot = scene.snapshot(destination, clock.getAsLong(), true, bases);
+        Set<Long> activePartitions = scene.activePartitions();
+        for (Iterator<Map.Entry<Long, SceneEngine.Source>> iterator = renderBases.entrySet().iterator(); iterator.hasNext();) {
+            Map.Entry<Long, SceneEngine.Source> entry = iterator.next();
+            if (!activePartitions.contains(entry.getKey())) { scene.unpin(entry.getValue()); iterator.remove(); }
+        }
         List<Frame> effects = new ArrayList<>();
         for (SceneEngine.Group group : snapshot.groups) for (SceneEngine.Mask mask : group.members) {
             Frame frame = frames.get(mask.evidenceSource.sequence);
@@ -759,12 +891,48 @@ public final class CensorEngine<P> implements AutoCloseable {
             effects = new ArrayList<>(effects.subList(0, policy.maximumEffectSources));
         }
         effects.removeIf(frame -> !frame.retain());
-        if (pendingPresentation != null) {
-            actions.add(pendingPresentation::release);
-            trace(Stage.PRESENTATION_REPLACED, pendingPresentation.snapshot.destination, null, 0, null, actions);
+        schedulePresentationExpiry(snapshot.nextChangeAtMillis, actions);
+        return new Presentation(snapshot, effects);
+    }
+
+    private void installPresentation(Presentation value, List<Runnable> actions) {
+        if (currentPresentation != null) actions.add(currentPresentation::release);
+        currentPresentation = value;
+        trace(Stage.PRESENTED, value.snapshot.destination, null, 0, null, actions);
+    }
+
+    private void schedulePresentationExpiry(long target, List<Runnable> actions) {
+        if (presentationTimer != null && presentationTimer.at == target) return;
+        cancelPresentationTimer(actions);
+        if (target == Long.MAX_VALUE) return;
+        TimerTicket expected = new TimerTicket(target);
+        presentationTimer = expected;
+        actions.add(() -> {
+            try { expected.attach(timer.schedule(() -> presentationTick(expected),
+                    Math.max(0, target - clock.getAsLong()))); }
+            catch (RuntimeException rejected) {
+                synchronized (CensorEngine.this) {
+                    if (presentationTimer == expected) presentationTimer = null;
+                    callbackFailures++;
+                }
+            }
+        });
+    }
+
+    private void cancelPresentationTimer(List<Runnable> actions) {
+        if (presentationTimer != null) { actions.add(presentationTimer::cancel); presentationTimer = null; }
+    }
+
+    private void presentationTick(TimerTicket expected) {
+        List<Runnable> actions = new ArrayList<>();
+        synchronized (this) {
+            if (presentationTimer != expected || !active || closed || destination == 0) return;
+            presentationTimer = null;
+            // Timer implementations can deliver early; reconstructing the deadline keeps the
+            // scene unchanged until its exact source-local retention boundary.
+            queuePresentation(actions);
         }
-        pendingPresentation = new Presentation(snapshot, effects);
-        notifyPresentation(actions);
+        run(actions);
     }
 
     private void notifyPresentation(List<Runnable> actions) {
@@ -787,9 +955,11 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (value != null) {
                 if (!active || closed || value.snapshot.destination.epoch != epoch) actions.add(value::release);
                 else {
-                    if (currentPresentation != null) actions.add(currentPresentation::release);
-                    currentPresentation = value;
-                    trace(Stage.PRESENTED, value.snapshot.destination, null, 0, null, actions);
+                    if (expired(value, clock.getAsLong())) {
+                        actions.add(value::release);
+                        value = buildPresentation(actions);
+                    }
+                    installPresentation(value, actions);
                 }
             }
             actions.add(observer::presentationChanged);

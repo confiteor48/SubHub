@@ -21,8 +21,16 @@ import java.util.function.Consumer;
 
 /** Model execution only: one completed source-local batch, no retained detections or scene state. */
 public final class VisualDetectorWorker implements CensorEngine.Worker<PixelFrame>, AutoCloseable {
+    public static final class InitializationCleanupFailure extends RuntimeException {
+        private InitializationCleanupFailure(Exception initialization, RuntimeException cleanup) {
+            super("Model initialization cleanup failed", cleanup);
+            addSuppressed(initialization);
+        }
+    }
     public interface Model extends AutoCloseable {
         String provider();
+        /** Called only on the same serial lane, never during an executing inference. */
+        default void configure(DetectorConfig config) { }
         ModelOutput infer(Bitmap bitmap, int sourceWidth, int sourceHeight, int inputWidth, int inputHeight,
                 BooleanSupplier cancelled, Consumer<DetectionEngine.RunCancellation> binding) throws Exception;
         @Override void close();
@@ -42,7 +50,7 @@ public final class VisualDetectorWorker implements CensorEngine.Worker<PixelFram
     }
 
     private final SceneEngine.Lane lane;
-    private final DetectorConfig config;
+    private DetectorConfig config;
     private final int threads;
     private final long partition;
     private final Model model;
@@ -58,20 +66,45 @@ public final class VisualDetectorWorker implements CensorEngine.Worker<PixelFram
         this.model = Objects.requireNonNull(model);
     }
 
+    public String provider() { return model.provider(); }
+
+    /** Reuse native sessions for postprocessing/coverage changes; session keys are host-owned. */
+    public void configure(DetectorConfig configured) {
+        if (configured.getInferenceThreads() != threads) throw new IllegalArgumentException("session thread change");
+        DetectorConfig selected = lane == SceneEngine.Lane.FAST
+                ? VisualInferencePolicy.fast(configured) : VisualInferencePolicy.quality(configured);
+        if (!selected.getModelFilename().equals(config.getModelFilename())
+                || selected.getInferenceResolution() != config.getInferenceResolution()) {
+            throw new IllegalArgumentException("session model change");
+        }
+        model.configure(selected);
+        config = selected;
+    }
+
     /** Initialize on its lane executor. Optional quality initialization must not block fast startup. */
     public static VisualDetectorWorker initialize(Context context, SceneEngine.Lane lane, DetectorConfig config,
             long partition, String fallbackProvider) throws Exception {
         if (lane != SceneEngine.Lane.FAST && lane != SceneEngine.Lane.QUALITY) throw new IllegalArgumentException("visual lane");
         DetectorConfig selected = lane == SceneEngine.Lane.FAST ? VisualInferencePolicy.fast(config) : VisualInferencePolicy.quality(config);
         DetectionEngine detector = new DetectionEngine(context, selected, lane == SceneEngine.Lane.FAST);
+        detector.requireStrictResourceCleanup();
         try {
             if (lane == SceneEngine.Lane.QUALITY) detector.initializeWithoutBenchmark(fallbackProvider);
             else if (config.getInferenceThreads() >= 3 && config.getInferenceResolution() > VisualInferencePolicy.FAST_RESOLUTION) {
                 try { detector.initializeForProvider("CPU"); }
-                catch (Exception unsupportedCpu) { detector.initialize(); }
+                catch (Exception unsupportedCpu) {
+                    if (DetectionEngine.resourceCleanupFailed(unsupportedCpu)) throw unsupportedCpu;
+                    detector.initialize();
+                }
             } else detector.initialize();
             return new VisualDetectorWorker(lane, config, partition, new NativeModel(detector));
-        } catch (Exception initializationFailure) { detector.close(); throw initializationFailure; }
+        } catch (Exception initializationFailure) {
+            try { detector.close(); }
+            catch (RuntimeException cleanupFailure) {
+                throw new InitializationCleanupFailure(initializationFailure, cleanupFailure);
+            }
+            throw initializationFailure;
+        }
     }
 
     @Override public void start(CensorEngine.Input<PixelFrame> input, CensorEngine.Completion completion) {
@@ -189,6 +222,7 @@ public final class VisualDetectorWorker implements CensorEngine.Worker<PixelFram
         private final DetectionEngine detector;
         NativeModel(DetectionEngine detector) { this.detector = detector; }
         @Override public String provider() { return detector.getActiveProvider(); }
+        @Override public void configure(DetectorConfig config) { detector.setConfig(config); }
         @Override public ModelOutput infer(Bitmap bitmap, int sourceWidth, int sourceHeight, int inputWidth, int inputHeight,
                 BooleanSupplier cancelled, Consumer<DetectionEngine.RunCancellation> binding) throws Exception {
             DetectionEngine.ControlledResult result = detector.detectControlled(bitmap, sourceWidth, sourceHeight,

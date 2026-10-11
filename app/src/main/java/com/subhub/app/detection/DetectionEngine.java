@@ -82,6 +82,7 @@ public final class DetectionEngine implements AutoCloseable {
     private long lastPostprocessMs;
     private volatile boolean lastRunCancelled;
     private boolean lastRunComplete;
+    private boolean strictResourceCleanup;
     private volatile long lastCancellationMs;
     private final AtomicReference<InferenceRun> activeInference = new AtomicReference<>();
 
@@ -108,6 +109,12 @@ public final class DetectionEngine implements AutoCloseable {
         this.environment = OrtEnvironment.getEnvironment();
         performanceHints = new InferencePerformanceHints(this.context);
         allocateBuffers(config.getInferenceResolution());
+    }
+
+    /** Replacement workers must learn about failed context disposal instead of quietly retrying. */
+    public synchronized void requireStrictResourceCleanup() {
+        if (session != null || inputTensor != null) throw new IllegalStateException("enable before initialization");
+        strictResourceCleanup = true;
     }
 
     public synchronized void initialize() throws IOException, OrtException {
@@ -177,8 +184,8 @@ public final class DetectionEngine implements AutoCloseable {
         addUniqueProvider(providers, "CPU");
         Exception lastFailure = null;
         for (String provider : providers) {
-            try (OrtSession.SessionOptions options = optionsFor(provider)) {
-                session = environment.createSession(bytes, options);
+            try (OptionsLease lease = new OptionsLease(optionsFor(provider), strictResourceCleanup)) {
+                session = environment.createSession(bytes, lease.options);
                 inputName = session.getInputNames().iterator().next();
                 activeProvider = provider;
                 activeModel = model;
@@ -187,6 +194,7 @@ public final class DetectionEngine implements AutoCloseable {
                         + " (profile=" + (latencyPriority ? "realtime" : "quality") + ")");
                 return;
             } catch (Exception error) {
+                if (strictResourceCleanup && resourceCleanupFailed(error)) throw new ResourceCleanupFailure(error);
                 lastFailure = error;
                 closeSession();
                 if (provider.equals(cachedProvider)) {
@@ -211,8 +219,8 @@ public final class DetectionEngine implements AutoCloseable {
         closeSession();
         String model = config.getModelFilename();
         byte[] bytes = readAsset(model);
-        try (OrtSession.SessionOptions options = optionsFor(provider)) {
-            session = environment.createSession(bytes, options);
+        try (OptionsLease lease = new OptionsLease(optionsFor(provider), strictResourceCleanup)) {
+            session = environment.createSession(bytes, lease.options);
         }
         inputName = session.getInputNames().iterator().next();
         activeProvider = provider;
@@ -247,7 +255,7 @@ public final class DetectionEngine implements AutoCloseable {
     public interface RunCancellation { boolean cancel(); }
 
     public static final class ResourceCleanupFailure extends RuntimeException {
-        ResourceCleanupFailure(RuntimeException cause) { super("Native inference resource cleanup failed", cause); }
+        ResourceCleanupFailure(Throwable cause) { super("Native inference resource cleanup failed", cause); }
     }
 
     /** Try-with-resources can suppress a cleanup fault beneath the original decode exception. */
@@ -567,6 +575,15 @@ public final class DetectionEngine implements AutoCloseable {
 
     private OrtSession.SessionOptions optionsFor(String provider) throws OrtException {
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
+        try { configureOptions(options, provider); return options; }
+        catch (OrtException | RuntimeException failure) {
+            try { new OptionsLease(options, strictResourceCleanup).close(); }
+            catch (RuntimeException cleanup) { cleanup.addSuppressed(failure); throw cleanup; }
+            throw failure;
+        }
+    }
+
+    private void configureOptions(OrtSession.SessionOptions options, String provider) throws OrtException {
         options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
         options.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL);
         options.setInterOpNumThreads(1);
@@ -597,7 +614,6 @@ public final class DetectionEngine implements AutoCloseable {
             options.setIntraOpNumThreads(threads);
             options.addCPU(true);
         }
-        return options;
     }
 
     private long benchmark(OrtSession candidate) throws OrtException {
@@ -609,16 +625,17 @@ public final class DetectionEngine implements AutoCloseable {
             benchmarkInput.put((index & 0xff) * INV_255);
         }
         benchmarkInput.flip();
-        try (OnnxTensor tensor = OnnxTensor.createTensor(
+        try (TensorLease lease = new TensorLease(OnnxTensor.createTensor(
                 environment,
                 benchmarkInput,
-                new long[]{1, 3, size, size})) {
+                new long[]{1, 3, size, size}), strictResourceCleanup)) {
+            OnnxTensor tensor = lease.tensor;
             Map<String, OnnxTensor> inputs = new LinkedHashMap<>();
             inputs.put(candidate.getInputNames().iterator().next(), tensor);
             long[] samples = new long[4];
             for (int pass = 0; pass < 5; pass++) {
                 long started = SystemClock.elapsedRealtimeNanos();
-                try (OrtSession.Result ignored = candidate.run(inputs)) {
+                try (OutputLease ignored = new OutputLease(candidate.run(inputs), strictResourceCleanup)) {
                     // The first pass warms kernels; the next four select on sustained median speed.
                 }
                 long elapsed = SystemClock.elapsedRealtimeNanos() - started;
@@ -634,26 +651,35 @@ public final class DetectionEngine implements AutoCloseable {
         OrtSession fastestSession = null;
         String fastestProvider = null;
         long fastestNanos = Long.MAX_VALUE;
-        for (String provider : providers) {
-            OrtSession candidate = null;
-            try (OrtSession.SessionOptions options = optionsFor(provider)) {
-                candidate = environment.createSession(modelBytes, options);
-                long benchmarkNanos = benchmark(candidate);
-                Log.i(TAG, provider + " benchmark for " + model + ": "
-                        + benchmarkNanos / 1_000_000f + " ms profile="
-                        + (latencyPriority ? "realtime" : "quality"));
-                if (benchmarkNanos < fastestNanos) {
-                    closeQuietly(fastestSession);
-                    fastestSession = candidate;
-                    candidate = null;
-                    fastestProvider = provider;
-                    fastestNanos = benchmarkNanos;
+        try {
+            for (String provider : providers) {
+                OrtSession candidate = null;
+                try (OptionsLease lease = new OptionsLease(optionsFor(provider), strictResourceCleanup)) {
+                    candidate = environment.createSession(modelBytes, lease.options);
+                    long benchmarkNanos = benchmark(candidate);
+                    Log.i(TAG, provider + " benchmark for " + model + ": "
+                            + benchmarkNanos / 1_000_000f + " ms profile="
+                            + (latencyPriority ? "realtime" : "quality"));
+                    if (benchmarkNanos < fastestNanos) {
+                        OrtSession retired = fastestSession;
+                        fastestSession = null;
+                        closeQuietly(retired);
+                        fastestSession = candidate;
+                        candidate = null;
+                        fastestProvider = provider;
+                        fastestNanos = benchmarkNanos;
+                    }
+                } catch (Exception error) {
+                    if (strictResourceCleanup && resourceCleanupFailed(error)) throw new ResourceCleanupFailure(error);
+                    Log.w(TAG, provider + " rejected " + model + ": " + error.getMessage());
+                } finally {
+                    closeQuietly(candidate);
                 }
-            } catch (Exception error) {
-                Log.w(TAG, provider + " rejected " + model + ": " + error.getMessage());
-            } finally {
-                closeQuietly(candidate);
             }
+        } catch (RuntimeException failure) {
+            try { closeQuietly(fastestSession); }
+            catch (RuntimeException cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
         }
         return fastestSession == null ? null
                 : new ProviderCandidate(fastestSession, fastestProvider, fastestNanos);
@@ -753,23 +779,59 @@ public final class DetectionEngine implements AutoCloseable {
     private void closeInputTensor() {
         inferenceInputs = null;
         if (inputTensor != null) {
-            inputTensor.close();
+            OnnxTensor retired = inputTensor;
+            inputTensor = null;
+            new TensorLease(retired, strictResourceCleanup).close();
         }
-        inputTensor = null;
     }
 
     private void closeSession() {
         closeInputTensor();
-        closeQuietly(session);
+        OrtSession retired = session;
         session = null;
+        closeQuietly(retired);
     }
 
-    private static void closeQuietly(OrtSession value) {
+    private void closeQuietly(OrtSession value) {
         if (value == null) return;
-        try {
-            value.close();
-        } catch (OrtException error) {
+        closeNativeSession(value::close, strictResourceCleanup);
+    }
+
+    interface NativeSessionDisposer { void close() throws OrtException; }
+    static void closeNativeSession(NativeSessionDisposer disposer, boolean strict) {
+        try { disposer.close(); }
+        catch (OrtException error) {
+            if (strict) throw new ResourceCleanupFailure(error);
             Log.w(TAG, "Could not close ONNX session cleanly", error);
+        } catch (RuntimeException error) {
+            if (strict) throw new ResourceCleanupFailure(error);
+            throw error;
+        }
+    }
+
+    private static final class OptionsLease implements AutoCloseable {
+        final OrtSession.SessionOptions options;
+        final boolean strict;
+        OptionsLease(OrtSession.SessionOptions options, boolean strict) { this.options = options; this.strict = strict; }
+        @Override public void close() {
+            try { options.close(); }
+            catch (RuntimeException failure) {
+                if (strict) throw new ResourceCleanupFailure(failure);
+                throw failure;
+            }
+        }
+    }
+
+    private static final class TensorLease implements AutoCloseable {
+        final OnnxTensor tensor;
+        final boolean strict;
+        TensorLease(OnnxTensor tensor, boolean strict) { this.tensor = tensor; this.strict = strict; }
+        @Override public void close() {
+            try { tensor.close(); }
+            catch (RuntimeException failure) {
+                if (strict) throw new ResourceCleanupFailure(failure);
+                throw failure;
+            }
         }
     }
 

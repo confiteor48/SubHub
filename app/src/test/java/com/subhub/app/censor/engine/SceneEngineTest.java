@@ -64,6 +64,104 @@ public class SceneEngineTest {
         assertArrayEquals(expected, actual, .00001);
     }
 
+    @Test public void retentionDeadlineIsSourceLocalAndChangesAtTheFirstInvalidMillisecond() {
+        SceneEngine engine = engine(); register(engine, 2);
+        engine.observe(batch(source(1), FAST, face(500)));
+        engine.observe(batch(source(2), FAST, face(900)));
+        engine.motion(motion(1, 2, 0));
+        assertEquals(601, engine.snapshot(2, 600, false).nextChangeAtMillis);
+        positions(engine.ready(), 500, 900);
+        assertEquals(701, engine.snapshot(2, 601, false).nextChangeAtMillis);
+        positions(engine.ready(), 900);
+        assertEquals(Long.MAX_VALUE, engine.snapshot(2, 701, false).nextChangeAtMillis);
+        positions(engine.ready());
+    }
+
+    @Test public void confirmedAndTentativeTracksKeepTheirOwnRetentionDeadlines() {
+        SceneEngine engine = engine(); register(engine, 2); engine.motion(motion(1, 2, 0));
+        engine.observe(batch(source(1), QUALITY, face(500)));
+        engine.observe(batch(source(2), QUALITY, face(500), face(900)));
+        assertEquals(701, engine.snapshot(2, 210, false).nextChangeAtMillis);
+        assertEquals(1, engine.ready().tentativeTracks);
+        assertEquals(5201, engine.snapshot(2, 701, false).nextChangeAtMillis);
+        positions(engine.ready(), 500);
+        assertEquals(0, engine.ready().tentativeTracks);
+    }
+
+    @Test public void unrepresentableRetentionDeadlineSaturatesWithoutAnImmediateExpiryLoop() {
+        SceneEngine engine = engine();
+        SceneEngine.Source source = new SceneEngine.Source(1, 1, 42, 1000, 2400,
+                Long.MAX_VALUE - 100, -1);
+        engine.register(source); engine.observe(batch(source, FAST, face(500)));
+        assertEquals(Long.MAX_VALUE, engine.snapshot(1, Long.MAX_VALUE, false).nextChangeAtMillis);
+        positions(engine.ready(), 500);
+    }
+
+    @Test public void explicitPartitionRenderBasesKeepBodyHeaderAndTextSourcesIndependent() {
+        SceneEngine engine = engine(); register(engine, 2);
+        engine.observe(batch(source(1), FAST, face(500), observation("HEADER", 2, 0, 100, 50)));
+        engine.observe(batch(source(1), TEXT, observation("TEXT", 3, 7, 100, 800)));
+        engine.motion(motion(1, 2, -400));
+        SceneEngine.Snapshot snapshot = engine.snapshot(1, 210, false, Collections.singletonMap(1L, 2L));
+        assertEquals(1, snapshot.destination.sequence); positions(snapshot, 100, 50, 800);
+        for (SceneEngine.Mask mask : masks(snapshot)) {
+            assertEquals(mask.partition == 1 ? 2 : 1, mask.geometrySource.sequence);
+            assertEquals(1, mask.evidenceSource.sequence);
+        }
+        assertEquals(new java.util.HashSet<>(Arrays.asList(1L, 2L, 3L)), engine.activePartitions());
+    }
+
+    @Test public void incompatiblePartitionBasisRejectsBeforeMutatingRetentionOrReadyCoverage() {
+        SceneEngine engine = engine(); register(engine, 1); engine.observe(batch(source(1), FAST, face(500)));
+        SceneEngine.Snapshot ready = engine.snapshot(1, 110, false);
+        try { engine.snapshot(1, 5000, false, Collections.singletonMap(1L, 99L)); fail("unknown basis accepted"); }
+        catch (IllegalArgumentException expected) { }
+        assertSame(ready, engine.ready()); assertEquals(1, engine.trackCount());
+        SceneEngine.Source incompatible = new SceneEngine.Source(1, 2, 43, 1000, 2400, 200, -1);
+        engine.register(incompatible);
+        try { engine.snapshot(1, 5000, false, Collections.singletonMap(1L, 2L)); fail("wrong scope accepted"); }
+        catch (IllegalArgumentException expected) { }
+        assertSame(ready, engine.ready()); assertEquals(1, engine.trackCount());
+    }
+
+    @Test public void aRetiredFreshObservationCannotBeBackProjectedThroughItsEvictionRebase() {
+        SceneEngine engine = new SceneEngine(1, new SceneEngine.Policy(3, 100, 64, 256, 500, 5000, .5));
+        register(engine, 3); assertTrue(engine.pin(source(2)));
+        engine.motion(motion(2, 3, 200)); engine.observe(batch(source(3), FAST, face(300)));
+        engine.register(source(4)); engine.register(source(5));
+        assertNull(engine.source(3));
+        SceneEngine.Snapshot snapshot = engine.snapshot(5, 510, false, Collections.singletonMap(1L, 2L));
+        positions(snapshot, 300); assertEquals(3, masks(snapshot).get(0).geometrySource.sequence);
+        assertEquals(3, masks(snapshot).get(0).evidenceSource.sequence);
+    }
+
+    @Test public void aTentativeQualitySourceCannotHideFirstFastCoverageAtItsQualifiedBasis() {
+        SceneEngine engine = engine(); register(engine, 3);
+        engine.observe(batch(source(1), FAST, face(500))); engine.motion(motion(1, 2, -400));
+        engine.observe(batch(source(3), QUALITY, face(350)));
+        SceneEngine.Snapshot snapshot = engine.snapshot(1, 310, true, Collections.singletonMap(1L, 2L));
+        positions(snapshot, 100); assertEquals(1, snapshot.tentativeTracks);
+        assertEquals(2, masks(snapshot).get(0).geometrySource.sequence);
+    }
+
+    @Test public void aFreshDirectSourceIsNotForcedBackwardEvenWhenAnInverseImageMapExists() {
+        SceneEngine engine = engine(); register(engine, 3);
+        engine.motion(motion(2, 3, 200)); engine.observe(batch(source(3), FAST, face(300)));
+        SceneEngine.Snapshot snapshot = engine.snapshot(3, 310, true, Collections.singletonMap(1L, 2L));
+        positions(snapshot, 300); assertEquals(3, masks(snapshot).get(0).geometrySource.sequence);
+        assertFalse(masks(snapshot).get(0).estimatedMotion);
+    }
+
+    @Test public void exactEstimatedDuplicateCoverageDoesNotMergeUnsupportedIdentities() {
+        SceneEngine engine = engine(); register(engine, 2);
+        engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1, EVENT_ESTIMATE, SUPPORT, 0, -400));
+        engine.observe(batch(source(1), FAST, face(500))); engine.observe(batch(source(2), FAST, face(100)));
+        SceneEngine.Snapshot snapshot = engine.snapshot(2, 210, true);
+        positions(snapshot, 100); assertEquals(1, snapshot.redundantEstimatedMasks);
+        assertEquals(2, engine.trackCount()); assertFalse(masks(snapshot).get(0).confirmed);
+        assertEquals(2, masks(snapshot).get(0).evidenceSource.sequence);
+    }
+
     @Test public void firstFastDoesNotWaitForQualityOrAnotherCapture() {
         SceneEngine engine = engine(); register(engine, 1);
         assertTrue(engine.observe(batch(source(1), FAST, face(500))));

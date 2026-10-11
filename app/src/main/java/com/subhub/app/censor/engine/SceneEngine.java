@@ -222,11 +222,13 @@ public final class SceneEngine {
         public final boolean confirmed;
         public final boolean estimatedMotion;
         public final Region displayRegion;
+        /** Actual source whose coordinate basis produced displayRegion; not the sampling source. */
+        public final Source geometrySource;
         /** Sampling uses this source and region, never the enclosing packet's newest source. */
         public final Source evidenceSource;
         public final Region evidenceRegion;
 
-        private Mask(Track track, Projection projected) {
+        private Mask(Track track, Projection projected, Source geometrySource) {
             identity = track.identity;
             category = track.category;
             partition = track.partition;
@@ -234,6 +236,7 @@ public final class SceneEngine {
             confirmed = track.confirmed;
             estimatedMotion = projected.estimated;
             displayRegion = projected.region;
+            this.geometrySource = geometrySource;
             evidenceSource = track.evidenceSource;
             evidenceRegion = track.evidenceRegion;
         }
@@ -260,9 +263,14 @@ public final class SceneEngine {
         public final long revision;
         public final long capacityDrops;
         public final long sourceEvictions;
+        /** Earliest retention change on the display clock; MAX_VALUE means no finite deadline. */
+        public final long nextChangeAtMillis;
+        /** Presentation-only duplicates; identities and confirmation are deliberately unchanged. */
+        public final int redundantEstimatedMasks;
 
         private Snapshot(Source destination, List<Group> groups, int unresolved, int tentative,
-                long revision, long capacityDrops, long sourceEvictions) {
+                long revision, long capacityDrops, long sourceEvictions, long nextChangeAtMillis,
+                int redundantEstimatedMasks) {
             this.destination = destination;
             this.groups = immutable(groups);
             unresolvedTracks = unresolved;
@@ -270,6 +278,8 @@ public final class SceneEngine {
             this.revision = revision;
             this.capacityDrops = capacityDrops;
             this.sourceEvictions = sourceEvictions;
+            this.nextChangeAtMillis = nextChangeAtMillis;
+            this.redundantEstimatedMasks = redundantEstimatedMasks;
         }
     }
 
@@ -480,24 +490,84 @@ public final class SceneEngine {
 
     /** Only this method constructs render geometry. Unknown correspondence stays explicit. */
     public synchronized Snapshot snapshot(long destination, long nowMillis, boolean allowEventEstimates) {
+        return snapshot(destination, nowMillis, allowEventEstimates, Collections.emptyMap());
+    }
+
+    /**
+     * Canvas geometry and per-partition image bases are independent of detector completion.
+     * Only the runtime selects these explicit bases; every member still needs its own supported
+     * correspondence. An absent edge never becomes a zero-motion map or a sampling substitution.
+     */
+    public synchronized Snapshot snapshot(long destination, long nowMillis, boolean allowEventEstimates,
+            Map<Long, Long> partitionBases) {
         Source source = sources.get(destination);
         if (source == null) throw new IllegalArgumentException("unknown destination");
+        Map<Long, Long> bases = new HashMap<>(Objects.requireNonNull(partitionBases));
+        Map<Long, Source> selectedSources = new HashMap<>();
+        if (bases.size() > policy.maximumTracks) throw new IllegalArgumentException("too many render bases");
+        for (Long selected : bases.values()) {
+            Source basis = sources.get(selected);
+            if (basis == null || basis.epoch != source.epoch || basis.geometry != source.geometry
+                    || basis.width != source.width || basis.height != source.height) {
+                throw new IllegalArgumentException("incompatible render basis");
+            }
+        }
+        for (Map.Entry<Long, Long> entry : bases.entrySet()) selectedSources.put(entry.getKey(), sources.get(entry.getValue()));
+        // An explicit carried basis cannot force fresher visible geometry backward, even when
+        // an inverse estimate/image path exists. Tentative optional quality cannot move FAST.
+        for (Track track : tracks) {
+            Source carried = selectedSources.get(track.partition);
+            Source direct = track.evidenceSource;
+            if (carried != null && (track.fastVisible || track.confirmed)
+                    && !expired(track, nowMillis) && direct.sequence > carried.sequence
+                    && direct.epoch == source.epoch && direct.geometry == source.geometry
+                    && direct.width == source.width && direct.height == source.height) {
+                selectedSources.put(track.partition, direct);
+            }
+        }
         List<Mask> masks = new ArrayList<>();
         int unresolved = 0;
         int tentative = 0;
+        long nextChangeAt = Long.MAX_VALUE;
         for (Iterator<Track> iterator = tracks.iterator(); iterator.hasNext();) {
             Track track = iterator.next();
             long hold = track.confirmed ? policy.retainedMillis : policy.transientMillis;
-            if (nowMillis > track.evidenceSource.receivedAtMillis
-                    && nowMillis - track.evidenceSource.receivedAtMillis > hold) {
+            if (expired(track, nowMillis)) {
                 iterator.remove();
                 revision++;
                 continue;
             }
+            // Retention includes the exact hold boundary. The next millisecond is the first
+            // invalid display time. Saturate instead of wrapping extreme test/source clocks.
+            long received = track.evidenceSource.receivedAtMillis;
+            long deadline = received >= Long.MAX_VALUE - hold
+                    ? Long.MAX_VALUE : received + hold + 1;
+            nextChangeAt = Math.min(nextChangeAt, deadline);
             if (!track.fastVisible && !track.confirmed) { tentative++; continue; }
-            Projection projected = project(track.basis, destination, track.partition, track.region, allowEventEstimates);
+            Source selected = selectedSources.getOrDefault(track.partition, source);
+            // Direct geometry survives graph-node eviction. Reusing that immutable observation
+            // is not an invented zero-motion edge from the track's eviction-rebased coordinates.
+            Projection projected = selected.sequence == track.evidenceSource.sequence
+                    ? new Projection(selected.sequence, track.evidenceRegion, false)
+                    : project(track.basis, selected.sequence, track.partition, track.region, allowEventEstimates);
             if (projected == null) { unresolved++; continue; }
-            if (projected.region.visible(source)) masks.add(new Mask(track, projected));
+            if (projected.region.visible(source)) masks.add(new Mask(track, projected, selected));
+        }
+        int redundantEstimated = 0;
+        List<Mask> supported = new ArrayList<>(masks);
+        for (Iterator<Mask> iterator = masks.iterator(); iterator.hasNext();) {
+            Mask estimate = iterator.next();
+            if (!estimate.estimatedMotion) continue;
+            for (Mask direct : supported) {
+                if (!direct.estimatedMotion && direct.evidenceSource.sequence > estimate.evidenceSource.sequence
+                        && direct.geometrySource.sequence == estimate.geometrySource.sequence
+                        && direct.partition == estimate.partition && direct.textGroup == estimate.textGroup
+                        && direct.category.equals(estimate.category)
+                        && direct.displayRegion.contains(estimate.displayRegion)
+                        && estimate.displayRegion.contains(direct.displayRegion)) {
+                    iterator.remove(); redundantEstimated++; break;
+                }
+            }
         }
         List<List<Mask>> grouped = new ArrayList<>();
         for (Mask mask : masks) {
@@ -514,15 +584,29 @@ public final class SceneEngine {
         }
         List<Group> groups = new ArrayList<>();
         for (List<Mask> group : grouped) groups.add(new Group(group));
-        ready = new Snapshot(source, groups, unresolved, tentative, revision, capacityDrops, sourceEvictions);
+        ready = new Snapshot(source, groups, unresolved, tentative, revision, capacityDrops,
+                sourceEvictions, nextChangeAt, redundantEstimated);
         pruneDistinctRelations();
         return ready;
     }
 
     /** No-new-image differs from a new unmatched image. Immutable ready coverage is not cleared. */
     public synchronized Snapshot ready() { return ready; }
+    /** Immutable descriptor only; this does not borrow or expose captured pixel ownership. */
+    public synchronized Source source(long sequence) { return sources.get(sequence); }
+    public synchronized Set<Long> activePartitions() {
+        Set<Long> partitions = new HashSet<>();
+        for (Track track : tracks) partitions.add(track.partition);
+        return Collections.unmodifiableSet(partitions);
+    }
     public synchronized int sourceCount() { return sources.size(); }
     public synchronized int trackCount() { return tracks.size(); }
+
+    private boolean expired(Track track, long nowMillis) {
+        long hold = track.confirmed ? policy.retainedMillis : policy.transientMillis;
+        return nowMillis > track.evidenceSource.receivedAtMillis
+                && nowMillis - track.evidenceSource.receivedAtMillis > hold;
+    }
 
     private Projection project(long from, long to, long partition, Region region, boolean estimates) {
         Projection measured = search(from, to, partition, region, false);

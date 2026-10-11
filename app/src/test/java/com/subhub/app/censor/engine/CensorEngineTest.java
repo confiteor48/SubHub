@@ -224,7 +224,8 @@ public class CensorEngineTest {
         h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
         h.fire(334); Pixel second = h.deliver(1, 2); h.fastExecutor.runOne();
         h.now = 668; h.engine.requestCaptureAt(h.now);
-        assertEquals(2, h.captures.size()); assertEquals(Long.MAX_VALUE, h.timer.nextAt());
+        // Capture is still backpressured, but the independent display expiry remains scheduled.
+        assertEquals(2, h.captures.size()); assertEquals(5001, h.timer.nextAt());
         assertEquals(2, h.engine.livePixelFrames());
         h.fast.succeed(1, face(500)); assertFalse(first.closed); h.ui.runAll();
         assertEquals(1, first.closes); assertEquals(668, h.timer.nextAt()); h.fire(668);
@@ -476,6 +477,348 @@ public class CensorEngineTest {
         }
     }
 
+    @Test public void settingsSpacingChangesKeepTheSameCallbackAndPlatformFloor() {
+        Harness h = new Harness(); h.start(); h.fire(0);
+        long epoch = h.engine.currentEpoch();
+        h.engine.executionControls(1000, false, Collections.singleton(FAST));
+        assertTrue(h.engine.captureInFlight()); assertEquals(epoch, h.engine.currentEpoch());
+        h.deliver(0, 1); assertEquals(1000, h.timer.nextAt());
+        h.engine.executionControls(0, false, Collections.singleton(FAST));
+        assertEquals(334, h.timer.nextAt());
+        h.engine.close(); h.fastExecutor.runAll();
+    }
+
+    @Test public void disabledRunningLaneKeepsPixelsAndRejectsItsLateSuccessAfterReenable() {
+        Harness h = new Harness(true, false, true, 8, 2, 16); h.start(); h.fire(0);
+        Pixel first = h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+        h.qualityExecutor.runOne(); WorkCall quality = h.quality.calls.get(0);
+        h.engine.executionControls(334, false, Collections.singleton(FAST));
+        assertTrue(quality.input.cancelled()); assertFalse(first.closed);
+        h.engine.executionControls(334, true, java.util.EnumSet.of(FAST, QUALITY));
+        quality.completion.success(batch(quality.input, QUALITY, face(100)), TIMING);
+        h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(500, masks(view.snapshot).get(0).displayRegion.top, 0);
+        }
+        h.engine.close(); assertEquals(1, first.closes);
+    }
+
+    @Test public void disablingQueuedLanesPreventsTheirWorkerFromReadingReleasedPixels() {
+        Harness h = new Harness(true, true, true, 8, 0, 16); h.start(); h.fire(0);
+        Pixel pixel = h.deliver(0, 1);
+        h.engine.executionControls(334, false, Collections.emptySet());
+        assertEquals(1, pixel.closes); assertEquals(Long.MAX_VALUE, h.timer.nextAt());
+        h.fastExecutor.runAll(); h.textExecutor.runAll(); h.qualityExecutor.runAll();
+        assertTrue(h.fast.calls.isEmpty()); assertTrue(h.text.calls.isEmpty()); assertTrue(h.quality.calls.isEmpty());
+        h.engine.close(); assertEquals(1, h.drained);
+    }
+
+    @Test public void textOnlyConfigurationDoesNotRunOrWaitForFast() {
+        Harness h = new Harness(true, true, false, 8, 2, 16);
+        h.engine.executionControls(334, false, Collections.singleton(TEXT)); h.start(); h.fire(0);
+        h.deliver(0, 1); assertEquals(0, h.fastExecutor.size()); assertEquals(0, h.qualityExecutor.size());
+        h.textExecutor.runOne(); h.text.succeed(0, text(600)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals("TEXT", masks(view.snapshot).get(0).category);
+        }
+        h.engine.close();
+    }
+
+    @Test public void providerAdmissionChangesDoNotResetFirstFastOrSourceOwnership() {
+        Harness h = new Harness(true, false, false, 8, 2, 16); h.start(); h.fire(0);
+        h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.qualityExecutor.runOne();
+        h.fire(334); Pixel next = h.deliver(1, 2); assertEquals(0, h.fastExecutor.size());
+        h.engine.executionControls(334, true, java.util.EnumSet.of(FAST, QUALITY));
+        assertEquals(1, h.fastExecutor.size()); h.fastExecutor.runOne(); assertFalse(next.closed);
+        h.engine.close(); h.fast.calls.get(1).completion.cancelled(); h.quality.calls.get(0).completion.cancelled();
+        assertEquals(1, next.closes);
+    }
+
+    @Test public void disabledDuringForegroundResolutionDoesNotCallThePlatform() {
+        Harness h = new Harness(); h.behavior = (request, callback) -> {
+            h.engine.executionControls(334, false, Collections.emptySet()); assertFalse(request.tryDispatch());
+        };
+        h.start(); h.fire(0); assertFalse(h.engine.captureInFlight());
+        assertEquals(Long.MAX_VALUE, h.timer.nextAt());
+        h.engine.executionControls(334, false, Collections.singleton(FAST));
+        assertEquals(0, h.timer.nextAt()); h.engine.close();
+    }
+
+    @Test public void acceptedEvidenceHookDoesNotReportFailedOrCanceledWork() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fast.calls.get(0).completion.failure(); assertTrue(h.accepted.isEmpty());
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne();
+        h.engine.executionControls(334, false, Collections.emptySet());
+        h.fast.succeed(1, face(500)); assertTrue(h.accepted.isEmpty());
+        h.engine.executionControls(334, false, Collections.singleton(FAST));
+        h.fire(668); h.deliver(2, 3); h.fastExecutor.runOne(); h.fast.succeed(2, face(600));
+        assertEquals(1, h.accepted.size()); assertSame(h.fast.calls.get(2).input.source, h.accepted.get(0).source);
+        assertEquals(FAST, h.accepted.get(0).lane); h.engine.close();
+    }
+
+    @Test public void nativeContextCleanupFaultCannotPretendSuccessfulDrainOrAdmitMoreWork() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel pixels = h.deliver(0, 1); h.fastExecutor.runOne();
+        h.engine.nativeResourceFailure(); assertEquals(1, h.engine.resourceFailures());
+        assertFalse(pixels.closed); assertTrue(h.fast.calls.get(0).input.cancelled());
+        h.fast.calls.get(0).completion.cancelled(); assertEquals(1, pixels.closes);
+        h.engine.requestCaptureAt(0); assertEquals(Long.MAX_VALUE, h.timer.nextAt());
+        h.engine.close(); assertEquals(0, h.drained);
+    }
+
+    @Test public void displayExpiryClearsWithoutAnotherCaptureOrInferenceCompletion() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel pixels = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); // The next platform callback stays outstanding indefinitely.
+        int accepted = h.accepted.size();
+        assertEquals(5001, h.timer.nextAt()); h.fire(5001); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertNotNull(view); assertTrue(view.snapshot.groups.isEmpty());
+            assertEquals(Long.MAX_VALUE, view.snapshot.nextChangeAtMillis);
+        }
+        assertEquals(accepted, h.accepted.size()); assertEquals(1, pixels.closes);
+        assertEquals(2, h.captures.size()); assertTrue(h.engine.captureInFlight());
+        h.engine.close(); h.captures.get(1).callback.failure(0);
+    }
+
+    @Test public void drawingAtTheExactBoundaryKeepsCoverageButLateTimerCannotPermitAnExpiredDraw() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel pixels = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine<Pixel>.RenderView held = h.engine.acquireRenderView();
+        h.now = 5000;
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertSame(held.snapshot, view.snapshot); assertEquals(1, masks(view.snapshot).size());
+        }
+        h.now = 5001; // Do not deliver any timer or UI task before the actual draw acquisition.
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertTrue(view.snapshot.groups.isEmpty()); assertNull(view.sourcePixels(1));
+        }
+        assertFalse(pixels.closed); assertSame(pixels, held.sourcePixels(1));
+        held.close(); assertEquals(1, pixels.closes); h.ui.runAll();
+        h.engine.close();
+    }
+
+    @Test public void queuedUiPublicationCannotFlashEvidenceThatExpiredWhileTheUiWasBlocked() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel pixels = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+        h.now = 6000; h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertTrue(view.snapshot.groups.isEmpty()); assertNull(view.sourcePixels(1));
+        }
+        assertEquals(1, pixels.closes); assertEquals(1, h.accepted.size()); h.engine.close();
+    }
+
+    @Test public void renewalReplacesTheDeadlineAndCancelledOldExpiryCannotClearNewEvidence() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        TimedTask oldExpiry = h.timer.tasks.stream().filter(t -> t.at == 5001).findFirst().get();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne();
+        h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, 0));
+        h.fast.succeed(1, face(500)); h.ui.runAll();
+        assertTrue(oldExpiry.cancelled); h.now = 5001; oldExpiry.action.run();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(1, masks(view.snapshot).size()); assertEquals(5335, view.snapshot.nextChangeAtMillis);
+        }
+        h.engine.close();
+    }
+
+    @Test public void oldDisplayExpiryCannotPublishIntoAChangedScope() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        TimedTask oldExpiry = h.timer.tasks.stream().filter(t -> t.at == 5001).findFirst().get();
+        h.engine.changeScope(43); h.ui.runAll(); int publications = h.presentations;
+        oldExpiry.action.run(); assertTrue(oldExpiry.cancelled); assertEquals(publications, h.presentations);
+        assertNull(h.engine.acquireRenderView()); h.engine.close();
+    }
+
+    @Test public void rejectedExpiryWakeCannotAuthorizeExpiredDrawsOrCreateAPhantomDeadline() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.timer.reject = true; h.fast.succeed(0, face(500)); h.ui.runAll();
+        assertTrue(h.engine.callbackFailures() > 0);
+        assertTrue(h.timer.tasks.stream().noneMatch(t -> !t.cancelled && !t.ran && t.at == 5001));
+        h.now = 6000;
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertTrue(view.snapshot.groups.isEmpty());
+        }
+        h.engine.close();
+    }
+
+    @Test public void drawTimeRefreshHonorsReentrantScopeInvalidationBeforeReturningTheLease() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel pixels = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.traceHook = trace -> { if (trace.stage == CensorEngine.Stage.PRESENTED) h.engine.stop(); };
+        h.now = 5001; assertNull(h.engine.acquireRenderView()); assertEquals(1, pixels.closes);
+        h.traceHook = null; h.engine.close();
+    }
+
+    @Test public void qualifiedImageMapMovesReadyCoverageBeforeTheNextFastResult() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel first = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); Pixel second = h.deliver(1, 2); h.fastExecutor.runOne();
+        assertTrue(h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400))); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(1, view.snapshot.destination.sequence); assertEquals(1, masks(view.snapshot).size());
+            SceneEngine.Mask mask = masks(view.snapshot).get(0);
+            assertEquals(100, mask.displayRegion.top, 0); assertEquals(2, mask.geometrySource.sequence);
+            assertEquals(500, mask.evidenceRegion.top, 0); assertEquals(1, mask.evidenceSource.sequence);
+            assertSame(first, view.sourcePixels(1)); assertNull(view.sourcePixels(2)); assertFalse(mask.confirmed);
+        }
+        assertEquals(1, h.accepted.size()); assertFalse(second.closed);
+        h.engine.close(); h.fast.calls.get(1).completion.cancelled();
+        assertEquals(1, first.closes); assertEquals(1, second.closes);
+    }
+
+    @Test public void aMapBeforeTheFirstFastResultDoesNotDelayOrDoubleRebaseFirstCoverage() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fire(334); h.deliver(1, 2);
+        assertTrue(h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400)));
+        assertNull(h.engine.acquireRenderView()); h.fast.succeed(0, face(500)); h.ui.runAll();
+        long identity;
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            SceneEngine.Mask mask = masks(view.snapshot).get(0); identity = mask.identity;
+            assertEquals(100, mask.displayRegion.top, 0); assertEquals(2, mask.geometrySource.sequence);
+        }
+        h.fastExecutor.runOne(); h.fast.succeed(1, face(100)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(1, masks(view.snapshot).size()); SceneEngine.Mask mask = masks(view.snapshot).get(0);
+            assertEquals(identity, mask.identity); assertEquals(100, mask.displayRegion.top, 0);
+            assertEquals(2, mask.evidenceSource.sequence); assertEquals(2, mask.geometrySource.sequence);
+        }
+        h.engine.close();
+    }
+
+    @Test public void readyBodyAndHeaderUseIndependentPartitionBasesAndOriginalSamplingPixels() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel first = h.deliver(0, 1);
+        h.fastExecutor.runOne();
+        SceneEngine.Observation header = new SceneEngine.Observation("HEADER", 2, 0,
+                new SceneEngine.Region(100, 50, 200, 100), .9f);
+        h.fast.succeed(0, face(500), header); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne();
+        h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(2, masks(view.snapshot).size());
+            for (SceneEngine.Mask mask : masks(view.snapshot)) {
+                assertEquals(mask.partition == 1 ? 100 : 50, mask.displayRegion.top, 0);
+                assertEquals(mask.partition == 1 ? 2 : 1, mask.geometrySource.sequence);
+                assertSame(first, view.sourcePixels(mask.evidenceSource.sequence));
+            }
+        }
+        h.engine.close(); h.fast.calls.get(1).completion.cancelled();
+    }
+
+    @Test public void basisMetadataSurvivesBitmapRetirementWithoutBorrowingTheWrongPixels() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel first = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); Pixel second = h.deliver(1, 2); h.fastExecutor.runOne();
+        h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400)); h.ui.runAll();
+        h.fast.calls.get(1).completion.failure(); assertEquals(1, second.closes);
+        h.fire(668); h.deliver(2, 3); h.fastExecutor.runOne();
+        assertTrue(h.engine.motion(motion(h.engine.currentEpoch(), 2, 3, 200))); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            SceneEngine.Mask mask = masks(view.snapshot).get(0);
+            assertEquals(300, mask.displayRegion.top, 0); assertEquals(3, mask.geometrySource.sequence);
+            assertSame(first, view.sourcePixels(1)); assertNull(view.sourcePixels(2)); assertNull(view.sourcePixels(3));
+        }
+        h.engine.close(); h.fast.calls.get(2).completion.cancelled();
+    }
+
+    @Test public void estimatesCannotAdvanceImageBasesAndLaterMeasuredMotionIsNotAddedTwice() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne();
+        SceneEngine.Motion estimate = new SceneEngine.Motion(h.engine.currentEpoch(), 1, 2, 1, 0,
+                SceneEngine.MotionAuthority.EVENT_ESTIMATE, SUPPORT, 0, -400);
+        assertTrue(h.engine.motion(estimate)); h.ui.runAll(); assertEquals(0, h.engine.renderBasisCount());
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(500, masks(view.snapshot).get(0).displayRegion.top, 0);
+        }
+        assertTrue(h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400))); h.ui.runAll();
+        assertFalse(h.engine.motion(estimate)); assertEquals(1, h.engine.renderBasisCount());
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(100, masks(view.snapshot).get(0).displayRegion.top, 0);
+            assertFalse(masks(view.snapshot).get(0).confirmed);
+        }
+        h.engine.close(); h.fast.calls.get(1).completion.cancelled();
+    }
+
+    @Test public void delayedOlderMapsCannotMoveANewerPartitionBasisBackwards() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(900)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne(); h.fire(668); h.deliver(2, 3);
+        h.engine.motion(motion(h.engine.currentEpoch(), 1, 3, -800)); h.ui.runAll();
+        assertTrue(h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400))); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(100, masks(view.snapshot).get(0).displayRegion.top, 0);
+            assertEquals(3, masks(view.snapshot).get(0).geometrySource.sequence);
+        }
+        h.engine.close(); h.fast.calls.get(1).completion.cancelled();
+    }
+
+    @Test public void displayExpiryAndScopeInvalidationReleasePartitionBasisOwnership() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne();
+        h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400)); h.ui.runAll();
+        assertEquals(1, h.engine.renderBasisCount());
+        h.now = 5001;
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertTrue(view.snapshot.groups.isEmpty()); assertEquals(0, h.engine.renderBasisCount());
+        }
+        h.engine.changeScope(43); assertEquals(0, h.engine.renderBasisCount());
+        assertNull(h.engine.acquireRenderView()); h.engine.close(); h.fast.calls.get(1).completion.cancelled();
+    }
+
+    @Test public void basisAdmissionIsBoundedAndUnusedPartitionPinsRetireAtFirstPublication() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fire(334); Pixel second = h.deliver(1, 2);
+        for (int partition = 1; partition <= 64; partition++) {
+            assertTrue(h.engine.motion(new SceneEngine.Motion(h.engine.currentEpoch(), 1, 2,
+                    partition, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE, SUPPORT, 0, -400)));
+        }
+        assertEquals(64, h.engine.renderBasisCount());
+        assertFalse(h.engine.motion(new SceneEngine.Motion(h.engine.currentEpoch(), 1, 2,
+                65, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE, SUPPORT, 0, -400)));
+        h.fast.succeed(0, face(500)); h.ui.runAll(); assertEquals(1, h.engine.renderBasisCount());
+        h.engine.close(); assertEquals(0, h.engine.renderBasisCount()); assertEquals(1, second.closes);
+    }
+
+    @Test public void freshUnmatchedHitsCannotBeHiddenOrBackProjectedByAnOlderCarriedBasis() {
+        for (SceneEngine.MotionAuthority bridge : Arrays.asList(null,
+                SceneEngine.MotionAuthority.EVENT_ESTIMATE, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE)) {
+            Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+            h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+            h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne();
+            h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400)); h.ui.runAll();
+            h.fast.calls.get(1).completion.failure();
+            h.fire(668); Pixel fresh = h.deliver(2, 3); h.fastExecutor.runOne();
+            if (bridge != null) h.engine.motion(new SceneEngine.Motion(h.engine.currentEpoch(), 2, 3,
+                    1, 1, bridge, SUPPORT, 0, 200));
+            h.fast.succeed(2, face(300)); h.ui.runAll();
+            try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+                assertEquals(1, masks(view.snapshot).size()); SceneEngine.Mask mask = masks(view.snapshot).get(0);
+                assertEquals(300, mask.displayRegion.top, 0); assertEquals(3, mask.geometrySource.sequence);
+                assertSame(fresh, view.sourcePixels(3));
+            }
+            h.engine.close();
+        }
+    }
+
+    @Test public void optionalBasisPinsCannotStarveActiveAndLatestPendingCaptures() {
+        Harness h = new Harness(false, false, false, 8, 2, 3);
+        h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); Pixel retired = h.deliver(1, 2); h.fastExecutor.runOne();
+        assertTrue(h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -400)));
+        assertEquals(0, h.engine.renderBasisCount()); assertEquals(1, h.engine.basisAdmissionDrops());
+        h.fast.calls.get(1).completion.failure(); assertEquals(1, retired.closes);
+        h.fire(668); Pixel running = h.deliver(2, 3); h.fastExecutor.runOne();
+        h.fire(1002); Pixel pending = h.deliver(3, 4);
+        assertEquals(1, h.engine.activeCount(FAST)); assertEquals(1, h.engine.pendingCount(FAST));
+        assertFalse(running.closed); assertFalse(pending.closed);
+        assertFalse(h.traces.stream().anyMatch(trace -> trace.stage == CensorEngine.Stage.SOURCE_REJECTED));
+        h.engine.close(); assertFalse(running.closed); assertEquals(1, pending.closes);
+        h.fast.calls.get(2).completion.cancelled(); assertEquals(1, running.closes);
+    }
+
     private static SceneEngine.Observation face(double y) {
         return new SceneEngine.Observation("FACE", 1, 0, new SceneEngine.Region(100, y, 200, y + 100), .9f);
     }
@@ -596,6 +939,7 @@ public class CensorEngineTest {
         final FakeWorker text = new FakeWorker(TEXT);
         final List<CaptureCall> captures = new ArrayList<>();
         final List<CensorEngine.Trace> traces = Collections.synchronizedList(new ArrayList<>());
+        final List<SceneEngine.Batch> accepted = new ArrayList<>();
         BiConsumer<CensorEngine.CaptureRequest, CensorEngine.CaptureCallback<Pixel>> behavior;
         java.util.function.Consumer<CensorEngine.Trace> traceHook;
         final FakeTimer timer = new FakeTimer();
@@ -622,6 +966,7 @@ public class CensorEngineTest {
                             if (traceHook != null) traceHook.accept(trace);
                         }
                         @Override public void presentationChanged() { presentations++; }
+                        @Override public void batchAccepted(SceneEngine.Batch batch) { accepted.add(batch); }
                         @Override public void drained() { drained++; }
                     });
         }

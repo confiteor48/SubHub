@@ -13,16 +13,32 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import ai.onnxruntime.OrtException;
+
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Actual CPU/ONNX calls establish token and terminal-result contracts, not screen-detection quality. */
 @RunWith(AndroidJUnit4.class)
 public final class ControlledDetectionAndroidTest {
+    @Test public void strictSessionCleanupExposesCheckedNativeCloseFailureExactlyOnce() {
+        AtomicInteger closes = new AtomicInteger();
+        try {
+            DetectionEngine.closeNativeSession(() -> {
+                closes.incrementAndGet(); throw new OrtException("controlled native close failure");
+            }, true);
+            fail("Native session cleanup was silently accepted");
+        } catch (RuntimeException failure) {
+            assertTrue(DetectionEngine.resourceCleanupFailed(failure));
+            assertTrue(failure.getCause() instanceof OrtException);
+        }
+        assertEquals(1, closes.get());
+    }
     @Test public void uninitializedModelCannotClaimInspectedNegativeEvidence() throws Exception {
         Context context = ApplicationProvider.getApplicationContext();
         Bitmap pixels = blank(); AtomicInteger bindings = new AtomicInteger();
         try (DetectionEngine detector = new DetectionEngine(context, DetectorConfig.builder().inferenceThreads(1).build(), true)) {
+            detector.requireStrictResourceCleanup();
             DetectionEngine.ControlledResult result = detector.detectControlled(pixels, 1080, 2400, 320, 320,
                     () -> false, handle -> bindings.incrementAndGet());
             assertFalse(result.complete); assertFalse(result.cancelled); assertTrue(result.detections.isEmpty());
@@ -36,6 +52,7 @@ public final class ControlledDetectionAndroidTest {
         AtomicReference<DetectionEngine.RunCancellation> cancelled = new AtomicReference<>();
         AtomicReference<DetectionEngine.RunCancellation> completed = new AtomicReference<>();
         try (DetectionEngine detector = new DetectionEngine(context, DetectorConfig.builder().inferenceThreads(1).build(), true)) {
+            detector.requireStrictResourceCleanup();
             detector.initializeForProvider("CPU");
             DetectionEngine.ControlledResult stopped = detector.detectControlled(pixels, 1080, 2400, 320, 320,
                     () -> false, handle -> { cancelled.set(handle); assertTrue(handle.cancel()); });

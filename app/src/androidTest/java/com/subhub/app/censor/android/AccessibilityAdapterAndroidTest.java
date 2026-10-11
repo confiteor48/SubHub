@@ -298,8 +298,10 @@ public final class AccessibilityAdapterAndroidTest {
     }
     private static final class Scheduled {
         final Runnable action;
+        final long at;
         boolean cancelled;
-        Scheduled(Runnable action) { this.action = action; }
+        Scheduled(Runnable action) { this(action, 0); }
+        Scheduled(Runnable action, long at) { this.action = action; this.at = at; }
     }
 
     private static final class Harness implements AutoCloseable {
@@ -332,7 +334,7 @@ public final class AccessibilityAdapterAndroidTest {
             if (qualityEnabled) workers.add(new CensorEngine.LaneWorker<>(SceneEngine.Lane.QUALITY, qualityExecutor, recording(quality, qualityInputs)));
             engine = new CensorEngine<>(new CensorEngine.Policy(334, 0, 6, 2, false),
                     new SceneEngine.Policy(16, 64, 64, 256, 5000, 20000, .5), () -> now,
-                    (action, delay) -> { Scheduled task = new Scheduled(action); timers.add(task); return () -> task.cancelled = true; },
+                    (action, delay) -> { Scheduled task = new Scheduled(action, now + delay); timers.add(task); return () -> task.cancelled = true; },
                     capturer, workers, Runnable::run, new CensorEngine.Observer() {
                         @Override public void drained() { drained++; }
                     });
@@ -345,7 +347,8 @@ public final class AccessibilityAdapterAndroidTest {
         void begin() { engine.start(42); fire(); }
         void next() { now += 334; fire(); }
         void fire() {
-            Scheduled scheduled = timers.stream().filter(t -> !t.cancelled).findFirst().orElseThrow(AssertionError::new);
+            Scheduled scheduled = timers.stream().filter(t -> !t.cancelled && t.at <= now)
+                    .min(java.util.Comparator.comparingLong(t -> t.at)).orElseThrow(AssertionError::new);
             timers.remove(scheduled); scheduled.action.run();
         }
         private CensorEngine.Worker<PixelFrame> recording(VisualDetectorWorker worker, List<CensorEngine.Input<PixelFrame>> observed) {
