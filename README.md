@@ -50,7 +50,8 @@ SubHub brings the rules, active session, and progress into one Android app. Choo
 - **Screen Capture when wanted.** MediaProjection remains an explicit alternate path.
 - **Included apps.** Every enabled service feature uses the same include/exclude list in Settings → Apps.
 - **Tracked overlays.** Detected regions use temporal tracking. Live stability and responsiveness depend on the workload and device; UI screenshots are not performance benchmarks.
-- **One render system.** Blackout, Blur, Pixelate, Custom Image, TV Static, Glitch, Privacy Tape, and Error Popup share the tracked overlay pipeline.
+- **One render system.** Blackout, Blur, Pixelate, Custom Image, TV Static, Glitch, Privacy Tape, and Lockpad share the tracked overlay pipeline.
+- **Appearance presets.** Open Presets from the Appearance card or export appearance editor to choose 15 built-in looks or save your own. Saved looks can be renamed, updated or deleted. A preset changes appearance only in the editor you opened; detection settings stay separate.
 
 Three detection levels—Low, Medium, and High—offer Balanced Coverage, More Coverage, and Maximum Coverage. Appearance stays separate: choose one of eight phone-previewed styles, customize colors and borders, and manage images when Custom Image is selected.
 
