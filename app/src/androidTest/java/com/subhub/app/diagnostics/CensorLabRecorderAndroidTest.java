@@ -107,6 +107,30 @@ public final class CensorLabRecorderAndroidTest {
                 .contains("video omitted"));
     }
 
+    @Test public void temporaryCensorSessionKeepsRuntimePathAndOwnershipClock() throws Exception {
+        Context context = ApplicationProvider.getApplicationContext();
+        if (CensorLabRecorder.isActive()) CensorLabRecorder.stop(context);
+        CensorLabRecorder.start(context);
+        CensorLabRecorder.markCensorSession(true);
+        CensorLabRecorder.markCensorSession(false);
+        CensorLabRecorder.CompletedSession completed = CensorLabRecorder.stop(context);
+        JSONObject manifest = new JSONObject(read(completed.manifest));
+        JSONObject session = manifest.getJSONObject("recording").getJSONObject("censorSession");
+        assertEquals("temporary-censor-only", session.getString("kind"));
+        assertTrue(session.getLong("startedElapsedNanos") >= manifest.getLong("startedElapsedNanos"));
+        assertTrue(session.getLong("stoppedElapsedNanos") >= session.getLong("startedElapsedNanos"));
+        assertTrue(manifest.getLong("stoppedElapsedNanos") >= session.getLong("stoppedElapsedNanos"));
+        assertEquals("Accessibility screenshot", manifest.getJSONObject("capture").getString("runtimeMode"));
+        String trace = read(completed.trace);
+        assertTrue(trace.contains("MARKER CENSOR_SESSION_STARTED"));
+        assertTrue(trace.contains("MARKER CENSOR_SESSION_STOPPED"));
+        assertFalse(manifest.getJSONObject("recording").getBoolean("inAppScreenRecording"));
+        JSONObject exported = new JSONObject(zipEntry(
+                CensorLabBundleExporter.export(context, completed, false), "manifest.json"));
+        assertEquals("temporary-censor-only", exported.getJSONObject("recording")
+                .getJSONObject("censorSession").getString("kind"));
+    }
+
     private static String read(File file) throws Exception {
         StringBuilder result = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(

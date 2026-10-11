@@ -143,6 +143,21 @@ public final class CensorLabRecorder {
         }
     }
 
+    public static void markCensorSession(boolean started) {
+        ActiveSession value = active;
+        if (value == null) return;
+        synchronized (value.eventLock) {
+            if (value.closed) return;
+            long now = SystemClock.elapsedRealtimeNanos();
+            if (started) {
+                value.censorStartedElapsedNanos = now;
+            } else {
+                value.censorStoppedElapsedNanos = now;
+            }
+            addLocked(value, "CensorLab", "MARKER CENSOR_SESSION_" + (started ? "STARTED" : "STOPPED"));
+        }
+    }
+
     public static void mark(String marker) {
         record("CensorLab", "MARKER " + sanitize(marker, "unknown"));
     }
@@ -312,7 +327,8 @@ public final class CensorLabRecorder {
                             .put("densityDpi", metrics.densityDpi)
                             .put("refreshRateHz", Math.round(refreshRate * 100f) / 100f))
                     .put("capture", new JSONObject()
-                            .put("runtimeMode", runtime.getMode())
+                            .put("runtimeMode", session.censorStartedElapsedNanos > 0L
+                                    ? "Accessibility screenshot" : runtime.getMode())
                             .put("provider", runtime.getProvider())
                             .put("model", runtime.getModel())
                             .put("preset", settings.loadDetectionPreset().preferenceValue())
@@ -329,6 +345,11 @@ public final class CensorLabRecorder {
                                     .put("reverseMode", appearance.isReverseMode()))
                             .put("enabledCategories", enabledCategories))
                     .put("recording", new JSONObject()
+                            .put("censorSession", new JSONObject()
+                                    .put("kind", session.censorStartedElapsedNanos > 0L
+                                            ? "temporary-censor-only" : "none")
+                                    .put("startedElapsedNanos", session.censorStartedElapsedNanos)
+                                    .put("stoppedElapsedNanos", session.censorStoppedElapsedNanos))
                             .put("inAppScreenRecording", videoAttached)
                             .put("sessionUsedScreenEncoder",
                                     session.videoStartedElapsedNanos > 0L)
@@ -431,6 +452,8 @@ public final class CensorLabRecorder {
         final CensorLabEventBuffer buffer = new CensorLabEventBuffer();
         final Object eventLock = new Object();
         volatile boolean closed;
+        long censorStartedElapsedNanos;
+        long censorStoppedElapsedNanos;
         long videoStartedElapsedNanos;
         long videoStoppedElapsedNanos;
         int videoWidth;

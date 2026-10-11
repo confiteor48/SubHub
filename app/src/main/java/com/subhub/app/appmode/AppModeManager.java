@@ -11,6 +11,7 @@ import com.subhub.app.settings.CaptureMethod;
 import com.subhub.app.settings.FeatureModuleManager;
 import com.subhub.app.settings.SettingsRepository;
 import com.subhub.app.stats.StatsRepository;
+import com.subhub.app.diagnostics.CensorLabCensorSession;
 
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -168,6 +169,12 @@ public final class AppModeManager {
     }
 
     public boolean shouldRecognize(String foregroundPackage) {
+        // Lab reserves MediaProjection for video and runs only Accessibility censoring. It does
+        // not replace the saved capture method, module switches or normal-session intent.
+        if (CensorLabCensorSession.isActive()) {
+            return AppModePolicy.shouldRecognize(true, getIncludedPackages(), foregroundPackage,
+                    context.getPackageName(), inputMethodPackage());
+        }
         if (!new FeatureModuleManager(context).isCensorEnabled()) return false;
         if (new SettingsRepository(context).loadCaptureMethod() != CaptureMethod.APP_MODE) {
             return false;
@@ -176,12 +183,14 @@ public final class AppModeManager {
     }
 
     public boolean shouldShowSubliminal(String foregroundPackage) {
+        if (CensorLabCensorSession.isActive()) return false;
         if (!new FeatureModuleManager(context).isSubliminalEnabled()) return false;
         return participates(foregroundPackage);
     }
 
     /** Effective one-app scope for usage accounting, without enumerating installed apps. */
     public Set<String> timerScopeForForeground(String foregroundPackage) {
+        if (CensorLabCensorSession.isActive()) return Set.of();
         if (!new FeatureModuleManager(context).isLimitsEnabled()) return Set.of();
         android.content.pm.ResolveInfo home = context.getPackageManager().resolveActivity(
                 new android.content.Intent(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME),
@@ -195,6 +204,7 @@ public final class AppModeManager {
 
     /** Effects use the same included apps without requiring the Censor module. */
     public boolean shouldShowPopups(String foregroundPackage) {
+        if (CensorLabCensorSession.isActive()) return false;
         if (!com.subhub.app.popup.PopupStormSettings.load(context).isEnabled()) return false;
         return participates(foregroundPackage);
     }

@@ -32,6 +32,7 @@ import androidx.core.app.NotificationCompat;
 import com.subhub.app.R;
 import com.subhub.app.capture.MediaProjectionLeaseRegistry;
 import com.subhub.app.service.ScreenCaptureService;
+import com.subhub.app.service.ScreenshotAccessibilityService;
 
 import java.io.File;
 import java.io.IOException;
@@ -65,6 +66,9 @@ public final class CensorLabRecordingService extends Service {
     private final Object stopRequestLock = new Object();
     private final AtomicBoolean terminal = new AtomicBoolean();
     private final AtomicBoolean projectionLeaseHeld = new AtomicBoolean();
+    private final Object censorSessionLock = new Object();
+    private CensorLabCensorSession.Lease censorSession;
+    private boolean censorSessionRetired;
     private ScheduledExecutorService worker;
     private MediaProjection projection;
     private MediaProjection.Callback projectionCallback;
@@ -161,6 +165,9 @@ public final class CensorLabRecordingService extends Service {
                 if (ScreenCaptureService.isRunning()) {
                     throw new IllegalStateException("Screen Capture mode is already active");
                 }
+                if (!ScreenshotAccessibilityService.isRunning()) {
+                    throw new IllegalStateException("Accessibility service is not connected");
+                }
                 int resultCode = request.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED);
                 Intent resultData = projectionData(request);
                 if (resultCode != Activity.RESULT_OK || resultData == null) {
@@ -221,6 +228,12 @@ public final class CensorLabRecordingService extends Service {
                 if (startupCancelled()) return;
                 recorder.start();
                 recorderStarted = true;
+                if (startupCancelled()) return;
+                synchronized (censorSessionLock) {
+                    if (censorSessionRetired) return;
+                    censorSession = CensorLabCensorSession.acquire();
+                }
+                CensorLabRecorder.markCensorSession(true);
                 CensorLabRecorder.markVideoStarted(
                         prepared.profile.width, prepared.profile.height,
                         prepared.profile.frameRate, prepared.profile.bitRate);
@@ -329,6 +342,7 @@ public final class CensorLabRecordingService extends Service {
                 }
             }
             recorderStarted = false;
+            releaseCensorSession();
             releaseCaptureResources(true);
             validVideo = isPlayableVideo(videoFile)
                     && videoFile.length() <= MAX_VIDEO_BYTES;
@@ -355,6 +369,7 @@ public final class CensorLabRecordingService extends Service {
 
     private void failStart(Exception error) {
         if (!terminal.compareAndSet(false, true)) return;
+        releaseCensorSession();
         unregisterDisplayListener();
         releaseCaptureResources(true);
         if (videoFile != null && videoFile.isFile()) videoFile.delete();
@@ -369,6 +384,19 @@ public final class CensorLabRecordingService extends Service {
         stopSelf();
         ScheduledExecutorService executor = worker;
         if (executor != null) executor.shutdownNow();
+    }
+
+    private void releaseCensorSession() {
+        CensorLabCensorSession.Lease retired;
+        synchronized (censorSessionLock) {
+            censorSessionRetired = true;
+            retired = censorSession;
+            censorSession = null;
+        }
+        if (retired != null) {
+            retired.close();
+            CensorLabRecorder.markCensorSession(false);
+        }
     }
 
     private void releaseCaptureResources(boolean stopProjection) {
@@ -569,6 +597,7 @@ public final class CensorLabRecordingService extends Service {
         if (message != null && (message.startsWith("Screen Capture mode")
                 || message.startsWith("Another screen-capture")
                 || message.startsWith("Android screen-capture")
+                || message.startsWith("Accessibility service")
                 || message.startsWith("Not enough free space")
                 || message.startsWith("No compatible H.264"))) return message;
         return error.getClass().getSimpleName();
@@ -583,6 +612,7 @@ public final class CensorLabRecordingService extends Service {
     @Nullable @Override public IBinder onBind(Intent intent) { return null; }
 
     @Override public void onDestroy() {
+        releaseCensorSession();
         if (!terminal.get() && isActive()) {
             // Never stop MediaRecorder or stream a ZIP on Android's service/main thread.
             // The foreground worker retains this service instance until finalization completes.

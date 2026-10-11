@@ -45,6 +45,7 @@ import com.subhub.app.detection.text.TextDetectionCoordinateMapper;
 import com.subhub.app.detection.text.TextDetectionStabilizer;
 import com.subhub.app.detection.text.TextSmutConfig;
 import com.subhub.app.diagnostics.CensorLabLog;
+import com.subhub.app.diagnostics.CensorLabCensorSession;
 import com.subhub.app.diagnostics.CensorLabRecorder;
 import com.subhub.app.diagnostics.DiagnosticsRepository;
 import com.subhub.app.overlay.OverlayController;
@@ -255,6 +256,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
     private final android.content.SharedPreferences.OnSharedPreferenceChangeListener listener =
             (preferences, key) -> reloadSettings();
+    private CensorLabCensorSession.Subscription labCensorSubscription;
     private ScheduledExecutorService worker;
     private final RowMotionObserver rowMotionObserver = new RowMotionObserver();
     private SpatialRegionCache spatialRegionCache;
@@ -472,6 +474,15 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         worker.execute(this::initializePipeline);
         main.post(this::reevaluateRecognition);
         main.post(this::reevaluateSubliminals);
+        labCensorSubscription = CensorLabCensorSession.observe(() -> main.post(() -> {
+            if (!running || labCensorSubscription == null) return;
+            // Detach usage at the session boundary; Lab must not count as normal Limits time.
+            foregroundSinceMillis = System.currentTimeMillis();
+            reevaluateRecognition();
+            reevaluateSubliminals();
+            dwellTracker.clear();
+            tapTracker.clear();
+        }));
         main.post(timerTick);
         chromeGeometryProbe = ChromeGeometryProbe.startIfArmed(this);
     }
@@ -661,6 +672,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             long requestedScrollX = cumulativeScrollX.get();
             long requestedScrollY = cumulativeScrollY.get();
             long requestedGeneration = motionGeneration.get();
+            boolean requestedLabCensor = CensorLabCensorSession.isActive();
             ForegroundWindowResolver.Candidate liveWindow = resolveLiveApplicationWindow();
             int activeWindowId = liveWindow == null ? -1 : liveWindow.windowId;
             String livePackage = liveWindow == null ? "" : liveWindow.packageName;
@@ -688,7 +700,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                     try {
                         process(result, requestedEpoch, requestedScrollX, requestedScrollY,
                                 requestedGeneration, requestUptime,
-                                activeWindowId, requestedDocumentEpoch, requestId);
+                                activeWindowId, requestedDocumentEpoch, requestId, requestedLabCensor);
                     } finally {
                         traceCaptureStage(requestUptime, "callback-exit");
                     }
@@ -755,7 +767,8 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             long requestedAtUptimeMillis,
             int requestedWindowId,
             long requestedDocumentEpoch,
-            long screenshotRequestId) {
+            long screenshotRequestId,
+            boolean requestedLabCensor) {
         Bitmap wrapped = null;
         Bitmap frame = null;
         HardwareBuffer buffer = result.getHardwareBuffer();
@@ -974,7 +987,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                             motionSettled, qualityRefine, continuousMotionInference, spatialFrame)
                     : null;
             traceCaptureStage(requestedAtUptimeMillis, "scene-staged");
-            long submittedFastSequence = enqueueInference(new InferenceFrame(
+            InferenceFrame inferenceFrame = new InferenceFrame(
                     frame, requestedEpoch, sourceScrollX,
                     sourceScrollY, inferenceMotionGeneration,
                     prepared.sourceWidth, prepared.sourceHeight,
@@ -987,7 +1000,9 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                     capturePhase.phaseUncertain,
                     capturePhase.maximumDeliveryDelayMs,
                     inferenceDocumentEpoch, inferenceSurfaceKey,
-                    submissionSequence, requestedWindowId, scene));
+                    submissionSequence, requestedWindowId, scene);
+            inferenceFrame.labCensorFrame = requestedLabCensor;
+            long submittedFastSequence = enqueueInference(inferenceFrame);
             frame = null;
             maybeRequestOcr(wrapped, requestedEpoch, sourceScrollX, sourceScrollY,
                     inferenceMotionGeneration, currentConfig);
@@ -2587,7 +2602,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                 VisualTrackArbitrator.Result renderArbitration = worldFrame.arbitration;
                 List<TrackedObject> currentTracks = worldFrame.tracks;
                 if (supplementedTracks > 0) {
-                    recordSupplementedTrackState(activeTracks, width, height);
+                    recordSupplementedTrackState(activeTracks, width, height, candidate.labCensorFrame);
                 }
                 long trackCameraX = worldFrame.cameraX;
                 long trackCameraY = worldFrame.cameraY;
@@ -2758,8 +2773,9 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             if (track != null && track.isQualityOnly()) qualityOnlyTrackCount++;
         }
         DetectorConfig currentConfig = detectorConfig;
-        int recordedBlocks = stats.recordTracks(tracks, currentConfig == null
-                ? null : currentConfig.getEnabledCategories());
+        boolean recordNormalEffects = CensorLabCensorSession.allowsNormalCensorEffects(candidate.labCensorFrame);
+        int recordedBlocks = recordNormalEffects ? stats.recordTracks(tracks, currentConfig == null
+                ? null : currentConfig.getEnabledCategories()) : 0;
         long now = System.currentTimeMillis();
         if (recordedBlocks > 0) {
             int charged = penance.recordInfraction(
@@ -2779,16 +2795,18 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         }
         Bitmap overlayFrame = finalPass && candidate.retainedSourceFrame
                 ? candidate.detachFrame() : null;
-        int dwellInfractions = dwellTracker.update(
-                tracks, now, penance.getDwellSeconds() * 1_000L, false);
+        int dwellInfractions = recordNormalEffects ? dwellTracker.update(
+                tracks, now, penance.getDwellSeconds() * 1_000L, false) : 0;
         if (dwellInfractions > 0) {
             int charged = penance.recordInfraction(
                     PenanceInfraction.CENSORED_DWELL, dwellInfractions, now);
             PenanceChargeNotifier.show(this, penance,
                     PenanceInfraction.CENSORED_DWELL, charged, now);
         }
-        tapTracker.update(tracks, width, height, now);
-        PopupStormManager.get().updateTrackedObjects(tracks, width, height);
+        if (recordNormalEffects) {
+            tapTracker.update(tracks, width, height, now);
+            PopupStormManager.get().updateTrackedObjects(tracks, width, height);
+        }
         DiagnosticsRepository.Snapshot diagnostics = DiagnosticsRepository.recordFrame(
                 DIAGNOSTICS_MODE, inferenceMs, preprocessMs, runtimeMs, postprocessMs,
                 SystemClock.uptimeMillis() - candidate.capturedAtUptimeMillis,
@@ -3130,7 +3148,9 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     private void recordSupplementedTrackState(
             List<TrackedObject> tracks,
             int width,
-            int height) {
+            int height,
+            boolean labOwnedSource) {
+        if (!CensorLabCensorSession.allowsNormalCensorEffects(labOwnedSource)) return;
         DetectorConfig currentConfig = detectorConfig;
         int recordedBlocks = stats.recordTracks(tracks, currentConfig == null
                 ? null : currentConfig.getEnabledCategories());
@@ -5479,7 +5499,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         foregroundSinceMillis = now;
         resetTextSnapshots();
         AppModeManager mode = new AppModeManager(this);
-        if (mode.getIncludedPackages().contains(packageName)) {
+        if (!CensorLabCensorSession.isActive() && mode.getIncludedPackages().contains(packageName)) {
             int charged = penance.recordInfraction(
                     PenanceInfraction.WATCHED_APP_OPEN, 1, now);
             PenanceChargeNotifier.show(this, penance,
@@ -5554,7 +5574,8 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     }
 
     private void chargeCensoredTap(long nowMillis) {
-        if (penance == null || nowMillis - lastMatchedTapMillis < 500L) return;
+        if (CensorLabCensorSession.isActive()
+                || penance == null || nowMillis - lastMatchedTapMillis < 500L) return;
         lastMatchedTapMillis = nowMillis;
         int charged = penance.recordInfraction(PenanceInfraction.CENSORED_TAP, 1, nowMillis);
         PenanceChargeNotifier.show(this, penance,
@@ -5637,6 +5658,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     }
 
     private boolean appTimerRuntimeActive(long nowMillis) {
+        if (CensorLabCensorSession.isActive()) return false;
         boolean armed = new AppModeManager(this).isEffectivelyArmed(nowMillis);
         boolean limitsEnabled = new FeatureModuleManager(this).isLimitsEnabled();
         return AppTimerRuntimePolicy.shouldRun(armed, limitsEnabled);
@@ -6202,6 +6224,8 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         private final boolean continuousMotionInference;
         private final boolean qualityRefine;
         private final boolean qualityConfirmation;
+        /** Request-time ownership, assigned before admission to the inference worker. */
+        private boolean labCensorFrame;
         /** Request start retained for legacy metrics; not the pixel-capture or receipt time. */
         private final long capturedAtUptimeMillis;
         private final long requestedScrollX;
@@ -6556,6 +6580,10 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        if (labCensorSubscription != null) {
+            labCensorSubscription.close();
+            labCensorSubscription = null;
+        }
         com.subhub.app.appmode.ForegroundAppState.clear();
         accountForegroundUsage(System.currentTimeMillis());
         running = false;
