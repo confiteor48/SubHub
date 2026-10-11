@@ -389,4 +389,37 @@ public class SceneEngineTest {
         assertThrows(IllegalArgumentException.class, () -> new SceneEngine.Motion(1, 1, 2, 1, 1,
                 IMAGE_CORRESPONDENCE, SUPPORT, Double.MAX_VALUE, 0));
     }
+
+    @Test public void distinctCooccurringSubjectsStayDistinctAfterOriginalSourceEviction() {
+        SceneEngine engine = new SceneEngine(1, new SceneEngine.Policy(2, 100, 64, 256, 500, 5000, .5));
+        register(engine, 2);
+        engine.observe(batch(source(1), FAST, face(500), face(520)));
+        engine.motion(motion(1, 2, 0));
+        engine.register(source(3)); engine.motion(motion(2, 3, 0));
+        positions(engine.snapshot(3, 310, false), 500, 520);
+        assertEquals(2, engine.trackCount());
+    }
+
+    @Test public void qualifiedNegativeWitnessesSurviveSourceEviction() {
+        SceneEngine engine = new SceneEngine(1, new SceneEngine.Policy(2, 100, 64, 256, 500, 5000, .5));
+        register(engine, 2); engine.pin(source(1)); engine.motion(motion(1, 2, 0));
+        engine.observe(batch(source(1), QUALITY, face(500)));
+        engine.observe(batch(source(2), QUALITY, face(500)));
+        engine.register(source(3)); engine.motion(motion(1, 3, 0));
+        engine.observe(emptyQuality(source(3), "FACE", 1, SUPPORT));
+        positions(engine.snapshot(3, 310, false), 500);
+        engine.register(source(4)); engine.motion(motion(1, 4, 0));
+        engine.observe(emptyQuality(source(4), "FACE", 1, SUPPORT));
+        positions(engine.snapshot(4, 410, false)); assertEquals(0, engine.trackCount());
+    }
+
+    @Test public void extremeFiniteTranslationThatLosesRegionPrecisionStaysUnknown() {
+        SceneEngine engine = engine(); register(engine, 2);
+        SceneEngine.Observation tiny = new SceneEngine.Observation("FACE", 1, 0,
+                new SceneEngine.Region(0, 100, 1, 101), .9f);
+        engine.observe(batch(source(1), FAST, tiny));
+        engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1,
+                IMAGE_CORRESPONDENCE, SUPPORT, 1e16, 0));
+        assertEquals(1, engine.snapshot(2, 210, false).unresolvedTracks);
+    }
 }

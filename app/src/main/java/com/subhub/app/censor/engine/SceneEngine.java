@@ -289,7 +289,8 @@ public final class SceneEngine {
         final long identity;
         final String category;
         final long partition;
-        final Map<String, Integer> witnesses = new HashMap<>();
+        /** Co-occurring identities stay distinct even after their original frame is evicted. */
+        final Set<Long> distinctFrom = new HashSet<>();
         final Set<Long> qualitySources = new HashSet<>();
         final Set<Long> negativeSources = new HashSet<>();
         long basis;
@@ -301,15 +302,14 @@ public final class SceneEngine {
         boolean fastVisible;
         boolean confirmed;
 
-        Track(long identity, Batch batch, Observation observation, int index) {
+        Track(long identity, Batch batch, Observation observation) {
             this.identity = identity;
             category = observation.category;
             partition = observation.partition;
-            update(batch, observation, index);
+            update(batch, observation);
         }
 
-        void update(Batch batch, Observation observation, int index) {
-            witnesses.put(batch.source.sequence + ":" + batch.lane, index);
+        void update(Batch batch, Observation observation) {
             if (batch.lane == Lane.QUALITY) addIndependent(qualitySources, batch.source.sequence);
             if (batch.lane != Lane.QUALITY) fastVisible = true;
             confirmed = confirmed || qualitySources.size() >= 2;
@@ -452,10 +452,18 @@ public final class SceneEngine {
                 if (overlap >= bestIou) { best = track; bestIou = overlap; }
             }
             if (best == null) {
-                best = new Track(++nextIdentity, batch, observation, index);
+                best = new Track(++nextIdentity, batch, observation);
                 tracks.add(best);
             } else {
-                best.update(batch, observation, index);
+                best.update(batch, observation);
+            }
+            // One batch observed these as separate subjects. Keep the relation between live
+            // identities, not ephemeral source/lane array indices or evictable frame metadata.
+            for (Track prior : tracks) {
+                if (matched.contains(prior.identity)) {
+                    best.distinctFrom.add(prior.identity);
+                    prior.distinctFrom.add(best.identity);
+                }
             }
             matched.add(best.identity);
         }
@@ -465,6 +473,7 @@ public final class SceneEngine {
         mergeCorrespondingTracks();
         replayNegativeEvidence();
         trimTracks();
+        pruneDistinctRelations();
         revision++;
         return true;
     }
@@ -506,6 +515,7 @@ public final class SceneEngine {
         List<Group> groups = new ArrayList<>();
         for (List<Mask> group : grouped) groups.add(new Group(group));
         ready = new Snapshot(source, groups, unresolved, tentative, revision, capacityDrops, sourceEvictions);
+        pruneDistinctRelations();
         return ready;
     }
 
@@ -537,7 +547,15 @@ public final class SceneEngine {
                 if (visited.contains(next)) continue;
                 Region support = forward ? motion.support : motion.support.translated(motion.dx, motion.dy);
                 if (!support.contains(current.region)) continue;
-                Region moved = current.region.translated(forward ? motion.dx : -motion.dx, forward ? motion.dy : -motion.dy);
+                Region moved;
+                try {
+                    moved = current.region.translated(forward ? motion.dx : -motion.dx,
+                            forward ? motion.dy : -motion.dy);
+                } catch (IllegalArgumentException unsupportedPrecision) {
+                    // An otherwise finite translation can collapse a tiny region at extreme
+                    // magnitudes. It is unknown geometry, not a reason to strand a worker lease.
+                    continue;
+                }
                 visited.add(next);
                 queue.add(new Projection(next, moved, current.estimated
                         || motion.authority == MotionAuthority.EVENT_ESTIMATE));
@@ -606,10 +624,15 @@ public final class SceneEngine {
                 Track other = tracks.get(j);
                 if (kept.partition != other.partition || !kept.category.equals(other.category)
                         || ((kept.latestLane == Lane.TEXT) != (other.latestLane == Lane.TEXT))
-                        || witnessConflict(kept, other)) { j++; continue; }
+                        || kept.distinctFrom.contains(other.identity)
+                        || other.distinctFrom.contains(kept.identity)) { j++; continue; }
                 Projection projected = project(other.basis, kept.basis, kept.partition, other.region, false);
                 if (projected == null || projected.region.iou(kept.region) < policy.associationIou) { j++; continue; }
-                kept.witnesses.putAll(other.witnesses);
+                kept.distinctFrom.addAll(other.distinctFrom);
+                for (Track peer : tracks) {
+                    if (peer.distinctFrom.remove(other.identity)) peer.distinctFrom.add(kept.identity);
+                }
+                kept.distinctFrom.remove(kept.identity);
                 for (Long sequence : other.qualitySources) addIndependent(kept.qualitySources, sequence);
                 kept.negativeSources.addAll(other.negativeSources);
                 kept.fastVisible |= other.fastVisible;
@@ -627,14 +650,13 @@ public final class SceneEngine {
                 tracks.remove(j);
             }
         }
+        pruneDistinctRelations();
     }
 
-    private static boolean witnessConflict(Track left, Track right) {
-        for (Map.Entry<String, Integer> witness : left.witnesses.entrySet()) {
-            Integer other = right.witnesses.get(witness.getKey());
-            if (other != null && !other.equals(witness.getValue())) return true;
-        }
-        return false;
+    private void pruneDistinctRelations() {
+        Set<Long> living = new HashSet<>();
+        for (Track track : tracks) living.add(track.identity);
+        for (Track track : tracks) track.distinctFrom.retainAll(living);
     }
 
     private static void addIndependent(Set<Long> evidence, long sequence) {
@@ -663,8 +685,8 @@ public final class SceneEngine {
                     if (rebased != null) { track.basis = candidate; track.region = rebased.region; break; }
                 }
             }
-            track.witnesses.keySet().removeIf(key -> key.startsWith(sequence + ":"));
-            track.negativeSources.remove(sequence);
+            // Qualified positive/negative witnesses and co-occurrence are compact facts, not
+            // leases on a reference image. Eviction must not erase their meaning.
         }
         sources.remove(sequence);
         motions.removeIf(motion -> motion.from == sequence || motion.to == sequence);
