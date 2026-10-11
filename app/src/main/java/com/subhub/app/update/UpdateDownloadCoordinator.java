@@ -40,21 +40,26 @@ public final class UpdateDownloadCoordinator {
         cancel();
         File destination = new File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), asset.name);
         if (destination.exists()) destination.delete();
-        DownloadManager.Request request = new DownloadManager.Request(Uri.parse(asset.url))
+        DownloadManager.Request request = request(candidate, asset);
+        state.setCandidate(candidate);
+        long id = downloads.enqueue(request);
+        state.setDownloadId(id);
+        state.setVerifiedPath("");
+        state.setInstallRequested(true);
+        UpdateNotifications.downloading(context, candidate, id);
+        return id;
+    }
+
+    DownloadManager.Request request(UpdateCandidate candidate, UpdateManifest.Asset asset) {
+        return new DownloadManager.Request(Uri.parse(asset.url))
                 .setTitle(context.getString(com.subhub.app.R.string.update_download_title,
                         candidate.manifest.versionName))
                 .setDescription(context.getString(com.subhub.app.R.string.update_download_body))
                 .setMimeType("application/vnd.android.package-archive")
                 .setAllowedOverMetered(true)
                 .setAllowedOverRoaming(false)
-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                .setNotificationVisibility(UpdateNotifications.downloadVisibility(context))
                 .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, asset.name);
-        state.setCandidate(candidate);
-        long id = downloads.enqueue(request);
-        state.setDownloadId(id);
-        state.setVerifiedPath("");
-        state.setInstallRequested(true);
-        return id;
     }
 
     public void cancel() {

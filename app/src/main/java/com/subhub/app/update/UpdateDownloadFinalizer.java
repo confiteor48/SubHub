@@ -29,8 +29,7 @@ final class UpdateDownloadFinalizer {
         DownloadManager manager = context.getSystemService(DownloadManager.class);
         Uri source = manager == null ? null : manager.getUriForDownloadedFile(id);
         if (candidate == null || asset == null || source == null) {
-            state.clearDownload(true);
-            UpdateNotifications.failed(context);
+            failIfCurrent(context, state, id, true);
             return Result.FAILED;
         }
 
@@ -44,8 +43,7 @@ final class UpdateDownloadFinalizer {
             while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
         } catch (Exception exception) {
             destination.delete();
-            state.clearDownload(false);
-            UpdateNotifications.failed(context);
+            failIfCurrent(context, state, id, false);
             return Result.FAILED;
         } finally {
             manager.remove(id);
@@ -55,8 +53,7 @@ final class UpdateDownloadFinalizer {
                 context, destination, candidate.manifest, asset);
         if (!verified.succeeded()) {
             destination.delete();
-            state.clearDownload(false);
-            UpdateNotifications.failed(context);
+            failIfCurrent(context, state, id, false);
             return Result.FAILED;
         }
         synchronized (UpdateStateStore.class) {
@@ -67,9 +64,18 @@ final class UpdateDownloadFinalizer {
                 return Result.FAILED;
             }
             state.setVerifiedPath(destination.getAbsolutePath());
+            UpdateNotifications.cancelDownload(context, id);
             state.setDownloadId(-1L);
             UpdateNotifications.ready(context, candidate);
         }
         return Result.READY;
+    }
+
+    private static void failIfCurrent(Context context, UpdateStateStore state, long id, boolean deleteFile) {
+        synchronized (UpdateStateStore.class) {
+            if (state.downloadId() != id) return;
+            state.clearDownload(deleteFile);
+            UpdateNotifications.failed(context);
+        }
     }
 }

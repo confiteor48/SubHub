@@ -127,6 +127,7 @@ public final class UpdateStateStore {
     }
 
     public void clearDownload(boolean deleteFile) {
+        UpdateNotifications.cancelDownload(context, downloadId());
         if (deleteFile) {
             String path = verifiedPath();
             if (!path.isEmpty()) new File(path).delete();
