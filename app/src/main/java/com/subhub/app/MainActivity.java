@@ -220,17 +220,13 @@ public final class MainActivity extends AppCompatActivity {
                         showArrangementDetails(
                                 R.string.sub_censor_title, censorArrangementRows()));
         binding.subLimitsCard.setOnClickListener(
-                view ->
-                        showArrangementDetails(
-                                R.string.sub_limits_title, limitsArrangementDetails()));
+                view -> loadArrangementDetails(R.string.sub_limits_title, false));
         binding.subWalletCard.setOnClickListener(
                 view ->
                         showArrangementDetails(
                                 R.string.sub_wallet_title, walletArrangementDetails()));
         binding.subAtmosphereCard.setOnClickListener(
-                view ->
-                        showArrangementDetails(
-                                R.string.atmosphere_title, atmosphereArrangementDetails()));
+                view -> loadArrangementDetails(R.string.atmosphere_title, true));
         AppShortcuts.install(this);
         ControllerPinGate.ensureConfigured(this, () -> handleShortcutIntent(getIntent()));
     }
@@ -762,6 +758,28 @@ public final class MainActivity extends AppCompatActivity {
         }
         content.findViewById(R.id.arrangement_detail_close)
                 .setOnClickListener(view -> dialog.dismiss());
+        // Fix the scroll viewport before BottomSheetBehavior computes its expanded offset.
+        // Resizing it after expansion can leave the footer below the rendered window.
+        android.graphics.Rect available = new android.graphics.Rect();
+        getWindow().getDecorView().getWindowVisibleDisplayFrame(available);
+        int width = available.width() > 0 ? available.width()
+                : getResources().getDisplayMetrics().widthPixels;
+        int height = available.height() > 0 ? available.height()
+                : getResources().getDisplayMetrics().heightPixels;
+        View bodyContent = body.getChildAt(0);
+        bodyContent.measure(View.MeasureSpec.makeMeasureSpec(
+                        Math.max(1, width - content.getPaddingLeft() - content.getPaddingRight()),
+                        View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int desiredBodyHeight = bodyContent.getMeasuredHeight();
+        android.view.ViewGroup.LayoutParams scrollParams = body.getLayoutParams();
+        scrollParams.height = 0;
+        content.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int footerAndHeaderHeight = content.getMeasuredHeight();
+        scrollParams.height = Math.min(desiredBodyHeight,
+                Math.max(1, Math.min(Math.round(height * .58f), height - footerAndHeaderHeight - dp(24))));
+        body.setLayoutParams(scrollParams);
         dialog.setContentView(content);
         dialog.setOnShowListener(
                 ignored -> {
@@ -771,15 +789,6 @@ public final class MainActivity extends AppCompatActivity {
                     dialog.getBehavior().setState(
                             com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED);
                     dialog.getBehavior().setSkipCollapsed(true);
-                    int width = sheet == null ? getResources().getDisplayMetrics().widthPixels
-                            : sheet.getWidth();
-                    View bodyContent = body.getChildAt(0);
-                    bodyContent.measure(View.MeasureSpec.makeMeasureSpec(width - dp(36), View.MeasureSpec.EXACTLY),
-                            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-                    android.view.ViewGroup.LayoutParams scrollParams = body.getLayoutParams();
-                    scrollParams.height = Math.min(bodyContent.getMeasuredHeight(),
-                            Math.round(getResources().getDisplayMetrics().heightPixels * .58f));
-                    body.setLayoutParams(scrollParams);
                 });
         dialog.show();
     }
@@ -835,18 +844,37 @@ public final class MainActivity extends AppCompatActivity {
         return lines;
     }
 
-    private List<ArrangementDetail> limitsArrangementDetails() {
-        AppTimerManager timers = new AppTimerManager(this);
+    private void loadArrangementDetails(int title, boolean rituals) {
+        android.content.Context app = getApplicationContext();
+        uiData.load("arrangement-details",
+                () -> rituals ? atmosphereArrangementDetails(app) : limitsArrangementDetails(app),
+                rows -> { if (binding != null && uiActive) showArrangementDetails(title, rows); },
+                failure -> { });
+    }
+
+    private static List<ArrangementDetail> limitsArrangementDetails(android.content.Context context) {
+        AppTimerManager timers = new AppTimerManager(context);
         AppTimerManager.Settings settings = timers.loadSettings();
         List<ArrangementDetail> lines = new ArrayList<>();
         lines.add(
                 detailLine(
                         R.string.arrangement_limits_shared,
                         settings.totalEnabled
-                                ? getString(R.string.arrangement_minutes, settings.totalMinutes)
-                                : getString(R.string.popup_off)));
-        lines.add(detailLine(R.string.arrangement_limits_individual,
-                getString(settings.perAppEnabled ? R.string.control_state_on : R.string.control_state_off)));
+                                ? context.getString(R.string.arrangement_minutes, settings.totalMinutes)
+                                : context.getString(R.string.popup_off)));
+        List<String> apps = new ArrayList<>();
+        PackageManager packages = context.getPackageManager();
+        for (String name : new AppModeManager(context).getIncludedPackages()) {
+            String label = name;
+            try { label = packages.getApplicationLabel(packages.getApplicationInfo(name, 0)).toString(); }
+            catch (PackageManager.NameNotFoundException absent) { /* Retain the saved assignment. */ }
+            apps.add(context.getString(R.string.arrangement_app_allowance, label, timers.allowanceMinutes(name)));
+        }
+        Collections.sort(apps, String.CASE_INSENSITIVE_ORDER);
+        String state = context.getString(settings.perAppEnabled ? R.string.control_state_on : R.string.control_state_off);
+        lines.add(detailLine(R.string.arrangement_limits_individual, state + "\n"
+                + (apps.isEmpty() ? context.getString(R.string.arrangement_no_apps)
+                        : android.text.TextUtils.join("\n", apps))));
         return lines;
     }
 
@@ -916,25 +944,37 @@ public final class MainActivity extends AppCompatActivity {
         return lines;
     }
 
-    private List<ArrangementDetail> atmosphereArrangementDetails() {
-        FeatureModuleManager modules = new FeatureModuleManager(this);
-        PopupStormSettings popup = PopupStormSettings.load(this);
-        SubliminalSettings whispers = new SubliminalSettingsRepository(this).load();
+    private static List<ArrangementDetail> atmosphereArrangementDetails(android.content.Context context) {
+        FeatureModuleManager modules = new FeatureModuleManager(context);
+        PopupStormSettings popup = PopupStormSettings.load(context);
+        SubliminalSettings whispers = new SubliminalSettingsRepository(context).load();
         List<ArrangementDetail> lines = new ArrayList<>();
+        com.subhub.app.pack.SubHubPackManager packs = new com.subhub.app.pack.SubHubPackManager(context);
+        com.subhub.app.pack.SubHubPack pack = packs.activePackOverview();
+        lines.add(detailLine(R.string.arrangement_active_pack, pack == null
+                ? context.getString(packs.activePackId() == null ? R.string.arrangement_none_selected : R.string.studio_active)
+                : context.getString(R.string.arrangement_pack_version, pack.getName(), pack.getPackVersion())));
+        boolean pin = ControllerPinManager.isConfigured(context);
+        boolean auth = new com.subhub.app.security.ControllerAuthenticator(context).isPaired();
+        lines.add(detailLine(R.string.keyholder_home_title, context.getString(pin && auth
+                ? R.string.keyholder_status_both : pin ? R.string.keyholder_status_pin
+                : auth ? R.string.keyholder_status_auth : R.string.keyholder_status_none)));
+        if (CommitmentManager.isActive(context))
+            lines.add(detailLine(R.string.keyholder_your_lock, CommitmentManager.countdownLabel(context)));
         lines.add(
                 detailLine(
                         R.string.atmosphere_whispers_title,
                         modules.isSubliminalEnabled()
-                                ? getString(
+                                ? context.getString(
                                         R.string.arrangement_atmosphere_enabled,
                                         friendlyPreset(whispers.getPreset()))
-                                : getString(R.string.popup_off)));
+                                : context.getString(R.string.popup_off)));
         lines.add(
                 detailLine(
                         R.string.popup_title,
                         popup.isEnabled()
-                                ? getString(R.string.atmosphere_state_on)
-                                : getString(R.string.popup_off)));
+                                ? context.getString(R.string.atmosphere_state_on)
+                                : context.getString(R.string.popup_off)));
         return lines;
     }
 
@@ -944,7 +984,7 @@ public final class MainActivity extends AppCompatActivity {
         ArrangementDetail(int label, String value) { this.label = label; this.value = value; }
     }
 
-    private ArrangementDetail detailLine(int label, String value) {
+    private static ArrangementDetail detailLine(int label, String value) {
         return new ArrangementDetail(label, value);
     }
 
@@ -1097,7 +1137,7 @@ public final class MainActivity extends AppCompatActivity {
         return getString(R.string.subliminal_pack_summary_custom);
     }
 
-    private String friendlyPreset(SubliminalSettings.Preset preset) {
+    private static String friendlyPreset(SubliminalSettings.Preset preset) {
         String raw = (preset == null ? SubliminalSettings.Preset.NORMAL : preset).name();
         return raw.substring(0, 1) + raw.substring(1).toLowerCase(java.util.Locale.ROOT);
     }
@@ -1181,6 +1221,7 @@ public final class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         uiActive = false;
+        if (uiData != null) uiData.cancel("arrangement-details");
         for (android.content.SharedPreferences source : achievementSources)
             source.unregisterOnSharedPreferenceChangeListener(achievementChanged);
         achievementSources.clear();

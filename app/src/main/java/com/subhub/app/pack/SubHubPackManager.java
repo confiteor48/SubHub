@@ -204,6 +204,14 @@ public final class SubHubPackManager {
 
     public String activePackId() { return state.getString(KEY_ACTIVE_ID, null); }
 
+    /** Read-only display metadata; activation still loads and validates the complete archive. */
+    public SubHubPack activePackOverview() {
+        String id = activePackId();
+        if (id == null) return null;
+        try { return SubHubPackArchive.readOverview(fileFor(library, id)).pack; }
+        catch (IOException invalid) { return null; }
+    }
+
     public Set<String> activeSections() {
         Set<String> values = state.getStringSet(KEY_ACTIVE_SECTIONS, Set.of());
         return Collections.unmodifiableSet(new LinkedHashSet<>(values == null ? Set.of() : values));

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="arrangement_active_pack">Active Pack</string>
+    <string name="arrangement_pack_version">%1$s · v%2$s</string>
+</resources>
