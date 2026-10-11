@@ -978,6 +978,11 @@ final class CensorOverlayView extends View {
     }
 
     private CensorAppearance.Type effectTypeFor(RenderTrackSnapshot track) {
+        // Cached geometry has no matching source pixels. Preserve Glitch's existing
+        // opaque noise fallback rather than replacing its artwork with a flat palette color.
+        if (track.isCached() && appearance.getType() == CensorAppearance.Type.GLITCH) {
+            return CensorAppearance.Type.STATIC;
+        }
         return track.isCached() && appearance.requiresSourceFrame()
                 ? CensorAppearance.Type.BOX : appearance.getType();
     }

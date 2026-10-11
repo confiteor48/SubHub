@@ -58,6 +58,21 @@ public final class CensorPresetsAndroidTest {
         if (wasDom) ControllerPinManager.enterDomMode(); else ControllerPinManager.enterSubMode();
     }
 
+    @Test public void presetsFollowAppearanceDisclosure() {
+        try (ActivityScenario<SettingsActivity> scenario = ActivityScenario.launch(SettingsActivity.class)) {
+            onView(withId(com.subhub.app.R.id.button_censor_presets))
+                    .check(matches(org.hamcrest.Matchers.not(isDisplayed())));
+            onView(withId(com.subhub.app.R.id.button_appearance_details))
+                    .perform(com.subhub.app.NativeUiActions.revealAboveNavigation(), click());
+            onView(withId(com.subhub.app.R.id.button_censor_presets))
+                    .perform(com.subhub.app.NativeUiActions.revealAboveNavigation()).check(matches(isDisplayed()));
+            onView(withId(com.subhub.app.R.id.button_appearance_details))
+                    .perform(com.subhub.app.NativeUiActions.revealAboveNavigation(), click());
+            onView(withId(com.subhub.app.R.id.button_censor_presets))
+                    .check(matches(org.hamcrest.Matchers.not(isDisplayed())));
+        }
+    }
+
     @Test public void nativeApplySaveReopenRenameAndDeletePreserveDetection() {
         Context context = ApplicationProvider.getApplicationContext();
         java.util.Set<String> phrases = new java.util.LinkedHashSet<>(java.util.Collections.singleton("MY CUSTOM PHRASE"));
