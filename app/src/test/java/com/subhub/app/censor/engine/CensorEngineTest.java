@@ -667,6 +667,40 @@ public class CensorEngineTest {
         assertEquals(1, first.closes); assertEquals(1, second.closes);
     }
 
+    @Test public void measuredConflictInvalidatesExactlyOneEpochWithoutFreeingActualResourceOwners() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel first = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine<Pixel>.RenderView held = h.engine.acquireRenderView(); assertNotNull(held);
+        h.fire(334); Pixel running = h.deliver(1, 2); h.fastExecutor.runOne();
+        h.fire(668); Pixel replaced = h.deliver(2, 3);
+        h.fire(1002); Pixel pending = h.deliver(3, 4);
+        assertEquals(1, replaced.closes); h.fire(1336); // An actual old-epoch callback stays outstanding.
+        long epoch = h.engine.currentEpoch();
+        assertTrue(h.engine.motion(motion(epoch, 1, 2, -200)));
+        assertTrue(h.engine.motion(motion(epoch, 2, 4, -200)));
+        assertTrue(h.engine.motion(motion(epoch, 1, 3, -200))); h.ui.runAll();
+        SceneEngine.Motion conflict = motion(epoch, 3, 4, -100);
+        assertFalse(h.engine.motion(conflict));
+        assertEquals(epoch + 1, h.engine.currentEpoch());
+        assertEquals(1, h.fast.calls.get(1).cancellationSignals);
+        assertTrue(h.fast.calls.get(1).input.cancelled());
+        assertNull(h.engine.acquireRenderView()); assertEquals(0, h.engine.renderBasisCount());
+        assertFalse(first.closed); assertFalse(running.closed); assertEquals(1, pending.closes);
+        assertSame(first, held.sourcePixels(1)); assertTrue(h.engine.captureInFlight());
+        assertFalse(h.engine.motion(conflict)); assertEquals(epoch + 1, h.engine.currentEpoch());
+        h.fast.succeed(1, face(300)); assertEquals(1, running.closes); assertEquals(1, h.accepted.size());
+        Pixel oldCallback = h.deliver(4, 5); assertEquals(1, oldCallback.closes);
+        assertEquals(1670, h.timer.nextAt()); h.fire(1670); Pixel fresh = h.deliver(5, 6);
+        h.fastExecutor.runOne(); h.fast.succeed(2, face(600)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(epoch + 1, view.snapshot.destination.epoch);
+            assertEquals(600, masks(view.snapshot).get(0).displayRegion.top, 0);
+            assertSame(fresh, view.sourcePixels(6));
+        }
+        h.engine.close(); assertEquals(0, h.drained); assertFalse(first.closed);
+        held.close(); assertEquals(1, first.closes); assertEquals(1, fresh.closes); assertEquals(1, h.drained);
+    }
+
     @Test public void aMapBeforeTheFirstFastResultDoesNotDelayOrDoubleRebaseFirstCoverage() {
         Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
         h.fire(334); h.deliver(1, 2);

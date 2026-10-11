@@ -505,7 +505,8 @@ public final class CensorEngine<P> implements AutoCloseable {
                     advance = false; // A valid spatial map can still help later detector/quality work.
                 }
             }
-            accepted = active && scene.motion(motion);
+            SceneEngine.MotionAdmission admission = active ? scene.admitMotion(motion) : SceneEngine.MotionAdmission.INVALID;
+            accepted = admission == SceneEngine.MotionAdmission.ADMITTED;
             if (accepted && basisRejected) basisAdmissionDrops++;
             if (advance) {
                 if (accepted) {
@@ -513,7 +514,12 @@ public final class CensorEngine<P> implements AutoCloseable {
                     if (previous != null) scene.unpin(previous);
                 } else scene.unpin(selected);
             }
-            if (accepted && destination != 0) queuePresentation(actions);
+            if (admission == SceneEngine.MotionAdmission.CONFLICT) {
+                // This owner alone advances epoch and cancels work; executing pixels/read leases
+                // remain held until their actual terminal completion or render-handle release.
+                invalidate(actions);
+                wake(clock.getAsLong(), actions);
+            } else if (accepted && destination != 0) queuePresentation(actions);
         }
         run(actions);
         return accepted;

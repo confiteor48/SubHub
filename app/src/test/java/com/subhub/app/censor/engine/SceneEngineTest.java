@@ -77,6 +77,272 @@ public class SceneEngineTest {
         positions(engine.ready());
     }
 
+    @Test public void bodyOnlyBasisCannotClearAHeaderInTheSameActualVisualPartition() {
+        SceneEngine engine = engine(); register(engine, 2);
+        engine.observe(batch(source(1), FAST, observation("HEADER", 1, 0, 100, 50), face(500)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 300, 1000, 2400), 0, -400)));
+        SceneEngine.Snapshot snapshot = engine.snapshot(1, 210, false, Collections.singletonMap(1L, 2L));
+        positions(snapshot, 50, 100);
+        for (SceneEngine.Mask mask : masks(snapshot)) {
+            assertEquals("HEADER".equals(mask.category) ? 1 : 2, mask.geometrySource.sequence);
+            assertEquals(1, mask.evidenceSource.sequence);
+            assertEquals(100, mask.evidenceSource.receivedAtMillis);
+        }
+    }
+
+    @Test public void laterPartialBasisCannotRollAReadyBodyBackToTheOriginalCanvas() {
+        SceneEngine engine = engine(); register(engine, 3);
+        engine.observe(batch(source(1), FAST, face(500)));
+        assertTrue(engine.motion(motion(1, 2, -400)));
+        positions(engine.snapshot(1, 210, false, Collections.singletonMap(1L, 2L)), 100);
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 1000, 1000, 2400), 0, -400)));
+        SceneEngine.Snapshot snapshot = engine.snapshot(1, 310, false, Collections.singletonMap(1L, 3L));
+        positions(snapshot, 100);
+        assertEquals(2, masks(snapshot).get(0).geometrySource.sequence);
+        assertEquals(1, masks(snapshot).get(0).evidenceSource.sequence);
+    }
+
+    @Test public void partialBasisBeforeFirstFastUsesTheLatestActuallySupportedImageSource() {
+        SceneEngine engine = engine(); register(engine, 3);
+        engine.motion(motion(1, 2, -400));
+        engine.motion(new SceneEngine.Motion(1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 1000, 1000, 2400), 0, -400));
+        engine.observe(batch(source(1), FAST, face(500)));
+        SceneEngine.Snapshot snapshot = engine.snapshot(1, 310, false, Collections.singletonMap(1L, 3L));
+        positions(snapshot, 100);
+        assertEquals(2, masks(snapshot).get(0).geometrySource.sequence);
+    }
+
+    @Test public void aNewConflictingMeasuredDiamondClearsReadyCoverageInBothOrders() {
+        for (int[] order : new int[][]{{0, 1, 2, 3}, {2, 3, 0, 1}}) {
+            SceneEngine engine = engine(); register(engine, 4);
+            engine.observe(batch(source(1), FAST, face(900)));
+            SceneEngine.Motion[] edges = {motion(1, 2, -200), motion(2, 4, -200),
+                    motion(1, 3, -200), motion(3, 4, -100)};
+            for (int i = 0; i < 3; i++) assertTrue(engine.motion(edges[order[i]]));
+            assertEquals(1, masks(engine.snapshot(4, 410, false)).size());
+            assertFalse("A contradictory measured route was admitted", engine.motion(edges[order[3]]));
+            positions(engine.snapshot(4, 410, false));
+            assertFalse("A conflicted epoch cannot accept new evidence",
+                    engine.observe(batch(source(4), FAST, face(500))));
+        }
+    }
+
+    @Test public void aConsistentMeasuredDiamondHasTheSameGeometryInBothOrders() {
+        for (int[] order : new int[][]{{0, 1, 2, 3}, {2, 3, 0, 1}}) {
+            SceneEngine engine = engine(); register(engine, 4);
+            engine.observe(batch(source(1), FAST, face(900)));
+            SceneEngine.Motion[] edges = {motion(1, 2, -200), motion(2, 4, -200),
+                    motion(1, 3, -200), motion(3, 4, -200)};
+            for (int index : order) assertTrue(engine.motion(edges[index]));
+            positions(engine.snapshot(4, 410, false), 500);
+        }
+    }
+
+    @Test public void aNewerMeasuredCorrectionInvalidatesRatherThanKeepingDerivedIdentity() {
+        SceneEngine engine = engine(); register(engine, 2); engine.motion(motion(1, 2, -400));
+        engine.observe(batch(source(1), FAST, face(500))); engine.observe(batch(source(2), FAST, face(100)));
+        positions(engine.snapshot(2, 210, false), 100); assertEquals(1, engine.trackCount());
+        assertFalse(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 2,
+                IMAGE_CORRESPONDENCE, SUPPORT, 0, -300)));
+        positions(engine.snapshot(2, 210, false));
+        assertFalse(engine.observe(batch(source(2), QUALITY, face(100))));
+    }
+
+    @Test public void exactMeasuredRepeatAndOlderCorrectionDoNotClearValidReadyCoverage() {
+        SceneEngine engine = engine(); register(engine, 2);
+        SceneEngine.Motion measured = new SceneEngine.Motion(1, 1, 2, 1, 2,
+                IMAGE_CORRESPONDENCE, SUPPORT, 0, -30);
+        engine.motion(measured); engine.observe(batch(source(1), FAST, face(500)));
+        positions(engine.snapshot(2, 210, false), 470);
+        assertFalse(engine.motion(measured));
+        assertFalse(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1,
+                IMAGE_CORRESPONDENCE, SUPPORT, 0, -40)));
+        assertFalse(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 3,
+                IMAGE_CORRESPONDENCE, SUPPORT, 0, -30)));
+        positions(engine.snapshot(2, 210, false), 470);
+    }
+
+    @Test public void measuredConflictOutsideLiveBoxesStillInvalidatesTheAuthoritativeScene() {
+        SceneEngine engine = engine(); register(engine, 4); engine.observe(batch(source(1), FAST, face(500)));
+        SceneEngine.Region original = new SceneEngine.Region(0, 1000, 1000, 2000);
+        SceneEngine.Region shifted = new SceneEngine.Region(0, 900, 1000, 1900);
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE, original, 0, -100)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 2, 4, 1, 1, IMAGE_CORRESPONDENCE, shifted, 0, -100)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 3, 1, 1, IMAGE_CORRESPONDENCE, original, 0, -100)));
+        positions(engine.snapshot(1, 410, false), 500);
+        assertFalse(engine.motion(new SceneEngine.Motion(1, 3, 4, 1, 1, IMAGE_CORRESPONDENCE, shifted, 0, -50)));
+        positions(engine.snapshot(1, 410, false));
+    }
+
+    @Test public void disjointMeasuredPathsWithDifferentTranslationsAreNotAGlobalConflict() {
+        SceneEngine engine = engine(); register(engine, 4);
+        engine.observe(batch(source(1), FAST, face(50), face(500)));
+        SceneEngine.Region header = new SceneEngine.Region(0, 0, 1000, 200);
+        SceneEngine.Region body = new SceneEngine.Region(0, 400, 1000, 2400);
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE, header, 0, 0)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 2, 4, 1, 1, IMAGE_CORRESPONDENCE, header, 0, 0)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 3, 1, 1, IMAGE_CORRESPONDENCE, body, 0, 0)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 3, 4, 1, 1, IMAGE_CORRESPONDENCE, body, 0, -400)));
+        positions(engine.snapshot(4, 410, false), 50, 100);
+    }
+
+    @Test public void exhaustedMotionValidationRejectsWithoutDeclaringConsistencyOrInvalidatingValidCoverage() {
+        for (int[] limits : new int[][]{{1, 64}, {64, 1}}) {
+            SceneEngine engine = new SceneEngine(1,
+                    new SceneEngine.Policy(16, 100, 64, 256, 500, 5000, .5, limits[0], limits[1]));
+            register(engine, 3); engine.observe(batch(source(1), FAST, face(500)));
+            assertEquals(SceneEngine.MotionAdmission.ADMITTED, engine.admitMotion(motion(1, 2, 0)));
+            SceneEngine.Snapshot prior = engine.snapshot(2, 210, false);
+            assertEquals(SceneEngine.MotionAdmission.CHECK_BUDGET, engine.admitMotion(motion(2, 3, 0)));
+            assertFalse(engine.hasMotionConflict()); assertSame(prior, engine.ready());
+            SceneEngine.Snapshot current = engine.snapshot(2, 210, false);
+            positions(current, 500); assertEquals(1, current.capacityDrops);
+            assertTrue(engine.observe(batch(source(2), FAST, face(500))));
+        }
+    }
+
+    @Test public void inverseMeasuredRouteAlsoDetectsAContradictoryTranslation() {
+        SceneEngine engine = engine(); register(engine, 3);
+        assertTrue(engine.motion(motion(1, 2, -400)));
+        assertTrue(engine.motion(motion(1, 3, -300)));
+        engine.observe(batch(source(2), FAST, face(500)));
+        positions(engine.snapshot(2, 310, false), 500);
+        assertEquals(SceneEngine.MotionAdmission.CONFLICT, engine.admitMotion(motion(2, 3, -200)));
+        positions(engine.snapshot(2, 310, false));
+    }
+
+    @Test public void partialRouteSupportMustBePulledBackBeforeComparingTranslations() {
+        for (boolean overlaps : new boolean[]{false, true}) {
+            SceneEngine engine = engine(); register(engine, 3);
+            assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE,
+                    new SceneEngine.Region(0, 400, 1000, 1400), 0, -400)));
+            assertTrue(engine.motion(new SceneEngine.Motion(1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE,
+                    new SceneEngine.Region(0, 900, 1000, 1400), 0, -100)));
+            SceneEngine.Region candidate = overlaps ? new SceneEngine.Region(0, 1350, 1000, 1450)
+                    : new SceneEngine.Region(0, 400, 1000, 900);
+            assertEquals(overlaps ? SceneEngine.MotionAdmission.CONFLICT : SceneEngine.MotionAdmission.ADMITTED,
+                    engine.admitMotion(new SceneEngine.Motion(1, 1, 3, 1, 1, IMAGE_CORRESPONDENCE,
+                            candidate, 0, -300)));
+            assertEquals(overlaps, engine.hasMotionConflict());
+        }
+    }
+
+    @Test public void consistentSupportOnlyChangesCannotConsumeTheImmutableKeyOrInvalidateCoverage() {
+        SceneEngine engine = engine(); register(engine, 2);
+        assertTrue(engine.motion(motion(1, 2, -400)));
+        engine.observe(batch(source(1), FAST, face(500)));
+        SceneEngine.Snapshot prior = engine.snapshot(2, 210, false);
+        assertEquals(SceneEngine.MotionAdmission.INVALID, engine.admitMotion(new SceneEngine.Motion(
+                1, 1, 2, 1, 2, IMAGE_CORRESPONDENCE, new SceneEngine.Region(0, 300, 1000, 1200), 0, -400)));
+        assertSame(prior, engine.ready()); assertFalse(engine.hasMotionConflict());
+        positions(engine.snapshot(2, 210, false), 100);
+    }
+
+    @Test public void typedCorrectionOutcomeKeepsTheLatestDuplicateWatermarkAndRequiresAConflictReset() {
+        SceneEngine engine = engine(); register(engine, 2);
+        engine.observe(batch(source(1), FAST, face(500)));
+        assertEquals(SceneEngine.MotionAdmission.ADMITTED, engine.admitMotion(motion(1, 2, -30)));
+        SceneEngine.Snapshot prior = engine.snapshot(2, 210, false);
+        assertEquals(SceneEngine.MotionAdmission.DUPLICATE, engine.admitMotion(new SceneEngine.Motion(
+                1, 1, 2, 1, 3, IMAGE_CORRESPONDENCE, SUPPORT, 0, -30)));
+        assertEquals(SceneEngine.MotionAdmission.STALE, engine.admitMotion(new SceneEngine.Motion(
+                1, 1, 2, 1, 2, IMAGE_CORRESPONDENCE, SUPPORT, 0, -40)));
+        assertSame(prior, engine.ready()); assertFalse(engine.hasMotionConflict());
+        assertEquals(SceneEngine.MotionAdmission.CONFLICT, engine.admitMotion(new SceneEngine.Motion(
+                1, 1, 2, 1, 3, IMAGE_CORRESPONDENCE, SUPPORT, 0, -40)));
+        assertTrue(engine.hasMotionConflict()); assertFalse(engine.register(source(3)));
+        positions(engine.snapshot(2, 210, false));
+        engine.reset(2);
+        SceneEngine.Source next = new SceneEngine.Source(2, 1, 42, 1000, 2400, 500, -1);
+        assertTrue(engine.register(next)); assertTrue(engine.observe(batch(next, FAST, face(600))));
+        positions(engine.snapshot(1, 510, false), 600); assertFalse(engine.hasMotionConflict());
+    }
+
+    @Test public void numericalAdditionRoundoffIsNotAnInventedPhysicalMotionTolerance() {
+        SceneEngine engine = engine(); register(engine, 4);
+        assertTrue(engine.motion(motion(1, 2, .1))); assertTrue(engine.motion(motion(2, 4, .2)));
+        assertTrue(engine.motion(motion(1, 3, .05))); assertTrue(engine.motion(motion(3, 4, .25)));
+        assertFalse(engine.hasMotionConflict());
+        assertEquals(SceneEngine.MotionAdmission.CONFLICT,
+                engine.admitMotion(new SceneEngine.Motion(1, 1, 4, 1, 1, IMAGE_CORRESPONDENCE,
+                        SUPPORT, 0, .3 + 1e-8)));
+    }
+
+    @Test public void heldGeometryCannotSupplyNegativeReachabilityConfirmationOrANewLifetime() {
+        SceneEngine engine = engine(); register(engine, 4);
+        engine.observe(batch(source(1), FAST, face(500))); engine.motion(motion(1, 2, -400));
+        engine.motion(new SceneEngine.Motion(1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 1000, 1000, 2400), 0, -400));
+        engine.motion(new SceneEngine.Motion(1, 3, 4, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 600, 1000, 2000), 0, -400));
+        SceneEngine.Snapshot held = engine.snapshot(1, 410, false, Collections.singletonMap(1L, 4L));
+        positions(held, 100); assertTrue(masks(held).get(0).heldGeometry);
+        assertEquals(2, masks(held).get(0).geometrySource.sequence); assertEquals(601, held.nextChangeAtMillis);
+        assertFalse(masks(held).get(0).confirmed);
+        engine.observe(emptyQuality(source(3), "FACE", 1, SUPPORT));
+        engine.observe(emptyQuality(source(4), "FACE", 1, SUPPORT));
+        positions(engine.snapshot(1, 600, false, Collections.singletonMap(1L, 4L)), 100);
+        positions(engine.snapshot(1, 601, false, Collections.singletonMap(1L, 4L)));
+    }
+
+    @Test public void anOptionalImageBasisCannotBorrowAnEventOnlyRouteForItsUnsupportedHeader() {
+        SceneEngine engine = engine(); register(engine, 3);
+        engine.observe(batch(source(1), FAST, face(50), face(500)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 300, 1000, 2400), 0, -400)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 1, 3, 1, 1, EVENT_ESTIMATE, SUPPORT, 0, 20)));
+        assertTrue(engine.motion(new SceneEngine.Motion(1, 2, 3, 1, 1, EVENT_ESTIMATE, SUPPORT, 0, 0)));
+        SceneEngine.Snapshot snapshot = engine.snapshot(1, 310, true, Collections.singletonMap(1L, 2L));
+        positions(snapshot, 50, 100);
+        for (SceneEngine.Mask mask : masks(snapshot)) {
+            assertFalse(mask.estimatedMotion);
+            assertEquals(mask.evidenceRegion.top == 50 ? 1 : 2, mask.geometrySource.sequence);
+        }
+        // Ordinary canvas presentation still explicitly permits event estimates.
+        assertTrue(masks(engine.snapshot(3, 310, true)).stream().anyMatch(mask -> mask.estimatedMotion));
+    }
+
+    @Test public void unrepresentableMeasuredRouteRejectsWithoutClearingValidCoverage() {
+        SceneEngine engine = engine(); register(engine, 3);
+        assertEquals(SceneEngine.MotionAdmission.ADMITTED, engine.admitMotion(new SceneEngine.Motion(
+                1, 1, 2, 1, 1, IMAGE_CORRESPONDENCE, new SceneEngine.Region(-1e308, 0, -.9e308, 100), 1e308, 0)));
+        assertEquals(SceneEngine.MotionAdmission.ADMITTED, engine.admitMotion(new SceneEngine.Motion(
+                1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE, new SceneEngine.Region(0, 0, .1e308, 100), 1e308, 0)));
+        engine.observe(batch(source(1), FAST, face(500)));
+        SceneEngine.Snapshot prior = engine.snapshot(1, 310, false);
+        assertEquals(SceneEngine.MotionAdmission.UNREPRESENTABLE, engine.admitMotion(new SceneEngine.Motion(
+                1, 1, 3, 1, 1, IMAGE_CORRESPONDENCE, new SceneEngine.Region(-1e308, 0, -.9e308, 100), 0, 0)));
+        assertSame(prior, engine.ready()); assertFalse(engine.hasMotionConflict());
+        positions(engine.snapshot(1, 310, false), 500);
+    }
+
+    @Test public void newEvidenceRecomputesSupportedGeometryInsteadOfReusingAnOldHeldBox() {
+        SceneEngine engine = engine(); register(engine, 3);
+        engine.observe(batch(source(1), FAST, face(500))); engine.motion(motion(1, 2, -400));
+        positions(engine.snapshot(1, 210, false, Collections.singletonMap(1L, 2L)), 100);
+        engine.motion(new SceneEngine.Motion(1, 2, 3, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 1000, 1000, 2400), 0, -400));
+        engine.observe(batch(source(1), QUALITY, face(510)));
+        SceneEngine.Snapshot current = engine.snapshot(1, 310, false, Collections.singletonMap(1L, 3L));
+        positions(current, 110); assertEquals(510, masks(current).get(0).evidenceRegion.top, 0);
+    }
+
+    @Test public void heldSnapshotCannotResurrectATrackRemovedByQualifiedNegativeEvidence() {
+        SceneEngine engine = engine(); register(engine, 4);
+        engine.observe(batch(source(1), FAST, face(500))); engine.motion(motion(1, 2, -400));
+        positions(engine.snapshot(1, 210, false, Collections.singletonMap(1L, 2L)), 100);
+        engine.motion(motion(2, 3, 0));
+        engine.observe(emptyQuality(source(2), "FACE", 1, SUPPORT));
+        engine.observe(emptyQuality(source(3), "FACE", 1, SUPPORT));
+        assertEquals(0, engine.trackCount());
+        engine.motion(new SceneEngine.Motion(1, 3, 4, 1, 1, IMAGE_CORRESPONDENCE,
+                new SceneEngine.Region(0, 1000, 1000, 2400), 0, -400));
+        positions(engine.snapshot(1, 410, false, Collections.singletonMap(1L, 4L)));
+    }
+
     @Test public void confirmedAndTentativeTracksKeepTheirOwnRetentionDeadlines() {
         SceneEngine engine = engine(); register(engine, 2); engine.motion(motion(1, 2, 0));
         engine.observe(batch(source(1), QUALITY, face(500)));
@@ -467,7 +733,8 @@ public class SceneEngineTest {
         assertTrue(masks(engine.snapshot(2, 210, false)).get(0).confirmed);
         assertFalse(engine.motion(new SceneEngine.Motion(1, 1, 2, 1, 2,
                 IMAGE_CORRESPONDENCE, SUPPORT, 0, -400)));
-        positions(engine.snapshot(2, 210, false), 500);
+        // Rejecting the revision alone cannot preserve confirmation derived from contradicted authority.
+        positions(engine.snapshot(2, 210, false));
     }
 
     @Test public void correspondenceAndBatchCapacityRejectionsAreVisibleWithoutClearingCoverage() {

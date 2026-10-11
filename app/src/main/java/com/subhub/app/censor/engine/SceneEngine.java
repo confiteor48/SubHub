@@ -21,6 +21,7 @@ import java.util.Set;
 public final class SceneEngine {
     public enum Lane { FAST, QUALITY, TEXT }
     public enum MotionAuthority { EVENT_ESTIMATE, IMAGE_CORRESPONDENCE }
+    public enum MotionAdmission { ADMITTED, DUPLICATE, STALE, INVALID, CAPACITY, CHECK_BUDGET, UNREPRESENTABLE, CONFLICT }
 
     /** Immutable source descriptor. Sequence orders acquisition, not result delivery. */
     public static final class Source {
@@ -194,14 +195,26 @@ public final class SceneEngine {
         public final long transientMillis;
         public final long retainedMillis;
         public final double associationIou;
+        public final int maximumMotionPathStates;
+        public final int maximumMotionEdgeChecks;
 
         public Policy(int maximumSources, int maximumTracks, int maximumCorrespondences,
                 int maximumBatchItems, long transientMillis,
                 long retainedMillis, double associationIou) {
+            this(maximumSources, maximumTracks, maximumCorrespondences, maximumBatchItems,
+                    transientMillis, retainedMillis, associationIou,
+                    defaultMotionStates(maximumSources, maximumCorrespondences),
+                    defaultMotionChecks(maximumSources, maximumCorrespondences));
+        }
+
+        public Policy(int maximumSources, int maximumTracks, int maximumCorrespondences,
+                int maximumBatchItems, long transientMillis, long retainedMillis, double associationIou,
+                int maximumMotionPathStates, int maximumMotionEdgeChecks) {
             if (maximumSources < 2 || maximumTracks < 1 || transientMillis <= 0
                     || maximumCorrespondences < 1 || maximumBatchItems < 1
                     || retainedMillis < transientMillis || !Double.isFinite(associationIou)
-                    || associationIou <= 0 || associationIou > 1) {
+                    || associationIou <= 0 || associationIou > 1
+                    || maximumMotionPathStates < 1 || maximumMotionEdgeChecks < 1) {
                 throw new IllegalArgumentException("policy");
             }
             this.maximumSources = maximumSources;
@@ -211,6 +224,16 @@ public final class SceneEngine {
             this.transientMillis = transientMillis;
             this.retainedMillis = retainedMillis;
             this.associationIou = associationIou;
+            this.maximumMotionPathStates = maximumMotionPathStates;
+            this.maximumMotionEdgeChecks = maximumMotionEdgeChecks;
+        }
+
+        private static int defaultMotionStates(int sources, int edges) {
+            return (int) Math.min(4096, Math.max(64, (long) sources * edges * 2));
+        }
+
+        private static int defaultMotionChecks(int sources, int edges) {
+            return (int) Math.min(32768, Math.max(256, (long) defaultMotionStates(sources, edges) * edges));
         }
     }
 
@@ -221,6 +244,8 @@ public final class SceneEngine {
         public final long textGroup;
         public final boolean confirmed;
         public final boolean estimatedMotion;
+        /** A bounded hold at an older supported source, never correspondence to the requested basis. */
+        public final boolean heldGeometry;
         public final Region displayRegion;
         /** Actual source whose coordinate basis produced displayRegion; not the sampling source. */
         public final Source geometrySource;
@@ -229,12 +254,17 @@ public final class SceneEngine {
         public final Region evidenceRegion;
 
         private Mask(Track track, Projection projected, Source geometrySource) {
+            this(track, projected, geometrySource, false);
+        }
+
+        private Mask(Track track, Projection projected, Source geometrySource, boolean heldGeometry) {
             identity = track.identity;
             category = track.category;
             partition = track.partition;
             textGroup = track.textGroup;
             confirmed = track.confirmed;
             estimatedMotion = projected.estimated;
+            this.heldGeometry = heldGeometry;
             displayRegion = projected.region;
             this.geometrySource = geometrySource;
             evidenceSource = track.evidenceSource;
@@ -295,6 +325,19 @@ public final class SceneEngine {
         }
     }
 
+    /** Separate support/path states are necessary: visiting a source once loses disjoint domains. */
+    private static final class MotionPath {
+        final long source;
+        final Region support;
+        final double dx, dy, roundoffX, roundoffY;
+        final Set<Long> visited;
+        MotionPath(long source, Region support, double dx, double dy,
+                double roundoffX, double roundoffY, Set<Long> visited) {
+            this.source = source; this.support = support; this.dx = dx; this.dy = dy;
+            this.roundoffX = roundoffX; this.roundoffY = roundoffY; this.visited = visited;
+        }
+    }
+
     private static final class Track {
         final long identity;
         final String category;
@@ -351,6 +394,7 @@ public final class SceneEngine {
     private long capacityDrops;
     private long sourceEvictions;
     private Snapshot ready;
+    private boolean motionConflict;
 
     public SceneEngine(long epoch, Policy policy) {
         if (epoch < 0) throw new IllegalArgumentException("epoch");
@@ -369,6 +413,7 @@ public final class SceneEngine {
         qualityHistory.clear();
         delivered.clear();
         ready = null;
+        motionConflict = false;
         capacityDrops = 0;
         sourceEvictions = 0;
         revision++;
@@ -376,7 +421,7 @@ public final class SceneEngine {
 
     /** False means bounded admission is unavailable, not that executing work should be cancelled. */
     public synchronized boolean register(Source source) {
-        if (source.epoch != epoch) return false;
+        if (motionConflict || source.epoch != epoch) return false;
         Source existing = sources.get(source.sequence);
         if (existing != null) return existing.sameDescriptor(source);
         // An evicted sequence cannot be re-registered by an old callback or replayed input.
@@ -414,34 +459,140 @@ public final class SceneEngine {
     }
 
     public synchronized boolean motion(Motion motion) {
+        return admitMotion(motion) == MotionAdmission.ADMITTED;
+    }
+
+    /** No geometry/identity derived from conflicting authority survives until an explicit reset. */
+    public synchronized MotionAdmission admitMotion(Motion motion) {
+        Objects.requireNonNull(motion);
         Source from = sources.get(motion.from);
         Source to = sources.get(motion.to);
-        if (motion.epoch != epoch || from == null || to == null || from.geometry != to.geometry
-                || from.width != to.width || from.height != to.height) return false;
+        if (motionConflict || motion.epoch != epoch || from == null || to == null || from.geometry != to.geometry
+                || from.width != to.width || from.height != to.height) return MotionAdmission.INVALID;
         for (int i = 0; i < motions.size(); i++) {
             Motion old = motions.get(i);
             if (old.from != motion.from || old.to != motion.to || old.partition != motion.partition) continue;
-            if (old.authority == MotionAuthority.IMAGE_CORRESPONDENCE
-                    || old.authority.ordinal() > motion.authority.ordinal()
-                    || (old.authority == motion.authority && old.revision >= motion.revision)) return false;
+            if (old.authority == MotionAuthority.IMAGE_CORRESPONDENCE) {
+                if (motion.authority != MotionAuthority.IMAGE_CORRESPONDENCE) return MotionAdmission.INVALID;
+                if (motion.revision < old.revision) return MotionAdmission.STALE;
+                if (sameGeometry(old, motion)) {
+                    // Advance only the stale-result watermark, never geometry, evidence age or identity.
+                    if (motion.revision > old.revision) motions.set(i, motion);
+                    return MotionAdmission.DUPLICATE;
+                }
+                // A changed support alone does not contradict the measured translation. The
+                // immutable single-domain key cannot consume it; reject without destroying the
+                // valid scene. Atomic piecewise support requires a separate admission contract.
+                if (old.dx == motion.dx && old.dy == motion.dy) return MotionAdmission.INVALID;
+                // The single-edge API cannot add a disjoint second domain. Do not confuse this
+                // unsupported representation with a correction to overlapping image authority.
+                if (intersection(old.support, motion.support) == null) return MotionAdmission.INVALID;
+                return invalidateMotionAuthority();
+            }
+            if (old.authority == motion.authority && old.revision >= motion.revision) return MotionAdmission.STALE;
+            MotionAdmission checked = checkMeasuredPaths(motion);
+            if (checked != MotionAdmission.ADMITTED) return checked;
             motions.set(i, motion);
             revision++;
             mergeCorrespondingTracks();
             replayNegativeEvidence();
-            return true;
+            return MotionAdmission.ADMITTED;
         }
-        if (motions.size() >= policy.maximumCorrespondences) { capacityDrops++; return false; }
+        if (motions.size() >= policy.maximumCorrespondences) { capacityDrops++; return MotionAdmission.CAPACITY; }
+        MotionAdmission checked = checkMeasuredPaths(motion);
+        if (checked != MotionAdmission.ADMITTED) return checked;
         motions.add(motion);
         revision++;
         mergeCorrespondingTracks();
         replayNegativeEvidence();
-        return true;
+        return MotionAdmission.ADMITTED;
+    }
+
+    public synchronized boolean hasMotionConflict() { return motionConflict; }
+
+    private MotionAdmission invalidateMotionAuthority() {
+        motionConflict = true;
+        tracks.clear(); motions.clear(); qualityHistory.clear(); delivered.clear(); ready = null;
+        // Resource pins/descriptors remain owned until the runtime performs its own epoch reset.
+        revision++;
+        return MotionAdmission.CONFLICT;
+    }
+
+    private static boolean sameGeometry(Motion first, Motion second) {
+        return first.dx == second.dx && first.dy == second.dy
+                && first.support.left == second.support.left && first.support.top == second.support.top
+                && first.support.right == second.support.right && first.support.bottom == second.support.bottom;
+    }
+
+    private static Region intersection(Region first, Region second) {
+        double left = Math.max(first.left, second.left), top = Math.max(first.top, second.top);
+        double right = Math.min(first.right, second.right), bottom = Math.min(first.bottom, second.bottom);
+        return right <= left || bottom <= top ? null : new Region(left, top, right, bottom);
+    }
+
+    private MotionAdmission checkMeasuredPaths(Motion candidate) {
+        if (candidate.authority != MotionAuthority.IMAGE_CORRESPONDENCE) return MotionAdmission.ADMITTED;
+        List<MotionPath> queue = new ArrayList<>();
+        queue.add(new MotionPath(candidate.from, candidate.support, 0, 0, 0, 0,
+                Collections.singleton(candidate.from)));
+        int edgeChecks = 0;
+        for (int index = 0; index < queue.size(); index++) {
+            MotionPath current = queue.get(index);
+            if (current.source == candidate.to) {
+                // This bound covers floating-point addition only, not physical matcher uncertainty.
+                if (Math.abs(current.dx - candidate.dx) > current.roundoffX + 2 * Math.ulp(candidate.dx)
+                        || Math.abs(current.dy - candidate.dy) > current.roundoffY + 2 * Math.ulp(candidate.dy)) {
+                    return invalidateMotionAuthority();
+                }
+                continue;
+            }
+            for (Motion edge : motions) {
+                if (++edgeChecks > policy.maximumMotionEdgeChecks) return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+                if (edge.partition != candidate.partition || edge.authority != MotionAuthority.IMAGE_CORRESPONDENCE) continue;
+                boolean forward = edge.from == current.source;
+                if (!forward && edge.to != current.source) continue;
+                long next = forward ? edge.to : edge.from;
+                if (current.visited.contains(next)) continue;
+                double dx = forward ? edge.dx : -edge.dx, dy = forward ? edge.dy : -edge.dy;
+                Region common;
+                try {
+                    Region support = forward ? edge.support : edge.support.translated(edge.dx, edge.dy);
+                    common = intersection(current.support, support.translated(-current.dx, -current.dy));
+                } catch (IllegalArgumentException unrepresentable) {
+                    return rejectedMotionCheck(MotionAdmission.UNREPRESENTABLE);
+                }
+                if (common == null) continue;
+                double nextX = current.dx + dx, nextY = current.dy + dy;
+                double errorX = current.roundoffX + additionRoundoff(current.dx, dx, nextX);
+                double errorY = current.roundoffY + additionRoundoff(current.dy, dy, nextY);
+                if (!Double.isFinite(nextX) || !Double.isFinite(nextY)
+                        || !Double.isFinite(errorX) || !Double.isFinite(errorY)) {
+                    return rejectedMotionCheck(MotionAdmission.UNREPRESENTABLE);
+                }
+                if (queue.size() >= policy.maximumMotionPathStates
+                        || current.visited.size() >= policy.maximumSources) {
+                    return rejectedMotionCheck(MotionAdmission.CHECK_BUDGET);
+                }
+                Set<Long> visited = new HashSet<>(current.visited); visited.add(next);
+                queue.add(new MotionPath(next, common, nextX, nextY, errorX, errorY, visited));
+            }
+        }
+        return MotionAdmission.ADMITTED;
+    }
+
+    private static double additionRoundoff(double first, double second, double result) {
+        return 2 * (Math.ulp(first) + Math.ulp(second) + Math.ulp(result));
+    }
+
+    private MotionAdmission rejectedMotionCheck(MotionAdmission reason) {
+        capacityDrops++;
+        return reason;
     }
 
     /** Old-epoch, evicted-source and duplicate results are rejected without mutating evidence. */
     public synchronized boolean observe(Batch batch) {
         Source source = sources.get(batch.source.sequence);
-        if (batch.source.epoch != epoch || source == null || !source.sameDescriptor(batch.source)) return false;
+        if (motionConflict || batch.source.epoch != epoch || source == null || !source.sameDescriptor(batch.source)) return false;
         if ((long) batch.observations.size() + batch.inspections.size() > policy.maximumBatchItems) {
             capacityDrops++;
             return false;
@@ -502,6 +653,11 @@ public final class SceneEngine {
             Map<Long, Long> partitionBases) {
         Source source = sources.get(destination);
         if (source == null) throw new IllegalArgumentException("unknown destination");
+        if (motionConflict) {
+            ready = new Snapshot(source, Collections.emptyList(), 0, 0, revision, capacityDrops,
+                    sourceEvictions, Long.MAX_VALUE, 0);
+            return ready;
+        }
         Map<Long, Long> bases = new HashMap<>(Objects.requireNonNull(partitionBases));
         Map<Long, Source> selectedSources = new HashMap<>();
         if (bases.size() > policy.maximumTracks) throw new IllegalArgumentException("too many render bases");
@@ -547,11 +703,13 @@ public final class SceneEngine {
             Source selected = selectedSources.getOrDefault(track.partition, source);
             // Direct geometry survives graph-node eviction. Reusing that immutable observation
             // is not an invented zero-motion edge from the track's eviction-rebased coordinates.
-            Projection projected = selected.sequence == track.evidenceSource.sequence
-                    ? new Projection(selected.sequence, track.evidenceRegion, false)
-                    : project(track.basis, selected.sequence, track.partition, track.region, allowEventEstimates);
-            if (projected == null) { unresolved++; continue; }
-            if (projected.region.visible(source)) masks.add(new Mask(track, projected, selected));
+            boolean optionalImageBasis = selectedSources.containsKey(track.partition) && selected.sequence != source.sequence;
+            Mask mask = projectedMask(track, selected, allowEventEstimates && !optionalImageBasis, false);
+            if (optionalImageBasis) {
+                mask = supportedOrHeldMask(track, source, selected, mask);
+            }
+            if (mask == null) { unresolved++; continue; }
+            if (mask.displayRegion.visible(source)) masks.add(mask);
         }
         int redundantEstimated = 0;
         List<Mask> supported = new ArrayList<>(masks);
@@ -601,6 +759,41 @@ public final class SceneEngine {
     }
     public synchronized int sourceCount() { return sources.size(); }
     public synchronized int trackCount() { return tracks.size(); }
+
+    private Mask projectedMask(Track track, Source destination, boolean estimates, boolean held) {
+        Projection projected = destination.sequence == track.evidenceSource.sequence
+                ? new Projection(destination.sequence, track.evidenceRegion, false)
+                : project(track.basis, destination.sequence, track.partition, track.region, estimates);
+        return projected == null ? null : new Mask(track, projected, destination, held);
+    }
+
+    private Mask supportedOrHeldMask(Track track, Source canvas, Source requested, Mask mapped) {
+        Mask previous = null;
+        // ready is the last constructed source-local snapshot, not a compositor-committed frame.
+        // Runtime presentation and render/tap leases still have their own admission fences.
+        if (ready != null && ready.destination.sameDescriptor(canvas)) {
+            for (Group group : ready.groups) for (Mask value : group.members) {
+                if (value.identity == track.identity && value.evidenceSource == track.evidenceSource
+                        && value.evidenceRegion == track.evidenceRegion && !value.estimatedMotion) previous = value;
+            }
+        }
+        if (mapped != null && (previous == null || mapped.geometrySource.sequence >= previous.geometrySource.sequence)) return mapped;
+        Mask best = previous == null ? null : new Mask(track,
+                new Projection(previous.geometrySource.sequence, previous.displayRegion, false), previous.geometrySource, true);
+        // A map may precede the first detector result, so no previous snapshot is required.
+        // Every newer candidate still needs its own fully supported measured path for this member.
+        List<Source> candidates = new ArrayList<>(sources.values());
+        candidates.sort((first, second) -> Long.compare(second.sequence, first.sequence));
+        for (Source candidate : candidates) {
+            if (candidate.sequence > requested.sequence || candidate.sequence < canvas.sequence
+                    || (best != null && candidate.sequence <= best.geometrySource.sequence)
+                    || candidate.epoch != canvas.epoch || candidate.geometry != canvas.geometry
+                    || candidate.width != canvas.width || candidate.height != canvas.height) continue;
+            Mask held = projectedMask(track, candidate, false, true);
+            if (held != null) { best = held; break; }
+        }
+        return best;
+    }
 
     private boolean expired(Track track, long nowMillis) {
         long hold = track.confirmed ? policy.retainedMillis : policy.transientMillis;
