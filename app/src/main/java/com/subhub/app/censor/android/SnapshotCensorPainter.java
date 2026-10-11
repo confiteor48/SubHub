@@ -307,7 +307,14 @@ public final class SnapshotCensorPainter implements AutoCloseable {
         float radius = Math.min(dp(8), Math.min(rect.width(), rect.height()) / 2);
         List<SceneEngine.Region> result = new ArrayList<>(2);
         interior(result, rect.left + radius, rect.top, rect.right - radius, rect.bottom, clip);
-        interior(result, rect.left, rect.top + radius, rect.right, rect.bottom - radius, clip); return result;
+        interior(result, rect.left, rect.top + radius, rect.right, rect.bottom - radius, clip);
+        if (result.isEmpty()) {
+            // A fully rounded square has no cross strips, but still has an opaque central square.
+            // One physical pixel of inset keeps attribution away from antialiased circle edges.
+            float inset = radius * (1 - (float) (1 / Math.sqrt(2))) + 1;
+            interior(result, rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset, clip);
+        }
+        return result;
     }
     private static void interior(List<SceneEngine.Region> out, float left, float top, float right, float bottom, Rect clip) {
         double x = Math.ceil(Math.max(left, clip.left)), y = Math.ceil(Math.max(top, clip.top));

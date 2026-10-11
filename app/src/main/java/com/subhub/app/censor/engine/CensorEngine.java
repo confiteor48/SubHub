@@ -83,6 +83,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         default void batchAccepted(SceneEngine.Batch batch) { }
         /** Complete typed native read; no image timing/ownership is implied by this callback. */
         default void nativeTextAccepted(NativeTextFrame frame) { }
+        /** Actual qualified surface recording, not capture, inference or compositor completion. */
+        default void painted(PaintReceipt receipt) { }
         /** Permanent close has no remaining capture, job, pixel or draw-handle owner. */
         default void drained() { }
     }
@@ -132,6 +134,37 @@ public final class CensorEngine<P> implements AutoCloseable {
             this.preprocessMillis = preprocessMillis;
             this.runtimeMillis = runtimeMillis;
             this.postprocessMillis = postprocessMillis;
+        }
+    }
+
+    /** Active protection before/after sources, authenticated to this exact runtime owner. */
+    public static final class ActiveScope {
+        public final long epoch, geometry;
+        public final ProtectionScope protectionScope;
+        private final Object authority;
+        private ActiveScope(Object authority, long epoch, long geometry, ProtectionScope protectionScope) {
+            this.authority = authority; this.epoch = epoch; this.geometry = geometry; this.protectionScope = protectionScope;
+        }
+        public boolean same(ActiveScope other) {
+            return other != null && authority == other.authority && epoch == other.epoch
+                    && geometry == other.geometry && protectionScope.equals(other.protectionScope);
+        }
+    }
+
+    /** Immutable actual paint metadata; no pixel lease or scene mutation. */
+    public static final class PaintReceipt {
+        public final ActiveScope scope;
+        public final long revision, appearanceGeneration, atMillis;
+        /** Null for source-free cold reverse. Never fabricated from active scope. */
+        public final SceneEngine.Source canvas;
+        /** Every mask retains its original evidence/geometry/native/protection provenance. */
+        public final List<SceneEngine.Mask> members;
+        public final boolean reverseBackground;
+        public final long compositorAtMillis = -1;
+        private PaintReceipt(ActiveScope scope, long revision, long generation, long at,
+                SceneEngine.Source canvas, List<SceneEngine.Mask> members, boolean reverse) {
+            this.scope = scope; this.revision = revision; appearanceGeneration = generation; atMillis = at;
+            this.canvas = canvas; this.members = Collections.unmodifiableList(members); reverseBackground = reverse;
         }
     }
 
@@ -437,6 +470,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     private final Map<Long, Frame> frames = new LinkedHashMap<>();
     /** Metadata pins, not extra bitmap ownership or a second mutable camera/scene. */
     private final Map<Long, SceneEngine.Source> renderBases = new HashMap<>();
+    private final Object scopeAuthority = new Object();
     private long epoch = 1;
     private long geometry;
     private ProtectionScope protectionScope = ProtectionScope.UNSPECIFIED;
@@ -749,6 +783,60 @@ public final class CensorEngine<P> implements AutoCloseable {
             trace(Stage.DRAWN, snapshot.destination, null, 0, null, actions);
         }
         run(actions);
+    }
+
+    public synchronized ActiveScope activeScope() {
+        return active && !closed ? new ActiveScope(scopeAuthority, epoch, geometry, protectionScope) : null;
+    }
+
+    public synchronized boolean isCurrent(ActiveScope scope) {
+        return active && !closed && scope != null && scope.authority == scopeAuthority && scope.epoch == epoch
+                && scope.geometry == geometry && scope.protectionScope.equals(protectionScope);
+    }
+
+    /**
+     * Called only after actual attached, visible, qualified surface recording. No first-censor
+     * inference from UI delivery. Empty ordinary paint and stale/foreign identities are rejected.
+     * A receipt records the drawing hook; Android compositor/pixel-arrival remains unknown.
+     */
+    public PaintReceipt acknowledgePaint(ActiveScope scope, long revision, long generation,
+            List<Long> paintedIdentities, boolean reverseBackground) {
+        Objects.requireNonNull(paintedIdentities);
+        if (generation < 0 || revision < -1) throw new IllegalArgumentException("paint metadata");
+        List<Runnable> actions = new ArrayList<>(); PaintReceipt receipt;
+        synchronized (this) {
+            long now = clock.getAsLong();
+            if (!isCurrent(scope) || (reverseBackground && !paintedIdentities.isEmpty())) return null;
+            SceneEngine.Source canvas = null; List<SceneEngine.Mask> selected = new ArrayList<>();
+            if (revision == -1) {
+                if (!reverseBackground || currentPresentation != null || !paintedIdentities.isEmpty()) return null;
+            } else {
+                if (currentPresentation == null || currentPresentation.snapshot.revision != revision
+                        || expired(currentPresentation, now)) return null;
+                SceneEngine.Snapshot snapshot = currentPresentation.snapshot;
+                int count = 0;
+                for (SceneEngine.Group group : snapshot.groups) count += group.members.size();
+                if (paintedIdentities.size() > count) return null;
+                java.util.Set<Long> ids = new java.util.HashSet<>(paintedIdentities);
+                if (ids.size() != paintedIdentities.size() || ids.contains(null)) return null;
+                for (SceneEngine.Group group : snapshot.groups) for (SceneEngine.Mask mask : group.members) {
+                    if (ids.remove(mask.identity)) selected.add(mask);
+                }
+                if (!ids.isEmpty() || (!reverseBackground && selected.isEmpty())) return null;
+                canvas = snapshot.destination;
+            }
+            receipt = new PaintReceipt(scope, revision, generation, now, canvas, selected, reverseBackground);
+            actions.add(() -> observer.painted(receipt));
+        }
+        run(actions);
+        // An observer may stop/reconfigure synchronously; do not authorize a subsequent stale tap map.
+        synchronized (this) {
+            if (!isCurrent(scope) || (revision != -1 && (currentPresentation == null
+                    || currentPresentation.snapshot.revision != revision
+                    || expired(currentPresentation, clock.getAsLong())))
+                    || (revision == -1 && currentPresentation != null)) return null;
+        }
+        return receipt;
     }
 
     public synchronized boolean captureInFlight() { return capture != null; }

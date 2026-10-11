@@ -145,6 +145,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
                         observer.batchAccepted(batch);
                     }
                     @Override public void nativeTextAccepted(NativeTextFrame frame) { observer.nativeTextAccepted(frame); }
+                    @Override public void painted(CensorEngine.PaintReceipt receipt) { observer.painted(receipt); }
                     @Override public void drained() {
                         try { observer.drained(); } finally { disposeAfterDrain(); }
                     }
@@ -207,6 +208,12 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public long epoch() { return engine.currentEpoch(); }
     public boolean captureInFlight() { return engine.captureInFlight(); }
     public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return engine.acquireRenderView(); }
+    public CensorEngine.ActiveScope activeScope() { return engine.activeScope(); }
+    public boolean isCurrent(CensorEngine.ActiveScope scope) { return engine.isCurrent(scope); }
+    public CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long revision,
+            long appearanceGeneration, java.util.List<Long> members, boolean reverseBackground) {
+        return engine.acknowledgePaint(scope, revision, appearanceGeneration, members, reverseBackground);
+    }
     public boolean motion(SceneEngine.Motion motion) { return engine.motion(motion); }
     public boolean motion(SceneEngine.MotionPair pair) { return engine.motion(pair); }
     public boolean presentationEstimate(com.subhub.app.censor.engine.ImagePresentationEstimate estimate) {

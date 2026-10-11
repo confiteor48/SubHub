@@ -93,5 +93,19 @@ public final class CensorTapTrackerTest {
         tracker.publishDisplayed(tracker, tracker.scope(), regions, viewport(), drawnAt, false);
     }
 
+    @Test public void withdrawalPreservesScopeButEndsOldGeometryAndCannotClearAnotherPublisher() {
+        CensorTapTracker tracker = new CensorTapTracker(); Object publisher = new Object();
+        List<BBox> regions = List.of(new BBox(100, 200, 100, 100)); long scope = tracker.scope();
+        tracker.publishDisplayed(publisher, scope, regions, viewport(), 1000, false);
+        tracker.withdrawDisplayed(new Object());
+        assertTrue(tracker.matchesPoint(110, 210, 1000, 2000, 1100));
+        tracker.withdrawDisplayed(publisher); assertEquals(scope, tracker.scope());
+        assertFalse(tracker.matchesPoint(110, 210, 1000, 2000, 1100));
+        tracker.publishDisplayed(publisher, scope, regions, viewport(), 1200, false);
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 1100, 1250));
+        assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 1200, 1250));
+        tracker.clearDisplayed(publisher); assertEquals(scope + 1, tracker.scope());
+    }
+
     private static BBox viewport() { return new BBox(0, 0, 1000, 2000); }
 }

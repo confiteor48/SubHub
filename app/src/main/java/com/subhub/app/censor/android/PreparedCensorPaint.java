@@ -58,8 +58,8 @@ public final class PreparedCensorPaint implements AutoCloseable {
         PreparedCensorPaint result = new PreparedCensorPaint(view.snapshot.destination.epoch, generation, appearance);
         Budget budget = new Budget(maximumBytes);
         try {
-            result.noise = noise(appearance, budget);
             CensorAppearance.Type type = effectiveType(appearance);
+            if (type == CensorAppearance.Type.STATIC || type == CensorAppearance.Type.GLITCH) result.noise = noise(appearance, budget);
             boolean pixels = type == CensorAppearance.Type.PIXELATE || type == CensorAppearance.Type.BLUR
                     || type == CensorAppearance.Type.GLITCH || type == CensorAppearance.Type.TAPE;
             if (appearance.isReverseMode()) {

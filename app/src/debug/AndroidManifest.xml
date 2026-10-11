@@ -4,5 +4,6 @@
         <activity android:name=".overlay.CensorTapFixtureActivity" android:exported="false" />
         <activity android:name=".censor.android.NativeTextFixtureActivity" android:exported="false" />
         <activity android:name=".censor.android.SnapshotPaintFixtureActivity" android:exported="false" />
+        <activity android:name=".censor.android.SnapshotViewFixtureActivity" android:exported="false" />
     </application>
 </manifest>

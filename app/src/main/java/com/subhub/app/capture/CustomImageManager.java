@@ -21,6 +21,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 
 /** Private internal store for user-selected and active-pack censor images. */
 public final class CustomImageManager {
@@ -149,6 +150,76 @@ public final class CustomImageManager {
             if (bitmap != null) result.add(bitmap);
         }
         return result;
+    }
+
+    /**
+     * New exclusive software inputs for one replacement paint preparation, never live/shared pool
+     * ownership. Returned bitmap bytes are bounded; a single decoder/native temporary is separate.
+     * Cancellation/throw recycles the entire partial set. Caller must recycle every returned input
+     * after copying it; none of these inputs may be recorded by a hardware Canvas.
+     */
+    public List<Bitmap> loadOwnedBitmaps(int maximumDimension, int maximumImages, long maximumBytes,
+            long expectedRevision, BooleanSupplier cancelled) {
+        if (maximumDimension < 1 || maximumDimension > 1024 || maximumImages < 1 || maximumImages > 16
+                || maximumBytes < 4 || maximumBytes > 64L * 1024 * 1024 || expectedRevision < 0 || cancelled == null) {
+            throw new IllegalArgumentException("owned artwork budget");
+        }
+        List<Bitmap> result = new ArrayList<>(maximumImages); long bytes = 0; boolean transferred = false;
+        String metadata = preferences.getString(PREFS_KEY, null), directory = preferences.getString(PACK_DIR_KEY, null);
+        try {
+            if (preferences.getLong(REVISION_KEY, 0) != expectedRevision) return Collections.emptyList();
+            File packDirectory = activePackDirectory();
+            File[] packFiles = packDirectory == null ? null : packDirectory.listFiles();
+            if (packFiles != null) for (File file : packFiles) {
+                if (cancelled.getAsBoolean()) return Collections.emptyList();
+                if (result.size() >= maximumImages) break;
+                if (!isImageFile(file) || file.length() <= 0 || file.length() > MAX_IMAGE_BYTES) continue;
+                Bitmap image = decodeOwned(file, maximumDimension, maximumBytes - bytes);
+                if (image != null) { result.add(image); bytes += image.getAllocationByteCount(); }
+            }
+            // Preserve live-rendering fallback after decoding, not export-file name selection.
+            if (result.isEmpty()) for (Entry entry : listEntries()) {
+                if (cancelled.getAsBoolean()) return Collections.emptyList();
+                if (result.size() >= maximumImages) break;
+                File file = fileFor(entry.id);
+                if (!entry.enabled || file.length() <= 0 || file.length() > MAX_IMAGE_BYTES) continue;
+                Bitmap image = decodeOwned(file, maximumDimension, maximumBytes - bytes);
+                if (image != null) { result.add(image); bytes += image.getAllocationByteCount(); }
+            }
+            if (cancelled.getAsBoolean() || preferences.getLong(REVISION_KEY, 0) != expectedRevision
+                    || !java.util.Objects.equals(metadata, preferences.getString(PREFS_KEY, null))
+                    || !java.util.Objects.equals(directory, preferences.getString(PACK_DIR_KEY, null))) return Collections.emptyList();
+            transferred = true; return result;
+        } finally {
+            if (!transferred) for (Bitmap image : result) image.recycle();
+        }
+    }
+
+    private static Bitmap decodeOwned(File file, int dimension, long remainingBytes) {
+        if (remainingBytes < 4) return null;
+        Bitmap image = null; boolean transferred = false;
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
+            int sample = 1;
+            while (((long) bounds.outWidth + sample - 1) / sample > dimension
+                    || ((long) bounds.outHeight + sample - 1) / sample > dimension) {
+                if (sample >= 1 << 30) return null;
+                sample *= 2;
+            }
+            long width = ((long) bounds.outWidth + sample - 1) / sample;
+            long height = ((long) bounds.outHeight + sample - 1) / sample;
+            if (4L * width * height > remainingBytes) return null;
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = sample; options.inScaled = false; options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            options.inPreferredColorSpace = android.graphics.ColorSpace.get(android.graphics.ColorSpace.Named.SRGB);
+            image = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+            if (image == null || image.getConfig() == Bitmap.Config.HARDWARE || image.getWidth() > dimension
+                    || image.getHeight() > dimension || image.getAllocationByteCount() > remainingBytes) return null;
+            transferred = true; return image;
+        } catch (RuntimeException | OutOfMemoryError unavailable) { return null; }
+        finally { if (!transferred && image != null) image.recycle(); }
     }
 
     public Bitmap thumbnail(String id, int maximumDimension) {

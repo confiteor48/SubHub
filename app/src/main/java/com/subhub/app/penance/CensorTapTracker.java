@@ -125,6 +125,17 @@ public final class CensorTapTracker {
         if (owner == publisher) clear();
     }
 
+    /**
+     * Withdraw this publisher's visible geometry without changing capture/session provenance.
+     * Used for a new empty/reverse/unsupported draw. A later publication starts new geometry time,
+     * so delayed clicks cannot match the old map even when the next rectangles happen to be equal.
+     * Lifecycle/session invalidation still uses clearDisplayed/clear and advances the scope.
+     */
+    public synchronized void withdrawDisplayed(Object publisher) {
+        if (owner != publisher) return;
+        boxes = List.of(); owner = null; drawnAtUptimeMillis = 0L; geometryStartedAtUptimeMillis = 0L;
+    }
+
     private boolean fresh(long nowUptimeMillis) {
         return !boxes.isEmpty() && drawnAtUptimeMillis > 0L
                 && nowUptimeMillis >= drawnAtUptimeMillis
