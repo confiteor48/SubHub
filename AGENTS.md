@@ -50,6 +50,9 @@ fresh-setup behavior being tested. Keep the fixture enabled for ordinary screen 
 For keyboard regressions, check initial launch, activity recreation, and tap-to-edit
 separately. Android can restore an EditText's focus after `onCreate`, so a launch-only
 focus check does not verify recreated screens.
+Gate Android instrumentation tests that require newer platform APIs with
+`@SdkSuppress(minSdkVersion = ...)`, not `@RequiresApi`. The latter describes production
+API contracts rather than runtime test eligibility and fails Android lint's `UseSdkSuppress` check.
 Spinner value and option TextViews must not inherit interactive EditText flags.
 Keep them nonfocusable and nonclickable so taps reach the spinner or option list;
 verify opening, choosing, and saving with native taps rather than `setSelection` alone.
