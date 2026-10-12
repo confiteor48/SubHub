@@ -103,6 +103,8 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private volatile Configuration configuration;
     private volatile boolean active;
     private volatile boolean closed;
+    private boolean fastInitializing; // Main-looper admission; the task owns no captured pixels.
+    private volatile Configuration fastInitializationFailed; // Latched before queued pixel work.
     private boolean qualityInitializing; // Main-looper admission; its task owns no captured pixels.
     private Configuration qualityInitializationFailed;
     private ProtectionScope protectionScope = ProtectionScope.UNSPECIFIED;
@@ -191,7 +193,10 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         configuration = selected;
         controls();
         if (closed || configuration != selected) return;
-        active = true; engine.start(token, protectionScope);
+        active = true;
+        initializeFast(selected);
+        if (closed || !active || configuration != selected) return;
+        engine.start(token, protectionScope);
     }
 
     /** Same owner survives reconfiguration and waits for old callbacks/running native jobs. */
@@ -215,6 +220,9 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         Configuration selected = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
         protectionScope = Objects.requireNonNull(scope);
         configuration = selected;
+        // Queue readiness before this transition can schedule a new capture/pixel job. The
+        // serial lane still waits for any executing old inference before touching its context.
+        if (active) initializeFast(selected);
         // Fence old jobs before admitting new settings or changing provider concurrency.
         engine.changeScope(token, scope);
         if (!closed && configuration == selected) controls();
@@ -263,7 +271,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         if (value.text != null && value.text.isEnabled() && !value.text.getEnabledCategories().isEmpty()
                 && value.detector.getInferenceThreads() >= 4) enabled.add(SceneEngine.Lane.TEXT);
         if (!value.detector.getEnabledCategories().isEmpty()) {
-            enabled.add(SceneEngine.Lane.FAST);
+            if (fastInitializationFailed != value) enabled.add(SceneEngine.Lane.FAST);
             if (value.quality && quality.sessionMatches(value.detector)) enabled.add(SceneEngine.Lane.QUALITY);
         }
         boolean parallel = fast.sessionMatches(value.detector) && quality.sessionMatches(value.detector)
@@ -287,6 +295,55 @@ public final class AccessibilityCensorHost implements AutoCloseable {
             textReaderConfiguration = value;
         }
         textReader.start(input, completion);
+    }
+
+    /** Pixel-free readiness overlaps acquisition, without moving context ownership off its lane. */
+    private void initializeFast(Configuration value) {
+        if (!active || closed || value.detector.getEnabledCategories().isEmpty() || fastInitializing
+                || fastInitializationFailed == value || fast.sessionMatches(value.detector)) return;
+        fastInitializing = true;
+        try {
+            fast.executor.execute(() -> {
+                long began = SystemClock.uptimeMillis();
+                boolean failed = false, unsafe = false;
+                try {
+                    if (active && !closed && configuration == value) {
+                        fast.prepare(value);
+                        fast.advertisedConfiguration = value;
+                    }
+                } catch (Exception | Error failure) {
+                    failed = true;
+                    // An Error from context creation has no established native cleanup contract.
+                    unsafe = failure instanceof Error || cleanupFailure(failure);
+                    fastInitializationFailed = value;
+                    if (unsafe) disposalFailed.set(true);
+                }
+                boolean unavailable = failed, resourceFailed = unsafe;
+                long initializationMillis = Math.max(0, SystemClock.uptimeMillis() - began);
+                post(() -> {
+                    fastInitializing = false;
+                    if (resourceFailed) { engine.nativeResourceFailure(); return; }
+                    if (closed || !active) return;
+                    if (configuration != value) {
+                        controls();
+                        if (active && !closed && configuration != null) initializeFast(configuration);
+                    } else if (unavailable) {
+                        controls();
+                        if (active && !closed && configuration == value) observer.modelUnavailable(SceneEngine.Lane.FAST);
+                    } else {
+                        controls();
+                        if (active && !closed && configuration == value && fast.sessionMatches(value.detector)) {
+                            observer.providerReady(SceneEngine.Lane.FAST, fast.provider, initializationMillis);
+                        }
+                    }
+                });
+            });
+        } catch (RejectedExecutionException rejected) {
+            fastInitializing = false;
+            fastInitializationFailed = value;
+            controls();
+            if (active && !closed && configuration == value) observer.modelUnavailable(SceneEngine.Lane.FAST);
+        }
     }
 
     /** Optional context initialization must not occupy a quality inference job and stall FAST. */
@@ -323,7 +380,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         });
     }
 
-    private static boolean cleanupFailure(Exception failure) {
+    private static boolean cleanupFailure(Throwable failure) {
         return failure instanceof SessionRetirementFailure
                 || failure instanceof VisualDetectorWorker.InitializationCleanupFailure
                 || DetectionEngine.resourceCleanupFailed(failure);
@@ -360,27 +417,44 @@ public final class AccessibilityCensorHost implements AutoCloseable {
             if (value == null || input.cancelled() || value.token != input.source.geometry) {
                 completion.cancelled(); return;
             }
+            if (lane == SceneEngine.Lane.FAST && fastInitializationFailed == value) {
+                completion.failure(); return; // Capture arrivals never retry failed readiness.
+            }
+            boolean initializationAttempted = false;
             try {
                 if (lane == SceneEngine.Lane.QUALITY && !sessionMatches(value.detector)) {
                     completion.cancelled(); return; // Readiness precedes inference admission.
                 }
                 long began = SystemClock.uptimeMillis();
+                initializationAttempted = !sessionMatches(value.detector);
                 boolean initialized = prepare(value);
                 long initializationMillis = initialized ? Math.max(0, SystemClock.uptimeMillis() - began) : 0;
                 if (initialized || advertisedConfiguration != value) {
                     String selectedProvider = provider;
                     post(() -> {
-                        if (!closed && configuration == value) {
+                        if (active && !closed && configuration == value) {
                             controls();
-                            observer.providerReady(lane, selectedProvider, initializationMillis);
+                            if (active && !closed && configuration == value) {
+                                observer.providerReady(lane, selectedProvider, initializationMillis);
+                            }
                         }
                     });
                     advertisedConfiguration = value;
                 }
                 if (input.cancelled() || configuration != value) { completion.cancelled(); return; }
                 worker.start(input, completion);
-            } catch (Exception failure) {
-                if (cleanupFailure(failure)) { disposalFailed.set(true); completion.resourceFailure(); }
+            } catch (Exception | Error failure) {
+                boolean unsafe = failure instanceof Error || cleanupFailure(failure);
+                if (lane == SceneEngine.Lane.FAST && initializationAttempted && !sessionMatches(value.detector)) {
+                    fastInitializationFailed = value;
+                    if (!unsafe) post(() -> {
+                        if (active && !closed && configuration == value) {
+                            controls();
+                            if (active && !closed && configuration == value) observer.modelUnavailable(SceneEngine.Lane.FAST);
+                        }
+                    });
+                }
+                if (unsafe) { disposalFailed.set(true); completion.resourceFailure(); }
                 else if (input.cancelled()) completion.cancelled(); else completion.failure();
             }
         }
@@ -406,7 +480,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         void dispose(Runnable finished) {
             executor.execute(() -> {
                 try { if (worker != null) worker.close(); }
-                catch (RuntimeException failure) { disposalFailed.set(true); }
+                catch (RuntimeException | Error failure) { disposalFailed.set(true); }
                 finally {
                     worker = null; provider = ""; sessionConfig = null; advertisedConfiguration = null;
                     finished.run();

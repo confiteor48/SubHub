@@ -43,6 +43,133 @@ import java.util.function.Consumer;
 @SdkSuppress(minSdkVersion = 30)
 public final class AccessibilityCensorHostAndroidTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(1, 2, 1);
+    /** Only the two explicitly synthetic resource-failure fixtures; cleared by process exit, never a fake drain. */
+    private static final List<Harness> EXPECTED_QUARANTINES = new CopyOnWriteArrayList<>();
+
+    @Test public void fastReadinessCompletesBeforeTheFirstCaptureCallbackWithoutUsingPixels() throws Exception {
+        try (Harness h = new Harness()) {
+            h.start(10, config(2, .3f)); Call first = h.next();
+            assertTrue(h.fastReady.await(5, TimeUnit.SECONDS));
+            assertTrue(h.host.captureInFlight()); assertEquals(1, h.fastInitializations.get());
+            assertEquals(1, h.models.size()); assertEquals(0, h.models.get(0).runs.get());
+            assertEquals(0, h.acceptedFast.get()); assertFalse(h.initializedOnMain.get());
+            first.deliver(); h.awaitView(10);
+            assertEquals(1, h.models.get(0).runs.get()); assertEquals(1, h.fastReadyNotifications.get());
+        }
+    }
+
+    @Test public void captureDispatchAndOwnedPixelsSurviveHeldFastReadiness() throws Exception {
+        try (Harness h = new Harness()) {
+            h.blockInitialization = true;
+            h.start(10, config(2, .3f)); Call first = h.next();
+            assertTrue(h.initializationEntered.await(5, TimeUnit.SECONDS));
+            Bitmap source = first.deliver(); main(() -> { });
+            assertFalse(source.isRecycled()); assertTrue(h.models.isEmpty());
+            assertEquals(0, h.acceptedFast.get()); assertEquals(1, h.initializationRelease.getCount());
+            h.initializationRelease.countDown(); h.awaitView(10);
+            assertEquals(1, h.fastInitializations.get()); assertEquals(1, h.models.get(0).runs.get());
+        }
+    }
+
+    @Test public void closeWaitsForSourceFreeReadinessAndNeverAnnouncesItAfterClose() throws Exception {
+        try (Harness h = new Harness()) {
+            h.blockInitialization = true;
+            h.start(10, config(2, .3f)); h.next();
+            assertTrue(h.initializationEntered.await(5, TimeUnit.SECONDS));
+            main(h.host::close); h.failUndelivered();
+            assertFalse(h.terminated.await(80, TimeUnit.MILLISECONDS));
+            h.initializationRelease.countDown();
+            assertTrue(h.terminated.await(5, TimeUnit.SECONDS));
+            assertEquals(1, h.models.size()); assertEquals(1, h.models.get(0).closes.get());
+            assertEquals(0, h.models.get(0).runs.get()); assertEquals(0, h.fastReadyNotifications.get());
+            assertTrue(h.disposed.get());
+        }
+    }
+
+    @Test public void failedReadinessIsNotRetriedByQueuedPixelsButExplicitRestartCanRetry() throws Exception {
+        try (Harness h = new Harness()) {
+            h.blockInitialization = true; h.failFastInitialization = true;
+            h.start(10, config(2, .3f)); Bitmap rejected = h.next().deliver();
+            assertTrue(h.initializationEntered.await(5, TimeUnit.SECONDS));
+            h.initializationRelease.countDown(); assertTrue(h.fastUnavailable.await(5, TimeUnit.SECONDS));
+            main(() -> { h.host.requestCapture(); h.host.requestCapture(); });
+            assertNull(h.requests.poll(80, TimeUnit.MILLISECONDS));
+            assertEquals(1, h.fastInitializations.get()); assertTrue(h.models.isEmpty());
+            long deadline = SystemClock.uptimeMillis() + 5000;
+            while (!rejected.isRecycled() && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
+            assertTrue(rejected.isRecycled());
+            h.failFastInitialization = false;
+            main(h.host::stop); h.start(10, config(2, .3f)); h.next().deliver(); h.awaitView(10);
+            assertEquals(2, h.fastInitializations.get()); assertEquals(1, h.models.size());
+            assertEquals(1, h.models.get(0).runs.get());
+        }
+    }
+
+    @Test public void oldReadinessFailureCannotDisableANewSessionKey() throws Exception {
+        try (Harness h = new Harness()) {
+            h.blockInitialization = true; h.failFirstFastInitialization = true;
+            h.start(10, config(2, .3f)); Bitmap old = h.next().deliver();
+            assertTrue(h.initializationEntered.await(5, TimeUnit.SECONDS));
+            main(() -> h.host.changeScope(11, config(3, .7f), false));
+            h.next().deliver(); h.initializationRelease.countDown(); h.awaitView(11);
+            assertEquals(2, h.fastInitializations.get()); assertEquals(1, h.models.size());
+            assertEquals(3, h.models.get(0).config.getInferenceThreads());
+            assertTrue(old.isRecycled()); assertEquals(0, h.fastUnavailableNotifications.get());
+            assertTrue(h.presentedTokens.stream().allMatch(token -> token == 11));
+        }
+    }
+
+    @Test public void unknownReadinessErrorIsAResourceFailureNotModelUnavailableOrDisposed() throws Exception {
+        try (Harness h = new Harness(true)) {
+            h.blockInitialization = true; h.errorFastInitialization = true;
+            h.start(10, config(2, .3f)); h.next();
+            assertTrue(h.initializationEntered.await(5, TimeUnit.SECONDS));
+            h.initializationRelease.countDown(); assertTrue(h.resourceFailed.await(5, TimeUnit.SECONDS));
+            assertEquals(0, h.fastUnavailableNotifications.get()); assertEquals(1, h.fastInitializations.get());
+            main(h.host::close); h.failUndelivered();
+            h.assertQuarantined();
+        }
+    }
+
+    @Test public void warmedOnlyModelCloseErrorCannotReportDisposedResources() throws Exception {
+        try (Harness h = new Harness()) {
+            h.start(10, config(2, .3f)); h.next();
+            assertTrue(h.fastReady.await(5, TimeUnit.SECONDS));
+            assertEquals(0, h.models.get(0).runs.get()); h.models.get(0).errorClose = true;
+            main(h.host::close); h.failUndelivered();
+            assertTrue(h.terminated.await(5, TimeUnit.SECONDS));
+            assertFalse(h.disposed.get()); assertEquals(1, h.models.get(0).closes.get());
+        }
+    }
+
+    @Test public void eagerChangedKeyRetirementFailureIsNotOrdinaryModelUnavailable() throws Exception {
+        try (Harness h = new Harness(true)) {
+            h.start(10, config(2, .3f)); Call old = h.next();
+            assertTrue(h.fastReady.await(5, TimeUnit.SECONDS)); h.models.get(0).failClose = true;
+            main(() -> h.host.changeScope(11, config(3, .3f), false));
+            assertTrue(h.resourceFailed.await(5, TimeUnit.SECONDS));
+            old.fail(); assertEquals(1, h.models.size());
+            assertEquals(1, h.models.get(0).closes.get()); assertEquals(0, h.fastUnavailableNotifications.get());
+            main(h.host::close); h.failUndelivered();
+            h.assertQuarantined();
+            assertEquals(1, h.models.get(0).closes.get());
+        }
+    }
+
+    @Test public void completeEmptyFastStillInitializesQualityForQualityOnlyDetections() throws Exception {
+        try (Harness h = new Harness()) {
+            h.emptyFast = true; h.qualityEnabled = true;
+            h.start(10, config(2, .3f)); h.next().deliver();
+            assertTrue(h.completedFastJob.await(5, TimeUnit.SECONDS));
+            assertTrue(h.qualityReady.await(5, TimeUnit.SECONDS));
+            assertEquals(1, h.acceptedFast.get());
+            h.next().deliver(); assertTrue(h.qualityEntered.await(5, TimeUnit.SECONDS));
+            assertTrue("quality-only positive did not finish its actual batch",
+                    h.completedQualityBatch.await(5, TimeUnit.SECONDS));
+            assertEquals(1, h.acceptedQualityPositives.get());
+            assertEquals(1, h.models.stream().filter(model -> model.lane == SceneEngine.Lane.QUALITY).count());
+        }
+    }
 
     @Test public void protectionScopeFencesSameTokenPreservesSpacingAndDoesNotReinitializeTheModel() throws Exception {
         try (Harness h = new Harness()) {
@@ -512,6 +639,7 @@ public final class AccessibilityCensorHostAndroidTest {
         final AtomicBoolean closedOnMain = new AtomicBoolean();
         volatile DetectorConfig config;
         volatile boolean failClose;
+        volatile boolean errorClose;
         Model(Harness harness, SceneEngine.Lane lane, DetectorConfig config) {
             this.harness = harness; this.lane = lane; this.config = config;
         }
@@ -534,6 +662,9 @@ public final class AccessibilityCensorHostAndroidTest {
                 if (harness.blockQuality) assertTrue(harness.qualityRelease.await(5, TimeUnit.SECONDS));
             }
             assertFalse(bitmap.isRecycled());
+            if (lane == SceneEngine.Lane.FAST && harness.emptyFast) {
+                return new VisualDetectorWorker.ModelOutput(Collections.emptyList(), true, false, TIMING);
+            }
             if (harness.mixedEvidence) {
                 return new VisualDetectorWorker.ModelOutput(Arrays.asList(
                         new Detection("FACE_FEMALE", "face", .9f, new BBox(10, 5, 20, 10), false, true),
@@ -545,6 +676,7 @@ public final class AccessibilityCensorHostAndroidTest {
         }
         @Override public void close() {
             closedOnMain.set(Looper.myLooper() == Looper.getMainLooper()); closes.incrementAndGet();
+            if (errorClose) throw new AssertionError("controlled uncertain model close Error");
             if (failClose) throw new IllegalStateException("controlled model close failure");
         }
     }
@@ -562,6 +694,10 @@ public final class AccessibilityCensorHostAndroidTest {
         final CountDownLatch qualityEntered = new CountDownLatch(1);
         final CountDownLatch qualityRelease = new CountDownLatch(1);
         final CountDownLatch qualityReady = new CountDownLatch(1);
+        final CountDownLatch fastReady = new CountDownLatch(1);
+        final CountDownLatch fastUnavailable = new CountDownLatch(1);
+        final CountDownLatch resourceFailed = new CountDownLatch(1);
+        final CountDownLatch completedQualityBatch = new CountDownLatch(1);
         final CountDownLatch qualityInitializationEntered = new CountDownLatch(1);
         final CountDownLatch qualityInitializationRelease = new CountDownLatch(1);
         final CountDownLatch emptyPresentation = new CountDownLatch(1);
@@ -569,6 +705,12 @@ public final class AccessibilityCensorHostAndroidTest {
         final CountDownLatch secondInferenceEntered = new CountDownLatch(1);
         final CountDownLatch secondInferenceRelease = new CountDownLatch(1);
         final AtomicInteger acceptedFast = new AtomicInteger();
+        final AtomicInteger fastInitializations = new AtomicInteger();
+        final AtomicInteger fastReadyNotifications = new AtomicInteger();
+        final AtomicInteger fastUnavailableNotifications = new AtomicInteger();
+        final AtomicInteger acceptedQualityPositives = new AtomicInteger();
+        final AtomicInteger resourceFailureNotifications = new AtomicInteger();
+        final AtomicInteger drainNotifications = new AtomicInteger();
         final AtomicInteger visiblePresentations = new AtomicInteger();
         final AtomicBoolean initializedOnMain = new AtomicBoolean();
         final AtomicBoolean disposed = new AtomicBoolean();
@@ -582,9 +724,14 @@ public final class AccessibilityCensorHostAndroidTest {
         volatile boolean holdSecondInference;
         volatile boolean failSecondInference;
         volatile boolean mixedEvidence;
+        volatile boolean failFastInitialization, failFirstFastInitialization, errorFastInitialization, emptyFast;
+        final boolean expectedSyntheticQuarantine;
         AccessibilityCensorHost host;
-        Harness() { this(5000); }
-        Harness(long transientMillis) {
+        Harness() { this(5000, false); }
+        Harness(boolean expectedSyntheticQuarantine) { this(5000, expectedSyntheticQuarantine); }
+        Harness(long transientMillis) { this(transientMillis, false); }
+        Harness(long transientMillis, boolean expectedSyntheticQuarantine) {
+            this.expectedSyntheticQuarantine = expectedSyntheticQuarantine;
             Context context = ApplicationProvider.getApplicationContext();
             main(() -> host = new AccessibilityCensorHost(context,
                     new SceneEngine.Policy(16, 100, 64, 256, transientMillis, 20000, .5),
@@ -592,9 +739,16 @@ public final class AccessibilityCensorHostAndroidTest {
                         assertTrue(request.tryDispatch()); Call call = new Call(request, callback, callbacks);
                         calls.add(call); requests.add(call);
                     }, (ignored, lane, config, partition, fallback) -> {
+                        int attempt = lane == SceneEngine.Lane.FAST ? fastInitializations.incrementAndGet() : 0;
                         initializedOnMain.set(Looper.myLooper() == Looper.getMainLooper());
                         initializationEntered.countDown();
                         if (blockInitialization) assertTrue(initializationRelease.await(5, TimeUnit.SECONDS));
+                        if (lane == SceneEngine.Lane.FAST) {
+                            if (errorFastInitialization) throw new AssertionError("controlled uncertain startup Error");
+                            if (failFastInitialization || (failFirstFastInitialization && attempt == 1)) {
+                                throw new IllegalStateException("controlled ordinary startup failure");
+                            }
+                        }
                         if (lane == SceneEngine.Lane.QUALITY) {
                             qualityInitializationEntered.countDown();
                             if (blockQualityInitialization) assertTrue(qualityInitializationRelease.await(5, TimeUnit.SECONDS));
@@ -606,12 +760,22 @@ public final class AccessibilityCensorHostAndroidTest {
                             if (trace.stage == CensorEngine.Stage.JOB_COMPLETED && trace.lane == SceneEngine.Lane.FAST) {
                                 completedFastJob.countDown();
                             }
+                            if (trace.stage == CensorEngine.Stage.RESOURCE_FAILED) {
+                                resourceFailureNotifications.incrementAndGet(); resourceFailed.countDown();
+                            }
                         }
                         @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) {
                             if (lane == SceneEngine.Lane.QUALITY) qualityReady.countDown();
+                            if (lane == SceneEngine.Lane.FAST) { fastReadyNotifications.incrementAndGet(); fastReady.countDown(); }
+                        }
+                        @Override public void modelUnavailable(SceneEngine.Lane lane) {
+                            if (lane == SceneEngine.Lane.FAST) { fastUnavailableNotifications.incrementAndGet(); fastUnavailable.countDown(); }
                         }
                         @Override public void batchAccepted(SceneEngine.Batch batch) {
                             if (batch.lane == SceneEngine.Lane.FAST) acceptedFast.incrementAndGet();
+                            if (batch.lane == SceneEngine.Lane.QUALITY && !batch.observations.isEmpty()) {
+                                acceptedQualityPositives.incrementAndGet(); completedQualityBatch.countDown();
+                            }
                         }
                         @Override public void presentationChanged() {
                             try (CensorEngine<PixelFrame>.RenderView view = host.acquireRenderView()) {
@@ -625,7 +789,12 @@ public final class AccessibilityCensorHostAndroidTest {
                         @Override public void executorsTerminated(boolean resourcesDisposed) {
                             disposed.set(resourcesDisposed); terminated.countDown();
                         }
+                        @Override public void drained() { drainNotifications.incrementAndGet(); }
                     }));
+            if (expectedSyntheticQuarantine) {
+                EXPECTED_QUARANTINES.add(this);
+                assertTrue("unexpected synthetic quarantine inventory", EXPECTED_QUARANTINES.size() <= 2);
+            }
         }
         void start(long token, DetectorConfig config) { main(() -> host.start(token, config, qualityEnabled)); }
         Call next() throws InterruptedException {
@@ -697,12 +866,32 @@ public final class AccessibilityCensorHostAndroidTest {
             fail("Atomic Android source pair did not qualify both actual-partition members together");
         }
         void failUndelivered() { for (Call call : calls) call.fail(); }
+        void assertQuarantined() throws InterruptedException {
+            assertTrue("this explicit synthetic fixture did not select quarantine", expectedSyntheticQuarantine);
+            assertEquals(1, resourceFailureNotifications.get());
+            assertFalse("uncertain resources cannot authorize executor drain", terminated.await(80, TimeUnit.MILLISECONDS));
+            assertEquals(0, drainNotifications.get()); assertFalse(disposed.get());
+            assertNull(host.activeScope());
+            try (CensorEngine<PixelFrame>.RenderView view = host.acquireRenderView()) { assertNull(view); }
+            assertEquals(0, acceptedFast.get()); assertEquals(0, acceptedQualityPositives.get());
+            long deadline = SystemClock.uptimeMillis() + 5000;
+            while (host.captureInFlight() && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
+            assertFalse("quarantine did not resolve its existing fake callback", host.captureInFlight());
+            for (Call call : calls) assertTrue(call.delivered.get());
+            main(host::requestCapture);
+            assertNull("quarantined owner admitted another capture", requests.poll(80, TimeUnit.MILLISECONDS));
+        }
         @Override public void close() throws Exception {
             initializationRelease.countDown(); inferenceRelease.countDown(); qualityRelease.countDown();
             secondInferenceRelease.countDown();
             qualityInitializationRelease.countDown();
             main(host::close); failUndelivered();
-            assertTrue("host executors did not drain", terminated.await(5, TimeUnit.SECONDS));
+            if (expectedSyntheticQuarantine) {
+                // These two factories allocate only fake Models. The failed owner intentionally
+                // remains quarantined until the owned instrumentation process exits. Never
+                // clear the runtime's fault or invent successful native disposal for teardown.
+                assertQuarantined();
+            } else assertTrue("host executors did not drain", terminated.await(5, TimeUnit.SECONDS));
         }
     }
 }
