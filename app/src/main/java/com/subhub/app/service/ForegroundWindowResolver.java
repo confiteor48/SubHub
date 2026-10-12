@@ -6,14 +6,14 @@ import java.util.Collections;
 import java.util.List;
 
 /** Selects the real foreground application window from Accessibility's interactive windows. */
-final class ForegroundWindowResolver {
+public final class ForegroundWindowResolver {
     private ForegroundWindowResolver() {}
 
-    static Candidate select(List<Candidate> candidates, String inputMethodPackage) {
+    public static Candidate select(List<Candidate> candidates, String inputMethodPackage) {
         return select(candidates, inputMethodPackage, "");
     }
 
-    static Candidate select(
+    public static Candidate select(
             List<Candidate> candidates,
             String inputMethodPackage,
             String preferredPackage) {
@@ -40,14 +40,14 @@ final class ForegroundWindowResolver {
         return best;
     }
 
-    static final class Candidate {
-        final String packageName;
-        final int windowId;
-        final boolean active;
-        final boolean focused;
-        final int layer;
+    public static final class Candidate {
+        public final String packageName;
+        public final int windowId;
+        public final boolean active;
+        public final boolean focused;
+        public final int layer;
 
-        Candidate(String packageName, int windowId, boolean active, boolean focused, int layer) {
+        public Candidate(String packageName, int windowId, boolean active, boolean focused, int layer) {
             this.packageName = packageName == null ? "" : packageName;
             this.windowId = windowId;
             this.active = active;

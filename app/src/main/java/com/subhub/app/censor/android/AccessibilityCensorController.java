@@ -72,6 +72,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
     private volatile boolean active, closed, resourceFailed;
     private volatile boolean ownerDrained, executorsTerminated, disposalSucceeded;
     private boolean attached;
+    private long appearanceGeneration;
     private static final class Transition {
         final Configuration configuration;
         volatile boolean qualified, invalid;
@@ -109,7 +110,10 @@ public final class AccessibilityCensorController implements AutoCloseable {
             @Override public void failed(long request, int code) { observer.failed(request, code); }
             @Override public void trace(CensorEngine.Trace trace) { observer.trace(trace); }
             @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) {
-                observer.providerReady(lane, provider, millis);
+                if (current(transition)) observer.providerReady(lane, provider, millis);
+            }
+            @Override public void modelUnavailable(SceneEngine.Lane lane) {
+                if (current(transition)) observer.modelUnavailable(lane);
             }
             @Override public void presentationChanged() { surfaceChanged(); observer.presentationChanged(); }
             @Override public void batchAccepted(SceneEngine.Batch batch) {
@@ -156,6 +160,10 @@ public final class AccessibilityCensorController implements AutoCloseable {
         return windows.observe(packageName, windowId);
     }
 
+    public AccessibilityWindowReader.Window observeForeground(String inputMethodPackage, String preferredPackage) {
+        return windows.observeForeground(inputMethodPackage, preferredPackage);
+    }
+
     /** One existing host survives window/settings changes and stop/start. Tokens must change. */
     public void start(Configuration selected) {
         onMain(); if (closed) throw new IllegalStateException("Closed controller"); Objects.requireNonNull(selected);
@@ -163,6 +171,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
         Configuration previous = configuration;
         if (active && previous != null && previous.token == selected.token) throw new IllegalArgumentException("Scope token must change");
         Transition next = new Transition(selected);
+        appearanceGeneration++;
         transition = next; configuration = selected; active = true; contentGeneration.incrementAndGet();
         try {
             surface.presentationAllowed(false);
@@ -194,15 +203,33 @@ public final class AccessibilityCensorController implements AutoCloseable {
         }
     }
 
+    /** Appearance resources change without resetting capture, inference, geometry or identities. */
+    public void appearanceChanged(CensorAppearance appearance, SnapshotPaintPolicy policy, long artworkRevision) {
+        onMain(); Objects.requireNonNull(appearance); Objects.requireNonNull(policy);
+        if (closed) throw new IllegalStateException("Closed controller");
+        if (artworkRevision < 0) throw new IllegalArgumentException("Artwork revision");
+        Transition selected = transition;
+        long generation = ++appearanceGeneration;
+        surface.configure(appearance, policy, artworkRevision, true);
+        if (!closed && transition == selected && appearanceGeneration == generation) {
+            host.canvasSamplingControls(appearance.requiresSourceFrame());
+        }
+    }
+
+    /** Demand only: neither an event camera pose nor a new source timestamp is manufactured. */
+    public void requestCapture() { onMain(); if (!closed && active) host.requestCapture(); }
+
     public void stop() {
         onMain(); if (closed) return;
         active = false; configuration = null; transition = null; contentGeneration.incrementAndGet();
+        appearanceGeneration++;
         surface.presentationAllowed(false);
         if (!active && transition == null) host.stop();
     }
 
     @Override public void close() {
         onMain(); if (closed) return; closed = true; active = false; configuration = null; transition = null;
+        appearanceGeneration++;
         contentGeneration.incrementAndGet();
         windows.close();
         try { host.close(); }

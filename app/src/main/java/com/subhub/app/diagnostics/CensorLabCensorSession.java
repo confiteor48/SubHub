@@ -6,12 +6,20 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Process-local recording ownership; never arms or persists a normal service session. */
 public final class CensorLabCensorSession {
-    private static final AtomicReference<Lease> ACTIVE = new AtomicReference<>();
+    private static final AtomicReference<Stamp> STATE = new AtomicReference<>(new Stamp(false));
     private static final CopyOnWriteArrayList<Runnable> OBSERVERS = new CopyOnWriteArrayList<>();
 
     private CensorLabCensorSession() { }
 
-    public static boolean isActive() { return ACTIVE.get() != null; }
+    public static boolean isActive() { return STATE.get().active; }
+
+    /** Read-only ownership identity; an end/restart (including inactive ABA) invalidates it. */
+    public static Stamp stamp() { return STATE.get(); }
+    public static final class Stamp {
+        public final boolean active;
+        private Stamp(boolean active) { this.active = active; }
+        public boolean isCurrent() { return STATE.get() == this; }
+    }
 
     /** A Lab-owned captured frame cannot become billable when its recording ends mid-inference. */
     public static boolean allowsNormalCensorEffects(boolean labOwnedSource) {
@@ -19,10 +27,12 @@ public final class CensorLabCensorSession {
     }
 
     public static Lease acquire() {
-        Lease lease = new Lease();
-        if (!ACTIVE.compareAndSet(null, lease)) {
+        Stamp previous = STATE.get();
+        Stamp selected = new Stamp(true);
+        if (previous.active || !STATE.compareAndSet(previous, selected)) {
             throw new IllegalStateException("A Censor Lab session already owns recognition");
         }
+        Lease lease = new Lease(selected);
         notifyObservers();
         return lease;
     }
@@ -47,10 +57,11 @@ public final class CensorLabCensorSession {
     }
 
     public static final class Lease implements AutoCloseable {
-        private Lease() { }
+        private final Stamp stamp;
+        private Lease(Stamp stamp) { this.stamp = stamp; }
 
         @Override public void close() {
-            if (ACTIVE.compareAndSet(this, null)) notifyObservers();
+            if (STATE.compareAndSet(stamp, new Stamp(false))) notifyObservers();
         }
     }
 

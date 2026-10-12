@@ -11,8 +11,12 @@ import android.view.accessibility.AccessibilityWindowInfo;
 import androidx.annotation.RequiresApi;
 
 import com.subhub.app.detection.text.NativeTextReader;
+import com.subhub.app.service.ForegroundWindowResolver;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -67,6 +71,54 @@ public final class AccessibilityWindowReader implements AutoCloseable {
         } finally { endRead(); }
     }
 
+    /** Product selection uses the same standalone foreground policy, with no retained handles. */
+    @SuppressWarnings("deprecation")
+    public Window observeForeground(String inputMethodPackage, String preferredPackage) {
+        if (!beginRead()) return null;
+        List<AccessibilityWindowInfo> windows = null;
+        Throwable original = null;
+        try {
+            WindowManager manager = service.getSystemService(WindowManager.class);
+            if (manager == null) return null;
+            DisplayMetrics display = new DisplayMetrics(); manager.getDefaultDisplay().getRealMetrics(display);
+            if (display.widthPixels <= 0 || display.heightPixels <= 0) return null;
+            windows = service.getWindows();
+            if (windows == null || windows.size() > MAXIMUM_WINDOWS) return null;
+            List<ForegroundWindowResolver.Candidate> candidates = new ArrayList<>();
+            Map<Integer, Window> descriptors = new HashMap<>();
+            for (AccessibilityWindowInfo window : windows) {
+                if (window == null) throw new IllegalStateException("Incomplete window list");
+                if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+                Rect bounds = new Rect(); window.getBoundsInScreen(bounds);
+                if (window.getId() < 0 || bounds.isEmpty() || bounds.left < 0 || bounds.top < 0
+                        || bounds.right > display.widthPixels || bounds.bottom > display.heightPixels) continue;
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) continue;
+                Throwable rootFailure = null;
+                try {
+                    CharSequence name = root.getPackageName();
+                    if (name == null || name.length() == 0 || name.length() > 256
+                            || root.getWindowId() != window.getId()) continue;
+                    String packageName = name.toString();
+                    if (descriptors.put(window.getId(), new Window(window.getId(), packageName, display, bounds)) != null) {
+                        return null; // Duplicate platform window identity is not an eligible subset.
+                    }
+                    candidates.add(new ForegroundWindowResolver.Candidate(packageName, window.getId(),
+                            window.isActive(), window.isFocused(), window.getLayer()));
+                } catch (RuntimeException | Error failure) { rootFailure = failure; throw failure; }
+                finally { releaseRoot(root, rootFailure); }
+            }
+            ForegroundWindowResolver.Candidate selected = ForegroundWindowResolver.select(candidates,
+                    inputMethodPackage, preferredPackage);
+            acquired.run();
+            return selected == null || isClosed() ? null : descriptors.get(selected.windowId);
+        } catch (RuntimeException | Error failure) { original = failure; throw failure; }
+        finally {
+            try { finishCleanup(original, recycleWindows(windows)); }
+            finally { endRead(); }
+        }
+    }
+
     /** Transfers only the actual returned root. NativeTextReader owns it through read/confirmation cleanup. */
     public NativeTextReader.Tree open(Window expected, long contentGeneration) {
         Objects.requireNonNull(expected);
@@ -75,13 +127,15 @@ public final class AccessibilityWindowReader implements AutoCloseable {
             Read read = read(expected.packageName, expected.id);
             if (read == null) return null;
             boolean transferred = false;
+            Throwable original = null;
             try {
                 if (isClosed() || !expected.same(read.window)) return null;
                 NativeTextReader.Tree tree = new NativeTextReader.Tree(read.root,
                         expected.displayWidth, expected.displayHeight, contentGeneration);
                 transferred = true;
                 return tree;
-            } finally { if (!transferred) recycle(read.root); }
+            } catch (RuntimeException | Error failure) { original = failure; throw failure; }
+            finally { if (!transferred) releaseRoot(read.root, original); }
         } finally { endRead(); }
     }
 
@@ -118,12 +172,15 @@ public final class AccessibilityWindowReader implements AutoCloseable {
         AccessibilityNodeInfo selected = null;
         Window descriptor = null;
         boolean transferred = false;
+        Throwable original = null;
         try {
             if (windows.size() > MAXIMUM_WINDOWS) return null; // No successful subset of a truncated scope read.
             for (AccessibilityWindowInfo window : windows) {
                 if (window == null) throw new IllegalStateException("Incomplete window list");
                 if (window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION
-                        || !(window.isActive() || window.isFocused())
+                        // A foreground-selected exact window can remain visible under an app overlay.
+                        // Only unscoped discovery requires focus; exact package/id/bounds still fence it.
+                        || (windowId < 0 && !(window.isActive() || window.isFocused()))
                         || (windowId >= 0 && window.getId() != windowId)) continue;
                 Rect bounds = new Rect(); window.getBoundsInScreen(bounds);
                 if (window.getId() < 0 || bounds.isEmpty() || bounds.left < 0 || bounds.top < 0
@@ -131,13 +188,15 @@ public final class AccessibilityWindowReader implements AutoCloseable {
                 AccessibilityNodeInfo root = window.getRoot();
                 if (root == null) continue;
                 boolean owned = true;
+                Throwable rootFailure = null;
                 try {
                     CharSequence name = root.getPackageName();
                     if (name == null || !packageName.contentEquals(name) || root.getWindowId() != window.getId()) continue;
                     if (selected != null) return null; // Ambiguous application windows never acquire global authority.
                     selected = root; owned = false;
                     descriptor = new Window(window.getId(), packageName, display, bounds);
-                } finally { if (owned) recycle(root); }
+                } catch (RuntimeException | Error failure) { rootFailure = failure; throw failure; }
+                finally { if (owned) releaseRoot(root, rootFailure); }
             }
             if (selected == null) return null;
             acquired.run(); // Full acquisition stays counted through this boundary and cleanup/transfer.
@@ -145,21 +204,43 @@ public final class AccessibilityWindowReader implements AutoCloseable {
             Read result = new Read(descriptor, selected);
             transferred = true;
             return result;
-        } finally {
+        } catch (RuntimeException | Error failure) { original = failure; throw failure; }
+        finally {
             // Complete cleanup even if one disposal fails. Never report that failure as a clean drain.
-            Throwable failure = null;
-            for (AccessibilityWindowInfo window : windows) {
-                if (window == null) continue;
-                try { window.recycle(); }
-                catch (RuntimeException | Error thrown) { cleanupFailed.set(true); if (failure == null) failure = thrown; }
-            }
+            Throwable failure = recycleWindows(windows);
             if (!transferred || failure != null) {
                 try { if (selected != null) recycle(selected); }
-                catch (RuntimeException | Error thrown) { if (failure == null) failure = thrown; }
+                catch (RuntimeException | Error thrown) { failure = combine(failure, thrown); }
             }
-            if (failure instanceof RuntimeException) throw (RuntimeException) failure;
-            if (failure instanceof Error) throw (Error) failure;
+            finishCleanup(original, failure);
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    private Throwable recycleWindows(List<AccessibilityWindowInfo> windows) {
+        Throwable result = null;
+        if (windows != null) for (AccessibilityWindowInfo window : windows) {
+            if (window == null) continue;
+            try { window.recycle(); }
+            catch (RuntimeException | Error failure) { cleanupFailed.set(true); result = combine(result, failure); }
+        }
+        return result;
+    }
+
+    private void releaseRoot(AccessibilityNodeInfo root, Throwable original) {
+        try { recycle(root); }
+        catch (RuntimeException | Error failure) { finishCleanup(original, failure); }
+    }
+    private static Throwable combine(Throwable original, Throwable later) {
+        if (original == null) return later;
+        if (later != original) original.addSuppressed(later);
+        return original;
+    }
+    private static void finishCleanup(Throwable original, Throwable cleanup) {
+        if (cleanup == null) return;
+        if (original != null) { combine(original, cleanup); return; }
+        if (cleanup instanceof RuntimeException) throw (RuntimeException) cleanup;
+        throw (Error) cleanup;
     }
 
     @SuppressWarnings("deprecation")

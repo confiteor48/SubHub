@@ -21,6 +21,10 @@ import android.widget.Toast;
 import androidx.annotation.RequiresApi;
 
 import com.subhub.app.BuildConfig;
+import com.subhub.app.censor.android.CensorProductSession;
+import com.subhub.app.censor.android.ProductCensorQualification;
+import com.subhub.app.censor.android.AccessibilityWindowReader;
+import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.appmode.AppModeManager;
 import com.subhub.app.appmode.AppModePolicy;
 import com.subhub.app.appmode.AppTimerManager;
@@ -254,9 +258,15 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     private long lastWorldCacheQueryDocument = Long.MIN_VALUE;
     private String lastWorldCacheQuerySurface = "";
     private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+    private boolean productQualificationRoute;
     private final android.content.SharedPreferences.OnSharedPreferenceChangeListener listener =
-            (preferences, key) -> reloadSettings();
+            (preferences, key) -> {
+                if (productQualificationRoute) reloadProductSettings(key);
+                else reloadSettings();
+            };
     private CensorLabCensorSession.Subscription labCensorSubscription;
+    private int qualificationBoundPid = -1;
+    private CensorProductSession productSession;
     private ScheduledExecutorService worker;
     private final RowMotionObserver rowMotionObserver = new RowMotionObserver();
     private SpatialRegionCache spatialRegionCache;
@@ -393,10 +403,10 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             if (!running) return;
             try {
                 long now = System.currentTimeMillis();
-                boolean foregroundChanged = syncForegroundFromActiveRoot(now);
+                boolean foregroundChanged = !productQualificationRoute && syncForegroundFromActiveRoot(now);
                 if (!foregroundChanged) accountForegroundUsage(now);
-                enforceForegroundLimit(now);
-                reevaluateRecognition();
+                boolean limited = enforceForegroundLimit(now);
+                if (!productQualificationRoute || !limited) reevaluateRecognition();
                 reevaluateSubliminals();
                 refreshHardcoreSettingsGuard();
             } catch (RuntimeException error) {
@@ -424,11 +434,20 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         stats = new StatsRepository(this);
         timers = new AppTimerManager(this);
         penance = new PenanceManager(this);
+        productQualificationRoute = ProductCensorQualification.enabled(this);
+        hardcoreSettingsGuard = new HardcoreSettingsGuard(this);
+        subliminalOverlay = new SubliminalOverlayController(this);
+        if (productQualificationRoute && Build.VERSION.SDK_INT >= 34) {
+            qualificationBoundPid = Process.myPid();
+            settings.preferences().registerOnSharedPreferenceChangeListener(listener);
+            running = true;
+            connectProductQualification();
+            main.post(timerTick);
+            return; // No legacy model, text, motion, capture or lookup worker is initialized.
+        }
         smutTextClassifier = new SmutTextClassifier(this);
         accessibilityText = new AccessibilityTextSmutDetector(smutTextClassifier);
         screenshotText = new OcrTextSmutDetector(smutTextClassifier);
-        hardcoreSettingsGuard = new HardcoreSettingsGuard(this);
-        subliminalOverlay = new SubliminalOverlayController(this);
         motionEstimator = new ScrollFrameMotionEstimator();
         settings.preferences().registerOnSharedPreferenceChangeListener(listener);
         running = true;
@@ -492,6 +511,58 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         main.post(timerTick);
         chromeGeometryProbe = ChromeGeometryProbe.startIfArmed(this);
     }
+
+    @RequiresApi(34)
+    private void connectProductQualification() {
+        productSession = ProductCensorQualification.connect(this, tapTracker, new CensorProductSession.Observer() {
+            @Override public void foreground(AccessibilityWindowReader.Window window) {
+                String packageName = window == null ? "" : window.packageName;
+                acceptForegroundPackage(packageName, System.currentTimeMillis());
+                activeApplicationWindowId.set(window == null ? -1 : window.id);
+                guardForegroundPackage = packageName;
+                syncProductParticipation();
+            }
+            @Override public void activeChanged(boolean active) {
+                recognitionActive = active;
+                if (active) DiagnosticsRepository.begin(DIAGNOSTICS_MODE, settings.loadDetectorConfig().getInferenceResolution());
+                else DiagnosticsRepository.stop(DIAGNOSTICS_MODE);
+            }
+            @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) {
+                if (lane == SceneEngine.Lane.FAST) {
+                    DetectorConfig config = settings.loadDetectorConfig();
+                    DiagnosticsRepository.ready(DIAGNOSTICS_MODE, provider, config.getModelFilename(), Math.min(320, config.getInferenceResolution()));
+                }
+            }
+            @Override public void modelUnavailable(SceneEngine.Lane lane) {
+                DiagnosticsRepository.fail(DIAGNOSTICS_MODE, new IllegalStateException("Replacement " + lane + " model unavailable"));
+            }
+            @Override public void sessionFailure(Throwable failure) { DiagnosticsRepository.fail(DIAGNOSTICS_MODE, failure); }
+        });
+        labCensorSubscription = CensorLabCensorSession.observe(() -> main.post(() -> {
+            if (!running || productSession == null) return;
+            foregroundSinceMillis = System.currentTimeMillis();
+            dwellTracker.clear(); tapTracker.clear();
+            productSession.ownershipChanged();
+            syncProductParticipation(); reevaluateSubliminals();
+        }));
+        productSession.request();
+    }
+
+    private void syncProductParticipation() {
+        AppModeManager mode = new AppModeManager(this);
+        PopupStormManager.get().syncServiceParticipation(this,
+                !HardcoreSettingsGuard.isSettingsPackage(foregroundPackage) && mode.shouldShowPopups(foregroundPackage));
+    }
+
+    /** Read-only native qualification assertion; field construction does not mean a legacy runtime started. */
+    public boolean legacyCensorRuntimeAbsentForQualification() {
+        return productQualificationRoute && worker == null && inferenceWorker == null && qualityInferenceWorker == null
+                && textWorker == null && ocrWorker == null && scrollLookupWorker == null && scrollLookup == null
+                && detector == null && fastDetector == null && tracker == null && smutTextClassifier == null
+                && accessibilityText == null && screenshotText == null && motionEstimator == null && overlay == null
+                && scenePresenter == null && experimentalAnchorSampler == null;
+    }
+    public int qualificationBoundPid() { return productQualificationRoute ? qualificationBoundPid : -1; }
 
     @RequiresApi(Build.VERSION_CODES.R)
     private void initializePipeline() {
@@ -4942,6 +5013,10 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
 
     private void reloadSettings() {
         if (settings == null) return;
+        if (productQualificationRoute) {
+            reloadProductSettings(null);
+            return;
+        }
         main.post(() -> {
             if (overlay != null) {
                 CensorAppearance appearance = settings.loadAppearance();
@@ -4994,6 +5069,16 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                 && usesScreenshotOcr(config) && screenshotText != null) {
             screenshotText.warmUp(currentOcrWorker);
         }
+    }
+
+    private void reloadProductSettings(String key) {
+        main.post(() -> {
+            if (Build.VERSION.SDK_INT < 34 || !running || productSession == null) return;
+            if (key == null) productSession.ownershipChanged(); else productSession.settingsChanged(key);
+            PopupStormManager.get().reloadSettings(this);
+            if (subliminalOverlay != null) subliminalOverlay.updateSettings();
+            syncProductParticipation(); reevaluateSubliminals();
+        });
     }
 
     @Override
@@ -5265,6 +5350,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
 
     private void handleAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
+        if (productQualificationRoute) { handleProductAccessibilityEvent(event); return; }
         int eventType = event.getEventType();
         if (eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START
                 || eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END) {
@@ -5364,6 +5450,30 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         }
         acceptForegroundPackage(confirmedPackage, System.currentTimeMillis());
         if (liveWindow != null) activeApplicationWindowId.set(liveWindow.windowId);
+    }
+
+    private void handleProductAccessibilityEvent(AccessibilityEvent event) {
+        CensorProductSession session = productSession;
+        if (Build.VERSION.SDK_INT < 34 || !running || session == null) return;
+        int type = event.getEventType();
+        String packageName = event.getPackageName() == null ? "" : event.getPackageName().toString();
+        boolean window = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED;
+        if (!packageName.isEmpty()) guardForegroundPackage = packageName;
+        if (window || (HardcoreSettingsGuard.isSettingsPackage(packageName)
+                && (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || type == AccessibilityEvent.TYPE_VIEW_CLICKED))) {
+            queueHardcoreSettingsGuardRefresh(window ? 0L : 32L);
+        }
+        if (window) {
+            String className = event.getClassName() == null ? "" : event.getClassName().toString();
+            session.foregroundEvent(packageName, className, event.getWindowId(), type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+        } else if ((type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || type == AccessibilityEvent.TYPE_VIEW_SCROLLED)
+                && packageName.equals(foregroundPackage)) {
+            if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) dwellTracker.onScroll();
+            session.contentChanged(event.getWindowId());
+        } else if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && !packageName.equals(foregroundPackage)) {
+            session.request();
+        } else if (type == AccessibilityEvent.TYPE_VIEW_CLICKED) recordCensoredTap(event, packageName);
+        // No event/receipt timestamp is promoted to measured image motion or source pixel time.
     }
 
     private void acceptApplicationWindow(int windowId) {
@@ -5512,15 +5622,15 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     }
 
     private void acceptForegroundPackage(String packageName, long now) {
-        if (packageName == null || packageName.isEmpty()
+        if (packageName == null || (!productQualificationRoute && packageName.isEmpty())
                 || packageName.equals(foregroundPackage)) return;
         accountForegroundUsage(now);
-        captureEpoch.invalidate();
+        if (!productQualificationRoute) captureEpoch.invalidate();
         activeApplicationWindowId.set(-1);
         foregroundPackage = packageName;
         com.subhub.app.appmode.ForegroundAppState.update(packageName);
         foregroundSinceMillis = now;
-        resetTextSnapshots();
+        if (!productQualificationRoute) resetTextSnapshots();
         AppModeManager mode = new AppModeManager(this);
         if (!CensorLabCensorSession.isActive() && mode.getIncludedPackages().contains(packageName)) {
             int charged = penance.recordInfraction(
@@ -5530,7 +5640,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         }
         dwellTracker.clear();
         tapTracker.clear();
-        resetScrollCompensation();
+        if (!productQualificationRoute) resetScrollCompensation();
         if (recognitionActive && worker != null) {
             worker.execute(() -> {
                 if (tracker != null) tracker.clear();
@@ -5540,7 +5650,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         reevaluateSubliminals();
         PopupStormManager.get().updateDetections(Collections.emptyList());
         if (enforceForegroundLimit(System.currentTimeMillis())) return;
-        reevaluateRecognition();
+        if (!productQualificationRoute) reevaluateRecognition();
     }
 
     private void resetTextSnapshots() {
@@ -5686,6 +5796,11 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
 
     private void reevaluateRecognition() {
         if (!running || settings == null) return;
+        if (productQualificationRoute) {
+            if (Build.VERSION.SDK_INT >= 34 && productSession != null) productSession.request();
+            syncProductParticipation();
+            return;
+        }
         // Android Settings is handled by the lightweight Hardcore guard. Running the detector
         // there competes for the same accessibility overlay channel and wastes capture/ML work.
         boolean settingsPackage = HardcoreSettingsGuard.isSettingsPackage(foregroundPackage);
@@ -5949,6 +6064,13 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     }
 
     private void deactivateRecognition() {
+        if (productQualificationRoute) {
+            if (Build.VERSION.SDK_INT >= 34 && productSession != null) productSession.stop();
+            recognitionActive = false;
+            PopupStormManager.get().updateDetections(Collections.emptyList());
+            dwellTracker.clear(); tapTracker.clear();
+            return;
+        }
         if (!recognitionActive && overlay == null) return;
         recognitionActive = false;
         stopExperimentalAnchorSampler();
@@ -6614,6 +6736,22 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         PopupStormManager.get().stop();
         if (settings != null) {
             settings.preferences().unregisterOnSharedPreferenceChangeListener(listener);
+        }
+        if (productQualificationRoute && Build.VERSION.SDK_INT >= 34) {
+            CensorProductSession selected = productSession;
+            productSession = null;
+            try { if (selected != null) selected.close(); }
+            finally {
+                if (selected != null) ProductCensorQualification.disconnected(selected);
+                if (hardcoreSettingsGuard != null) hardcoreSettingsGuard.clear();
+                hardcoreSettingsGuard = null;
+                if (subliminalOverlay != null) subliminalOverlay.close();
+                subliminalOverlay = null;
+                main.removeCallbacks(settledHardcoreGuardRefresh);
+                hardcoreGuardRefreshQueued.set(false);
+                super.onDestroy();
+            }
+            return;
         }
         if (worker != null) {
             worker.execute(() -> {

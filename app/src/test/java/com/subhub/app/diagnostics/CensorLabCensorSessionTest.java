@@ -6,6 +6,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Test;
 
 public final class CensorLabCensorSessionTest {
+    @Test public void stampsFenceInactiveAbaAndRecordingReplacementWithoutExposingCloseAuthority() {
+        CensorLabCensorSession.Stamp inactive = CensorLabCensorSession.stamp();
+        assertFalse(inactive.active); assertTrue(inactive.isCurrent());
+        CensorLabCensorSession.Stamp first;
+        try (CensorLabCensorSession.Lease ignored = CensorLabCensorSession.acquire()) {
+            first = CensorLabCensorSession.stamp(); assertTrue(first.active); assertTrue(first.isCurrent());
+            assertFalse(inactive.isCurrent());
+        }
+        assertFalse(first.isCurrent()); assertFalse(inactive.isCurrent());
+        try (CensorLabCensorSession.Lease ignored = CensorLabCensorSession.acquire()) {
+            assertFalse(first.isCurrent()); assertNotSame(first, CensorLabCensorSession.stamp());
+        }
+        assertFalse(first.isCurrent()); assertFalse(inactive.isCurrent());
+    }
     @Test public void ownedLifetimeNotifiesStartAndStopWithoutPersisting() {
         AtomicInteger changes = new AtomicInteger();
         try (CensorLabCensorSession.Subscription ignored =
