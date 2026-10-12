@@ -41,6 +41,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public static final long PLATFORM_INTERVAL_MILLIS = 334;
     public static final long VISUAL_PARTITION = 1;
     public static final long NATIVE_TEXT_PARTITION = 2;
+    public static final long IMAGE_TEXT_PARTITION = 3;
     public static final long NATIVE_REFRESH_MILLIS = 120;
     public static final long NATIVE_CONFIRMATION_MILLIS = 48;
     public static final long NATIVE_MAXIMUM_AGE_MILLIS = 1000;
@@ -59,6 +60,10 @@ public final class AccessibilityCensorHost implements AutoCloseable {
 
     public interface CapturerFactory {
         CensorEngine.Capturer<PixelFrame> create(Executor callbackExecutor);
+    }
+
+    public interface ImageTextFactory {
+        ImageTextWorker initialize(Context context, long partition);
     }
 
     private static final class Configuration {
@@ -81,9 +86,11 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private final Handler main;
     private final Observer observer;
     private final WorkerFactory factory;
+    private final ImageTextFactory imageTextFactory;
     private final ExecutorService callbacks = executor("Censor-capture-copy", Process.THREAD_PRIORITY_DISPLAY);
     private final Slot fast = new Slot(SceneEngine.Lane.FAST);
     private final Slot quality = new Slot(SceneEngine.Lane.QUALITY);
+    private final ImageTextSlot imageText = new ImageTextSlot();
     private final CensorEngine<PixelFrame> engine;
     private final NativeTextReader.Provider textProvider;
     private final ScheduledExecutorService nativeReads;
@@ -113,9 +120,16 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public AccessibilityCensorHost(Context context, SceneEngine.Policy scenePolicy,
             CapturerFactory capturer, WorkerFactory factory, Observer observer,
             NativeTextReader.Provider textProvider) {
+        this(context, scenePolicy, capturer, factory, observer, textProvider, ImageTextWorker::initialize);
+    }
+
+    public AccessibilityCensorHost(Context context, SceneEngine.Policy scenePolicy,
+            CapturerFactory capturer, WorkerFactory factory, Observer observer,
+            NativeTextReader.Provider textProvider, ImageTextFactory imageTextFactory) {
         this.context = Objects.requireNonNull(context).getApplicationContext();
         this.main = new Handler(Looper.getMainLooper());
         this.factory = Objects.requireNonNull(factory);
+        this.imageTextFactory = Objects.requireNonNull(imageTextFactory);
         this.observer = Objects.requireNonNull(observer);
         this.textProvider = textProvider;
         nativeReads = textProvider == null ? null : Executors.newSingleThreadScheduledExecutor(action -> new Thread(() -> {
@@ -129,7 +143,8 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         engine = new CensorEngine<>(new CensorEngine.Policy(PLATFORM_INTERVAL_MILLIS, 500, 8, 3, false),
                 scenePolicy, SystemClock::uptimeMillis, timer, capturer.create(callbacks),
                 Arrays.asList(new CensorEngine.LaneWorker<>(fast.lane, fast.executor, fast),
-                        new CensorEngine.LaneWorker<>(quality.lane, quality.executor, quality)),
+                        new CensorEngine.LaneWorker<>(quality.lane, quality.executor, quality),
+                        new CensorEngine.LaneWorker<>(SceneEngine.Lane.TEXT, imageText.executor, imageText)),
                 presentation, new CensorEngine.Observer() {
                     @Override public void trace(CensorEngine.Trace trace) { observer.trace(trace); }
                     @Override public void presentationChanged() { observer.presentationChanged(); }
@@ -168,7 +183,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
             TextSmutConfig text, boolean semanticText, boolean exactText, ProtectionScope protectionScope) {
         onMain();
         if (closed || active) throw new IllegalStateException("host cannot start");
-        if (text != null && text.isEnabled() && textProvider == null) throw new IllegalStateException("native provider unavailable");
+        requireTextSource(detector, text);
         this.protectionScope = Objects.requireNonNull(protectionScope);
         configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
         controls(); active = true; engine.start(token, protectionScope);
@@ -185,7 +200,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         if (configuration != null && configuration.token == token) {
             throw new IllegalArgumentException("scope/config token must change");
         }
-        if (text != null && text.isEnabled() && textProvider == null) throw new IllegalStateException("native provider unavailable");
+        requireTextSource(detector, text);
         configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
         // Fence old jobs before admitting new settings or changing provider concurrency.
         engine.changeScope(token, protectionScope); controls();
@@ -228,8 +243,10 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private void controls() {
         Configuration value = configuration;
         if (value == null || closed) return;
-        engine.nativeTextControls(value.text != null && value.text.isEnabled());
+        engine.nativeTextControls(textProvider != null && value.text != null && value.text.isEnabled());
         EnumSet<SceneEngine.Lane> enabled = EnumSet.noneOf(SceneEngine.Lane.class);
+        if (value.text != null && value.text.isEnabled() && !value.text.getEnabledCategories().isEmpty()
+                && value.detector.getInferenceThreads() >= 4) enabled.add(SceneEngine.Lane.TEXT);
         if (!value.detector.getEnabledCategories().isEmpty()) {
             enabled.add(SceneEngine.Lane.FAST);
             if (value.quality && quality.sessionMatches(value.detector)) enabled.add(SceneEngine.Lane.QUALITY);
@@ -237,6 +254,12 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         boolean parallel = fast.sessionMatches(value.detector) && quality.sessionMatches(value.detector)
                 && "CPU".equals(fast.provider) && "NNAPI".equals(quality.provider);
         engine.executionControls(Math.max(0, value.detector.getDetectionIntervalMs()), parallel, enabled);
+    }
+
+    private void requireTextSource(DetectorConfig detector, TextSmutConfig text) {
+        if (text != null && text.isEnabled() && textProvider == null && detector.getInferenceThreads() < 4) {
+            throw new IllegalStateException("native text provider unavailable for this preset");
+        }
     }
 
     private void readNative(CensorEngine.NativeTextInput input, CensorEngine.NativeTextCompletion completion) {
@@ -378,17 +401,55 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         }
     }
 
+    private final class ImageTextSlot implements CensorEngine.Worker<PixelFrame> {
+        final ExecutorService executor = executor("Censor-image-text", Process.THREAD_PRIORITY_BACKGROUND);
+        private ImageTextWorker worker; // The serial TEXT lane owns SDK use, mapping and close.
+        @Override public void start(CensorEngine.Input<PixelFrame> input, CensorEngine.Completion completion) {
+            Configuration value = configuration;
+            if (closed || input.cancelled() || value == null || value.token != input.source.geometry
+                    || value.text == null || !value.text.isEnabled() || engine.imageTextSuppressed()) {
+                completion.cancelled(); return;
+            }
+            try {
+                if (worker == null) {
+                    long began = SystemClock.uptimeMillis();
+                    worker = Objects.requireNonNull(imageTextFactory.initialize(context, IMAGE_TEXT_PARTITION));
+                    long initializationMillis = Math.max(0, SystemClock.uptimeMillis() - began);
+                    post(() -> {
+                        if (!closed && configuration == value) observer.providerReady(SceneEngine.Lane.TEXT, "MLKit", initializationMillis);
+                    });
+                }
+                worker.configure(value.text, value.semanticText);
+                if (input.cancelled() || configuration != value || engine.imageTextSuppressed()) {
+                    completion.cancelled(); return;
+                }
+                worker.start(input, completion);
+            } catch (RuntimeException | Error failure) {
+                if (input.cancelled()) completion.cancelled(); else completion.failure();
+            }
+        }
+        void dispose(Runnable finished) {
+            executor.execute(() -> {
+                try { if (worker != null) worker.close(); }
+                catch (RuntimeException | Error failure) { disposalFailed.set(true); }
+                finally { worker = null; finished.run(); }
+            });
+            executor.shutdown();
+        }
+    }
+
     private void disposeAfterDrain() {
         if (!disposing.compareAndSet(false, true)) return;
         callbacks.shutdown();
         if (nativeReads != null) { nativeReads.shutdown(); textReader = null; textReaderConfiguration = null; }
-        AtomicInteger remaining = new AtomicInteger(2);
+        AtomicInteger remaining = new AtomicInteger(3);
         Runnable done = () -> { if (remaining.decrementAndGet() == 0) post(this::awaitExecutorTermination); };
-        fast.dispose(done); quality.dispose(done);
+        fast.dispose(done); quality.dispose(done); imageText.dispose(done);
     }
 
     private void awaitExecutorTermination() {
         if (!callbacks.isTerminated() || !fast.executor.isTerminated() || !quality.executor.isTerminated()
+                || !imageText.executor.isTerminated()
                 || (nativeReads != null && !nativeReads.isTerminated())) {
             main.postDelayed(this::awaitExecutorTermination, 10); return;
         }

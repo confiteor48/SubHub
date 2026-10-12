@@ -22,6 +22,69 @@ public class CensorEngineTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(3, 10, 2);
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    @Test public void independentImageOcrBDoesNotStealBlockedFastCanvasA() {
+        Harness h = new Harness(false, true, false, 8, 2, 16);
+        h.start(); h.fire(0); Pixel a = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.textExecutor.runOne();
+        h.text.succeed(0); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); Pixel b = h.deliver(1, 2);
+        h.fastExecutor.runOne(); h.textExecutor.runOne();
+        SceneEngine.Observation ocr = new SceneEngine.Observation("TEXT", 3, 88,
+                new SceneEngine.Region(100, 1000, 500, 1100), .9f);
+        h.text.calls.get(1).completion.success(SceneEngine.Batch.imageText(
+                h.text.calls.get(1).input.source, 3, Collections.singletonList(ocr)), TIMING); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals("OCR cannot advance the visual canvas without correspondence", 1,
+                    view.snapshot.destination.sequence);
+            List<SceneEngine.Mask> values = masks(view.snapshot);
+            assertEquals(2, values.size());
+            SceneEngine.Mask face = values.stream().filter(m -> m.category.equals("FACE")).findFirst().get();
+            SceneEngine.Mask text = values.stream().filter(m -> m.category.equals("TEXT")).findFirst().get();
+            assertEquals(500, face.displayRegion.top, 0); assertEquals(1, face.geometrySource.sequence);
+            assertEquals(1000, text.displayRegion.top, 0); assertEquals(2, text.geometrySource.sequence);
+            assertSame(a, view.sourcePixels(1)); assertSame(b, view.sourcePixels(2));
+            assertFalse(face.estimatedMotion); assertFalse(text.estimatedMotion);
+        } finally { h.engine.close(); h.fast.calls.get(1).completion.cancelled(); }
+        assertEquals(1, a.closes); assertEquals(1, b.closes); assertEquals(1, h.drained);
+    }
+
+    @Test public void firstFastAReclaimsItsCanvasAfterEarlierTextBWithoutErasingBText() {
+        Harness h = new Harness(false, true, false, 8, 2, 16);
+        h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne(); h.textExecutor.runOne();
+        h.text.calls.get(0).completion.failure();
+        h.fire(334); h.deliver(1, 2); h.textExecutor.runOne();
+        WorkCall call = h.text.calls.get(1);
+        call.completion.success(SceneEngine.Batch.imageText(call.input.source, 3, Collections.singletonList(
+                new SceneEngine.Observation("TEXT", 3, 1, new SceneEngine.Region(100, 1000, 500, 1100), .9f))), TIMING);
+        h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertEquals(2, view.snapshot.destination.sequence); }
+        h.fast.succeed(0, face(500)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(1, view.snapshot.destination.sequence); assertEquals(2, masks(view.snapshot).size());
+        }
+        h.engine.close(); h.fastExecutor.runAll(); assertEquals(1, h.drained);
+    }
+
+    @Test public void failedOcrKeepsTheLastCompleteSetButSuccessfulEmptyClearsOnlyOcr() {
+        Harness h = new Harness(false, true, false, 8, 2, 16);
+        h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne(); h.textExecutor.runOne();
+        h.fast.succeed(0, face(500));
+        WorkCall a = h.text.calls.get(0);
+        a.completion.success(SceneEngine.Batch.imageText(a.input.source, 3, Collections.singletonList(
+                new SceneEngine.Observation("TEXT", 3, 1, new SceneEngine.Region(100, 1000, 500, 1100), .9f))), TIMING); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne(); h.textExecutor.runOne();
+        h.text.calls.get(1).completion.failure(); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertEquals(2, masks(view.snapshot).size()); }
+        h.fire(668); h.deliver(2, 3); h.textExecutor.runOne();
+        WorkCall c = h.text.calls.get(2);
+        c.completion.success(SceneEngine.Batch.imageText(c.input.source, 3, Collections.emptyList()), TIMING);
+        h.fast.succeed(1, face(500)); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(1, masks(view.snapshot).size()); assertEquals("FACE", masks(view.snapshot).get(0).category);
+        }
+        h.engine.close(); h.fastExecutor.runAll(); assertEquals(1, h.drained);
+    }
+
     private static ImagePresentationEstimate imageHint(Harness h, long from, long to, double dy) {
         return new ImagePresentationEstimate(h.engine.currentEpoch(), from, to, 1, 1,
                 Collections.singletonList(new ImagePresentationEstimate.Piece(
@@ -35,10 +98,13 @@ public class CensorEngineTest {
         h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne(); h.textExecutor.runOne();
         h.text.succeed(1, text(1000)); h.ui.runAll();
         try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
-            // This is legitimate image-B TEXT behavior, but an unsafe alias for an unrelated tree.
-            assertEquals(2, view.snapshot.destination.sequence);
-            assertEquals(1, masks(view.snapshot).size());
-            assertEquals("TEXT", masks(view.snapshot).get(0).category);
+            // IMAGE/TEXT now has its own basis, but remains unsafe as a native-tree alias.
+            assertEquals(1, view.snapshot.destination.sequence);
+            assertEquals(2, masks(view.snapshot).size());
+            SceneEngine.Mask imageText = masks(view.snapshot).stream()
+                    .filter(m -> m.category.equals("TEXT")).findFirst().get();
+            assertEquals(SceneEngine.SourceKind.IMAGE, imageText.evidenceSource.kind);
+            assertEquals(2, imageText.geometrySource.sequence);
         } finally { h.engine.close(); h.fast.calls.get(1).completion.cancelled(); }
     }
 

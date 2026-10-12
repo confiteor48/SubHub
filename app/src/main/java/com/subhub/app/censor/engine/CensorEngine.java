@@ -480,6 +480,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     private long retryNotBefore;
     private long destination;
     private SceneEngine.Source destinationSource;
+    private SceneEngine.Lane canvasLane;
     /** Actual successful image acquisition, independent of FAST/QUALITY/TEXT completion. */
     private SceneEngine.Source latestImageSource;
     private SceneEngine.Source nativeBasis;
@@ -651,6 +652,11 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     public synchronized boolean nativeTextInFlight() { return nativeJob != null; }
+
+    /** A failed read is not an empty read; only current accepted finite native coverage suppresses OCR. */
+    public synchronized boolean imageTextSuppressed() {
+        return nativeEnabled && scene.hasNativeTextCoverage(nativeText.partition, clock.getAsLong());
+    }
 
     /**
      * Change execution controls without replacing platform/callback ownership. Disabling a lane
@@ -864,6 +870,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         basisAdmissionDrops = 0;
         destination = 0;
         destinationSource = null;
+        canvasLane = null;
         latestImageSource = null;
         nativeBasis = null;
         displayWidth = 0; displayHeight = 0;
@@ -1002,11 +1009,14 @@ public final class CensorEngine<P> implements AutoCloseable {
                                 nativeText.maximumAgeMillis, job.input.identity, job.queuedAt, job.startedAt);
                         if (scene.admitNativeFrame(frame)) {
                             if (nativeBasis != null) scene.unpin(nativeBasis);
-                            nativeBasis = source; displayWidth = read.width; displayHeight = read.height;
+                            nativeBasis = source;
+                            if (!frame.read.candidates.isEmpty()) scene.clearImageText();
+                            displayWidth = read.width; displayHeight = read.height;
                             if (destinationSource == null || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT) {
                                 if (destinationSource != null) scene.unpin(destinationSource);
                                 if (!scene.pin(source)) throw new IllegalStateException("native canvas source lost");
                                 destinationSource = source; destination = source.sequence;
+                                canvasLane = null;
                             }
                             queuePresentation(actions);
                             actions.add(() -> observer.nativeTextAccepted(frame));
@@ -1271,14 +1281,18 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (batch != null && !job.cancellation && active && !closed && job.frame.source.epoch == epoch
                     && enabledLanes.contains(job.lane.specification.lane)
                     && batch.source == job.frame.source && batch.lane == job.lane.specification.lane
-                    && scene.observe(batch)) {
+                    && observeWithTextBases(batch)) {
                 if (batch.lane == SceneEngine.Lane.FAST) firstFastCompleted = true;
-                if (destination == 0 || batch.lane != SceneEngine.Lane.QUALITY) {
-                    if (batch.source.sequence > destination || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT) {
+                if (destination == 0 || batch.lane == SceneEngine.Lane.FAST
+                        || (batch.lane == SceneEngine.Lane.TEXT && !enabledLanes.contains(SceneEngine.Lane.FAST))) {
+                    if (destination == 0 || batch.source.sequence > destination
+                            || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT
+                            || (batch.lane == SceneEngine.Lane.FAST && canvasLane != SceneEngine.Lane.FAST)) {
                         if (destinationSource != null) scene.unpin(destinationSource);
                         if (!scene.pin(batch.source)) throw new IllegalStateException("destination source lost");
                         destinationSource = batch.source;
                         destination = batch.source.sequence;
+                        canvasLane = batch.lane;
                     }
                 }
                 queuePresentation(actions);
@@ -1290,6 +1304,40 @@ public final class CensorEngine<P> implements AutoCloseable {
             checkDrained(actions);
         }
         run(actions);
+    }
+
+    /** The existing bounded basis map owns OCR metadata; no separate scene or pixel cache. */
+    private boolean observeWithTextBases(SceneEngine.Batch batch) {
+        if (batch.lane != SceneEngine.Lane.TEXT) return scene.observe(batch);
+        if (batch.replacementTextPartition != null && imageTextSuppressed()) return false;
+        Set<Long> partitions = new java.util.HashSet<>();
+        for (SceneEngine.Observation observation : batch.observations) partitions.add(observation.partition);
+        if (batch.replacementTextPartition != null) partitions.add(batch.replacementTextPartition);
+        Map<Long, SceneEngine.Source> changed = new HashMap<>();
+        Set<Long> sources = new java.util.HashSet<>();
+        for (Map.Entry<Long, SceneEngine.Source> entry : renderBases.entrySet()) {
+            if (!partitions.contains(entry.getKey()) || entry.getValue().sequence >= batch.source.sequence) {
+                sources.add(entry.getValue().sequence);
+            }
+        }
+        for (Long partition : partitions) {
+            SceneEngine.Source previous = renderBases.get(partition);
+            if (previous == null || previous.sequence < batch.source.sequence) changed.put(partition, batch.source);
+        }
+        if (!changed.isEmpty()) sources.add(batch.source.sequence);
+        if ((long) renderBases.size() + changed.keySet().stream().filter(p -> !renderBases.containsKey(p)).count() > maximumRenderBases
+                || sources.size() > maximumBasisSources) { basisAdmissionDrops++; return false; }
+        List<SceneEngine.Source> pinned = new ArrayList<>();
+        for (SceneEngine.Source value : changed.values()) {
+            if (!scene.pin(value)) { for (SceneEngine.Source held : pinned) scene.unpin(held); return false; }
+            pinned.add(value);
+        }
+        if (!scene.observe(batch)) { for (SceneEngine.Source held : pinned) scene.unpin(held); return false; }
+        for (Map.Entry<Long, SceneEngine.Source> entry : changed.entrySet()) {
+            SceneEngine.Source previous = renderBases.put(entry.getKey(), entry.getValue());
+            if (previous != null) scene.unpin(previous);
+        }
+        return true;
     }
 
     private void queuePresentation(List<Runnable> actions) {

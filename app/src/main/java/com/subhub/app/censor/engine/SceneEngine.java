@@ -277,15 +277,36 @@ public final class SceneEngine {
         public final Lane lane;
         public final List<Observation> observations;
         public final List<Inspection> inspections;
+        /** Complete latest OCR set for this partition, not quality-negative image evidence. */
+        public final Long replacementTextPartition;
 
         public Batch(Source source, Lane lane, List<Observation> observations, List<Inspection> inspections) {
+            this(source, lane, observations, inspections, null);
+        }
+
+        private Batch(Source source, Lane lane, List<Observation> observations,
+                List<Inspection> inspections, Long replacementTextPartition) {
             this.source = Objects.requireNonNull(source);
             this.lane = Objects.requireNonNull(lane);
             this.observations = immutable(observations);
             this.inspections = immutable(inspections);
+            this.replacementTextPartition = replacementTextPartition;
             if (lane != Lane.QUALITY && !inspections.isEmpty()) {
                 throw new IllegalArgumentException("only quality can contradict");
             }
+            if (replacementTextPartition != null) {
+                if (lane != Lane.TEXT || source.kind != SourceKind.IMAGE) throw new IllegalArgumentException("image OCR source");
+                Region bounds = new Region(0, 0, source.width, source.height);
+                for (Observation observation : this.observations) {
+                    if (observation.partition != replacementTextPartition || observation.textGroup == 0
+                            || !bounds.contains(observation.region)) throw new IllegalArgumentException("image OCR geometry");
+                }
+            }
+        }
+
+        /** A failed, cancelled or truncated read must never use this complete-set factory. */
+        public static Batch imageText(Source source, long partition, List<Observation> observations) {
+            return new Batch(source, Lane.TEXT, observations, Collections.emptyList(), partition);
         }
     }
 
@@ -522,6 +543,7 @@ public final class SceneEngine {
     private final Map<Long, NativeTextFrame> nativeFrames = new HashMap<>();
     private final List<Track> tracks = new ArrayList<>();
     private final List<Batch> qualityHistory = new ArrayList<>();
+    private final Map<Long, Long> imageTextVersions = new HashMap<>();
     private final Set<String> delivered = new HashSet<>();
     private long epoch;
     private long highestSource;
@@ -551,6 +573,7 @@ public final class SceneEngine {
         nativeFrames.clear();
         tracks.clear();
         qualityHistory.clear();
+        imageTextVersions.clear();
         delivered.clear();
         ready = null;
         motionConflict = false;
@@ -867,8 +890,30 @@ public final class SceneEngine {
             capacityDrops++;
             return false;
         }
+        if (batch.replacementTextPartition != null) {
+            long partition = batch.replacementTextPartition;
+            Long previous = imageTextVersions.get(partition);
+            int otherTracks = 0;
+            for (Track track : tracks) {
+                if (track.nativeCandidate != null || track.latestLane != Lane.TEXT || track.partition != partition) otherTracks++;
+            }
+            if ((previous != null && previous >= source.sequence)
+                    || (previous == null && imageTextVersions.size() >= policy.maximumTracks)
+                    || (long) otherTracks + batch.observations.size() > policy.maximumTracks) {
+                capacityDrops++;
+                return false;
+            }
+        }
         String delivery = batch.source.sequence + ":" + batch.lane;
         if (!delivered.add(delivery)) return false;
+        if (batch.replacementTextPartition != null) {
+            long partition = batch.replacementTextPartition;
+            // Supersede the old OCR presentation atomically. This does not prove absence of an
+            // old subject, authorize a motion edge, or contradict visual/native evidence.
+            tracks.removeIf(track -> track.nativeCandidate == null && track.latestLane == Lane.TEXT
+                    && track.partition == partition);
+            imageTextVersions.put(partition, source.sequence);
+        }
         Set<Long> matched = new HashSet<>();
         for (int index = 0; index < batch.observations.size(); index++) {
             Observation observation = batch.observations.get(index);
@@ -913,6 +958,19 @@ public final class SceneEngine {
         pruneDistinctRelations();
         revision++;
         return true;
+    }
+
+    /** Native fallback preference supersedes OCR display sets, not visual or native evidence. */
+    public synchronized void clearImageText() {
+        boolean changed = tracks.removeIf(track -> track.nativeCandidate == null && track.latestLane == Lane.TEXT
+                && imageTextVersions.containsKey(track.partition));
+        if (changed) { pruneDistinctRelations(); revision++; }
+    }
+
+    /** Consult the admitted whole set, including capacity retirement, not a runtime's old receipt. */
+    public synchronized boolean hasNativeTextCoverage(long partition, long nowMillis) {
+        NativeTextFrame frame = nativeFrames.get(partition);
+        return frame != null && !frame.read.candidates.isEmpty() && nowMillis <= frame.validUntilMillis;
     }
 
     /** Successful atomic admission owns one metadata pin, released by the runtime's native basis. */

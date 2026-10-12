@@ -150,7 +150,9 @@ public final class PreparedCensorPaint implements AutoCloseable {
         return appearance.isReverseMode() && (type == CensorAppearance.Type.BOX || type == CensorAppearance.Type.CUSTOM)
                 ? CensorAppearance.Type.PIXELATE : type;
     }
-    static boolean isText(SceneEngine.Mask mask) { return mask.nativeValidated || "TEXT_SMUT".equalsIgnoreCase(mask.category); }
+    static boolean isText(SceneEngine.Mask mask) {
+        return mask.nativeValidated || mask.textGroup != 0 || "TEXT_SMUT".equalsIgnoreCase(mask.category);
+    }
     static boolean same(SceneEngine.Region a, SceneEngine.Region b) {
         return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
     }

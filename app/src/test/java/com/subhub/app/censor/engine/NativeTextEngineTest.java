@@ -10,6 +10,31 @@ import java.util.concurrent.Executor;
 import org.junit.Test;
 
 public class NativeTextEngineTest {
+    @Test public void onlyFiniteAcceptedNativeCoverageSuppressesImageOcrFallback() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); assertFalse(h.engine.imageTextSuppressed());
+        h.finishNative(0, 10, 20, 1000); assertTrue(h.engine.imageTextSuppressed());
+        h.engine.requestNativeTextAt(20, false); h.fire(140); h.nativeExecutor.runAll(); h.nativeCompletions.get(1).failure();
+        assertTrue("Failed provider read is not a complete empty replacement", h.engine.imageTextSuppressed());
+        h.now = 1010; assertTrue(h.engine.imageTextSuppressed()); h.now = 1011; assertFalse(h.engine.imageTextSuppressed());
+        h.engine.changeScope(43); assertFalse(h.engine.imageTextSuppressed()); h.close();
+    }
+
+    @Test public void retiredNativeSetCannotKeepOcrSuppressedThroughItsOldReceiptDeadline() {
+        Harness h = new Harness(16, 2, 3); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        h.finishNative(0, 10, 20, 900, 1100); assertTrue(h.engine.imageTextSuppressed());
+        h.deliverImage(0, 30, 1000, 2400); h.imageExecutor.runAll();
+        CensorEngine.Input<Pixel> input = h.images.get(0);
+        h.now = 40; h.imageCompletions.get(0).success(new SceneEngine.Batch(input.source, SceneEngine.Lane.FAST,
+                java.util.Arrays.asList(new SceneEngine.Observation("FACE", 1, 0, region(500), .9f),
+                        new SceneEngine.Observation("FACE", 1, 0, region(700), .9f)), Collections.emptyList()),
+                new CensorEngine.WorkTiming(1, 2, 1)); h.ui.runAll();
+        assertFalse("Scene retired its complete native set; old receipt cannot suppress fallback", h.engine.imageTextSuppressed());
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(2, masks(view).size()); for (SceneEngine.Mask mask : masks(view)) assertFalse(mask.nativeValidated);
+        }
+        h.close(); assertEquals(1, h.drained);
+    }
     private static final String CONTENT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String NODE = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     private static SceneEngine.Region region(double y) { return new SceneEngine.Region(100, y, 200, y + 30); }
@@ -277,8 +302,11 @@ public class NativeTextEngineTest {
         Harness() { this(16); }
         Harness(int sources) { this(sources, 2); }
         Harness(int sources, long nativePartition) {
+            this(sources, nativePartition, 100);
+        }
+        Harness(int sources, long nativePartition, int maximumTracks) {
             engine = new CensorEngine<>(new CensorEngine.Policy(334, 0, 8, 2, false),
-                    new SceneEngine.Policy(sources, 100, 64, 256, 5000, 20000, .5), () -> now,
+                    new SceneEngine.Policy(sources, maximumTracks, 64, 256, 5000, 20000, .5), () -> now,
                     (action, delay) -> { Timed task = new Timed(now + delay, action); timers.add(task); return () -> task.cancelled = true; },
                     (request, callback) -> { assertTrue(request.tryDispatch()); captures.add(new Capture(request, callback)); },
                     Collections.singletonList(new CensorEngine.LaneWorker<>(SceneEngine.Lane.FAST, imageExecutor,

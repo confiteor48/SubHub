@@ -78,10 +78,12 @@ public final class NativeTextHostAndroidTest {
         assertEquals("porn ap".hashCode(), "porn c2".hashCode());
         try (Harness h = new Harness()) {
             h.scenario.onActivity(activity -> activity.content("porn ap", "ordinary safe caption"));
+            awaitLiteralProviderText(h.automation, "porn ap");
             h.start(false); NativeTextFrame first = h.awaitFrame(1);
             long identity;
             try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) { identity = masks(view).get(0).identity; }
             h.scenario.onActivity(activity -> activity.content("porn c2", "ordinary safe caption"));
+            awaitLiteralProviderText(h.automation, "porn c2");
             main(() -> h.host.requestNativeText(true)); NativeTextFrame second = h.awaitFrame(2);
             assertNotEquals(first.read.candidates.get(0).contentKey, second.read.candidates.get(0).contentKey);
             assertEquals(first.read.candidates.get(0).nodeKey, second.read.candidates.get(0).nodeKey);
@@ -195,6 +197,32 @@ public final class NativeTextHostAndroidTest {
                 assertSame(bitmap, view.sourcePixels(view.snapshot.destination.sequence).bitmap);
             }
         }
+    }
+
+    private static void awaitLiteralProviderText(UiAutomation automation, String expected) throws InterruptedException {
+        long deadline = SystemClock.uptimeMillis() + 5000;
+        while (SystemClock.uptimeMillis() < deadline) {
+            AccessibilityNodeInfo root = automation.getRootInActiveWindow();
+            boolean observed = false;
+            if (root != null) {
+                List<AccessibilityNodeInfo> nodes = Collections.emptyList();
+                try {
+                    root.refresh(); nodes = root.findAccessibilityNodeInfosByText(expected);
+                    assertNotNull(nodes); assertTrue("Literal fixture node inventory exceeds bound", nodes.size() <= 64);
+                    for (AccessibilityNodeInfo node : nodes) {
+                        if (node != null && node.refresh() && expected.contentEquals(node.getText() == null ? "" : node.getText())) {
+                            observed = true; break;
+                        }
+                    }
+                } finally {
+                    for (AccessibilityNodeInfo node : nodes) if (node != null && node != root) node.recycle();
+                    root.recycle();
+                }
+            }
+            if (observed) return; // Do not re-evaluate a successful provider-baseline observation.
+            Thread.sleep(10);
+        }
+        fail("Synthetic Accessibility provider has not exposed the requested literal text");
     }
 
     private static final class Call {

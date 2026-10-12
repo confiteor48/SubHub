@@ -16,6 +16,54 @@ import org.junit.Test;
 public class SceneEngineTest {
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    @Test public void completeOcrSetReplacesOnlyItsImagePartitionWithoutMotionOrDuplicateRows() {
+        SceneEngine engine = engine(); register(engine, 3);
+        engine.observe(batch(source(1), FAST, face(500)));
+        engine.observe(SceneEngine.Batch.imageText(source(1), 3, Collections.singletonList(observation("TEXT", 3, 9, 100, 700))));
+        assertTrue(engine.observe(SceneEngine.Batch.imageText(source(2), 3,
+                Collections.singletonList(observation("TEXT", 3, 9, 100, 800)))));
+        positions(engine.snapshot(1, 210, false, Collections.singletonMap(3L, 2L)), 500, 800);
+        assertTrue(engine.observe(SceneEngine.Batch.imageText(source(3), 3, Collections.emptyList())));
+        positions(engine.snapshot(1, 310, false), 500);
+        assertFalse(engine.observe(SceneEngine.Batch.imageText(source(1), 3,
+                Collections.singletonList(observation("TEXT", 3, 9, 100, 700)))));
+        positions(engine.snapshot(1, 310, false), 500);
+    }
+
+    @Test public void completeOcrDoesNotRemoveNativeWithTheSamePartitionAndGroup() {
+        SceneEngine engine = engine(); register(engine, 2);
+        engine.observe(SceneEngine.Batch.imageText(source(1), 3, Collections.singletonList(observation("TEXT", 3, 1, 100, 700))));
+        String digest = String.join("", Collections.nCopies(64, "a"));
+        NativeTextResult read = new NativeTextResult(1000, 2400, 7, 300, 310,
+                Collections.singletonList(new NativeTextResult.Candidate("TEXT", digest, null, .9f, true,
+                        Collections.singletonList(new SceneEngine.Region(100, 900, 200, 1000)))), 1, 1, 1);
+        SceneEngine.Source nativeSource = SceneEngine.Source.nativeText(1, 3, 42, 1000, 2400, 7, 300, 310, 320,
+                ProtectionScope.UNSPECIFIED);
+        assertTrue(engine.admitNativeFrame(new NativeTextFrame(nativeSource, 3, read, 1000)));
+        assertTrue(engine.register(source(4)));
+        assertTrue(engine.observe(SceneEngine.Batch.imageText(source(4), 3, Collections.emptyList())));
+        SceneEngine.Snapshot view = engine.snapshot(1, 410, false);
+        assertEquals(1, masks(view).size()); assertTrue(masks(view).get(0).nativeValidated); positions(view, 900);
+    }
+
+    @Test public void overCapacityCompleteOcrCannotPartiallyReplaceAValidOldSet() {
+        SceneEngine engine = new SceneEngine(1, new SceneEngine.Policy(16, 2, 64, 256, 500, 5000, .5));
+        register(engine, 2); engine.observe(batch(source(1), FAST, face(500)));
+        engine.observe(SceneEngine.Batch.imageText(source(1), 3, Collections.singletonList(observation("TEXT", 3, 1, 100, 700))));
+        assertFalse(engine.observe(SceneEngine.Batch.imageText(source(2), 3, Arrays.asList(
+                observation("TEXT", 3, 1, 100, 800), observation("TEXT", 3, 1, 100, 1000)))));
+        positions(engine.snapshot(1, 210, false), 500, 700);
+    }
+
+    @Test public void completeOcrRejectsMixedOrUnsupportedGeometryBeforeSceneMutation() {
+        assertThrows(IllegalArgumentException.class, () -> SceneEngine.Batch.imageText(source(1), 3,
+                Collections.singletonList(observation("TEXT", 4, 1, 100, 500))));
+        assertThrows(IllegalArgumentException.class, () -> SceneEngine.Batch.imageText(source(1), 3,
+                Collections.singletonList(observation("TEXT", 3, 0, 100, 500))));
+        assertThrows(IllegalArgumentException.class, () -> SceneEngine.Batch.imageText(source(1), 3,
+                Collections.singletonList(observation("TEXT", 3, 1, -500, 500))));
+    }
+
     private static SceneEngine engine() {
         return new SceneEngine(1, new SceneEngine.Policy(16, 100, 64, 256, 500, 5000, .5));
     }
