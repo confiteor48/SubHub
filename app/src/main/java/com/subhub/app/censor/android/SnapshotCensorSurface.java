@@ -144,6 +144,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
     private Pose pending;
     private Completion completed;
     private CensorEngine.ActiveScope lastScope;
+    private CensorEngine.ActiveScope admittedScope; // Immutable pose identity, guarded by gate.
     private final Runnable refresh = () -> { if (!closed) demand(); };
     private final Choreographer.FrameCallback frame = time -> {
         frameQueued = false; if (!closed && !faulted) enqueueObservedPose();
@@ -216,6 +217,14 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
             // Possibly accepted: keep reservation until the actual action returns or close.
         }
     }
+    /** Immediate metadata/tap fence after an off-main scope observation; no View/holder access. */
+    public void scopeInvalidated(CensorEngine.ActiveScope scope) {
+        synchronized (gate) {
+            if (scope == null || !scope.same(admittedScope)) return;
+            generation++; pending = null; admittedScope = null; taps.withdrawDisplayed(this);
+        }
+        presentationChanged();
+    }
     private void demand() {
         onMain(); if (closed || faulted) return;
         // Known rejected completion delivery is pollable, accepted/uncertain delivery is not stolen.
@@ -284,7 +293,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
         synchronized (gate) {
             if (closed || faulted || !surfaceAdmission || epoch != generation) return;
             if (pending != null) replacedPoses++;
-            pending = pose;
+            pending = pose; admittedScope = scope;
             if (!renderingReserved) { renderingReserved = true; launch = true; }
         }
         if (launch) {

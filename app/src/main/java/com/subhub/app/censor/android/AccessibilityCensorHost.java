@@ -29,6 +29,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -87,7 +89,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private final Observer observer;
     private final WorkerFactory factory;
     private final ImageTextFactory imageTextFactory;
-    private final ExecutorService callbacks = executor("Censor-capture-copy", Process.THREAD_PRIORITY_DISPLAY);
+    private final ScheduledThreadPoolExecutor callbacks = captureExecutor();
     private final Slot fast = new Slot(SceneEngine.Lane.FAST);
     private final Slot quality = new Slot(SceneEngine.Lane.QUALITY);
     private final ImageTextSlot imageText = new ImageTextSlot();
@@ -137,8 +139,8 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         }, "Censor-native-text"));
         Executor presentation = this::post;
         CensorEngine.Timer timer = (action, delay) -> {
-            if (!main.postDelayed(action, delay)) throw new RejectedExecutionException("main looper closed");
-            return () -> main.removeCallbacks(action);
+            java.util.concurrent.ScheduledFuture<?> future = callbacks.schedule(action, delay, TimeUnit.MILLISECONDS);
+            return () -> future.cancel(false);
         };
         engine = new CensorEngine<>(new CensorEngine.Policy(PLATFORM_INTERVAL_MILLIS, 500, 8, 3, false),
                 scenePolicy, SystemClock::uptimeMillis, timer, capturer.create(callbacks),
@@ -185,8 +187,11 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         if (closed || active) throw new IllegalStateException("host cannot start");
         requireTextSource(detector, text);
         this.protectionScope = Objects.requireNonNull(protectionScope);
-        configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
-        controls(); active = true; engine.start(token, protectionScope);
+        Configuration selected = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
+        configuration = selected;
+        controls();
+        if (closed || configuration != selected) return;
+        active = true; engine.start(token, protectionScope);
     }
 
     /** Same owner survives reconfiguration and waits for old callbacks/running native jobs. */
@@ -196,14 +201,23 @@ public final class AccessibilityCensorHost implements AutoCloseable {
 
     public void changeScope(long token, DetectorConfig detector, boolean qualityEnabled,
             TextSmutConfig text, boolean semanticText, boolean exactText) {
+        changeScope(token, detector, qualityEnabled, text, semanticText, exactText, protectionScope);
+    }
+
+    /** One owner transition for both geometry/settings and provenance. Nested observer changes win. */
+    public void changeScope(long token, DetectorConfig detector, boolean qualityEnabled,
+            TextSmutConfig text, boolean semanticText, boolean exactText, ProtectionScope scope) {
         onMain(); if (closed) return;
         if (configuration != null && configuration.token == token) {
             throw new IllegalArgumentException("scope/config token must change");
         }
         requireTextSource(detector, text);
-        configuration = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
+        Configuration selected = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
+        protectionScope = Objects.requireNonNull(scope);
+        configuration = selected;
         // Fence old jobs before admitting new settings or changing provider concurrency.
-        engine.changeScope(token, protectionScope); controls();
+        engine.changeScope(token, scope);
+        if (!closed && configuration == selected) controls();
     }
 
     /** Lab/tap provenance changes fence the same geometry, without reinitializing model settings. */
@@ -244,6 +258,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         Configuration value = configuration;
         if (value == null || closed) return;
         engine.nativeTextControls(textProvider != null && value.text != null && value.text.isEnabled());
+        if (closed || configuration != value) return;
         EnumSet<SceneEngine.Lane> enabled = EnumSet.noneOf(SceneEngine.Lane.class);
         if (value.text != null && value.text.isEnabled() && !value.text.getEnabledCategories().isEmpty()
                 && value.detector.getInferenceThreads() >= 4) enabled.add(SceneEngine.Lane.TEXT);
@@ -466,5 +481,13 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         return Executors.newSingleThreadExecutor(action -> new Thread(() -> {
             Process.setThreadPriority(priority); action.run();
         }, name));
+    }
+    private static ScheduledThreadPoolExecutor captureExecutor() {
+        ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1, action -> new Thread(() -> {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY); action.run();
+        }, "Censor-capture-copy"));
+        executor.setRemoveOnCancelPolicy(true);
+        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        return executor;
     }
 }

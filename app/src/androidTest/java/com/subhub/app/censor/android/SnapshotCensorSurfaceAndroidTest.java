@@ -96,6 +96,37 @@ public class SnapshotCensorSurfaceAndroidTest {
         assertEquals(2, reads.get());
     }
 
+    @Test public void offMainScopeInvalidationWithdrawsNormalMapBeforeAnyMainWithdrawalCallback() throws Exception {
+        CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
+        try (Fixture f = new Fixture()) {
+            f.image(CensorAppearance.Type.BOX, false); assertTrue(f.hit(70, 70));
+            CensorEngine.ActiveScope scope = f.h.engine.activeScope();
+            assertTrue(new Handler(Looper.getMainLooper()).post(() -> {
+                held.countDown();
+                try { assertTrue(release.await(5, TimeUnit.SECONDS)); }
+                catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new AssertionError(failure); }
+            }));
+            try {
+                assertTrue(held.await(5, TimeUnit.SECONDS));
+                f.surface.scopeInvalidated(scope);
+                assertFalse(f.taps.matchesPoint(f.origin[0] + 70, f.origin[1] + 70, f.h.width, f.h.height, SystemClock.uptimeMillis()));
+                assertEquals(1, release.getCount());
+            } finally { release.countDown(); }
+        } finally { release.countDown(); }
+    }
+
+    @Test public void staleOffMainInvalidationCannotWithdrawANewerNormalScopeMap() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.image(CensorAppearance.Type.BOX, false); CensorEngine.ActiveScope old = f.h.engine.activeScope();
+            main(() -> { f.taps.clear(); f.h.engine.changeScope(43, ProtectionScope.normal(f.taps.scope()));
+                f.h.image(335, f.origin, Color.BLUE); f.surface.presentationChanged(); });
+            await(() -> f.lastAccepted().acceptedPaint.scope.geometry == 43);
+            f.composed("new-scope-before-stale-invalidation", 70, 70, Color.GREEN);
+            assertTrue(f.hit(70, 70));
+            f.surface.scopeInvalidated(old); assertTrue(f.hit(70, 70));
+        }
+    }
+
     @Test public void actualHolderPixelsComposeAtObservedOriginWithTransparentGapsAndPostClocks() throws Exception {
         try (Fixture f = new Fixture()) {
             f.image(CensorAppearance.Type.PIXELATE, false); f.prepared();
