@@ -29,6 +29,15 @@ final class ProductCensorSettings implements SharedPreferences {
     }
     static boolean relevant(String key) { return EXTRA.contains(key) || ExportSettings.allowed(key); }
     boolean same(ProductCensorSettings other) { return other != null && values.equals(other.values); }
+    /** Appearance changes do not mint a new counting identity or revoke pending source evidence. */
+    boolean sameParticipation(ProductCensorSettings other) {
+        return other != null && included().equals(other.included())
+                && getBoolean(AppModeManager.KEY_ARMED, false) == other.getBoolean(AppModeManager.KEY_ARMED, false)
+                && getBoolean(FeatureModuleManager.KEY_CENSOR_ENABLED, true)
+                    == other.getBoolean(FeatureModuleManager.KEY_CENSOR_ENABLED, true)
+                && Objects.equals(getString(SettingsRepository.KEY_CAPTURE_METHOD, null),
+                    other.getString(SettingsRepository.KEY_CAPTURE_METHOD, null));
+    }
     Set<String> included() {
         Set<String> selected = getStringSet(AppModeManager.KEY_INCLUDED_PACKAGES, Collections.emptySet());
         return com.subhub.app.appmode.AppModePolicy.sanitizePackages(getBoolean(AppModeManager.KEY_ALL_APPS, false)

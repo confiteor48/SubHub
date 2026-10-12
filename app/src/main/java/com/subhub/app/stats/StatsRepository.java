@@ -2,8 +2,11 @@ package com.subhub.app.stats;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Looper;
 
 import com.subhub.app.detection.TrackedObject;
+import com.subhub.app.censor.engine.CensorEngine;
+import com.subhub.app.censor.engine.SceneEngine;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -14,6 +17,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /** Process-safe local counters compatible with the recovered statistics preference store. */
 public final class StatsRepository {
@@ -69,6 +73,30 @@ public final class StatsRepository {
                     "anus_covered", "belly_covered", "feet_covered", "armpits_covered")));
     private static long sessionStartMs;
     private static int sessionBlocks;
+    private static volatile SessionStamp activeStamp;
+
+    /** Reporting time is deliberately not this process-local session's ABA authority. */
+    public static final class SessionStamp {
+        private SessionStamp() { }
+        public boolean isCurrent() { return activeStamp == this; }
+    }
+
+    /** Nonblocking authority recheck for product main; restoration happens on its lookup worker. */
+    public static SessionStamp currentSessionStamp() { return activeStamp; }
+
+    public enum EvidenceStatus { COMMITTED, NO_NEW_EVIDENCE, REJECTED, UNACKNOWLEDGED }
+    public static final class EvidenceRecord {
+        public final EvidenceStatus status;
+        public final int count;
+        public final StatsSnapshot snapshot;
+        private EvidenceRecord(EvidenceStatus status, int count, StatsSnapshot snapshot) {
+            this.status = status; this.count = count; this.snapshot = snapshot;
+        }
+    }
+
+    public SessionStamp sessionStamp() {
+        synchronized (SESSION_LOCK) { restoreActiveSession(); return sessionStartMs == 0 ? null : activeStamp; }
+    }
 
     private final SharedPreferences preferences;
     private final Context app;
@@ -85,6 +113,7 @@ public final class StatsRepository {
             if (sessionStartMs != 0) return;
             sessionStartMs = System.currentTimeMillis();
             sessionBlocks = 0;
+            activeStamp = new SessionStamp();
             SEEN_TRACK_IDS.clear();
             writeDaily(preferences.edit()
                     .putLong(KEY_ACTIVE_SESSION_START, sessionStartMs)
@@ -146,6 +175,53 @@ public final class StatsRepository {
         }
     }
 
+    /**
+     * Off-main, acknowledged counter write. The supplier may only claim source evidence, never
+     * invoke wallet/UI/observers under SESSION_LOCK. Downstream work starts after this returns.
+     * An unacknowledged commit consumed the claim and must not be replayed speculatively.
+     */
+    public EvidenceRecord recordEvidence(SessionStamp expected, Supplier<CensorEngine.EvidenceClaim> claimSource,
+            Set<String> enabledCategories) {
+        if (Looper.myLooper() == Looper.getMainLooper()) throw new IllegalStateException("Evidence commit must be off main");
+        synchronized (SESSION_LOCK) {
+            restoreActiveSession();
+            if (expected == null || activeStamp != expected || sessionStartMs == 0
+                    || preferences.getLong(KEY_ACTIVE_SESSION_START, 0) != sessionStartMs) {
+                return new EvidenceRecord(EvidenceStatus.REJECTED, 0, null);
+            }
+            CensorEngine.EvidenceClaim claim = claimSource.get();
+            if (claim == null) return new EvidenceRecord(EvidenceStatus.REJECTED, 0, null);
+            List<SceneEngine.AcceptedSubject> delivered = claim.takeFor(expected);
+            if (delivered == null) return new EvidenceRecord(EvidenceStatus.REJECTED, 0, null);
+            int count = delivered.size();
+            if (count == 0) return new EvidenceRecord(EvidenceStatus.NO_NEW_EVIDENCE, 0, null);
+            int nextBlocks = Math.addExact(sessionBlocks, count);
+            long total = Math.addExact(preferences.getLong(KEY_TOTAL_BLOCKS, 0), count);
+            SharedPreferences.Editor edit = preferences.edit()
+                    .putInt(KEY_ACTIVE_SESSION_BLOCKS, nextBlocks).putLong(KEY_TOTAL_BLOCKS, total);
+            if (nextBlocks > preferences.getInt(KEY_PEAK_SESSION_BLOCKS, 0)) edit.putInt(KEY_PEAK_SESSION_BLOCKS, nextBlocks);
+            Set<String> dates = mutableSet(KEY_ACTIVE_DATES);
+            if (dates.add(today())) edit.putStringSet(KEY_ACTIVE_DATES, dates);
+            if (enabledCategories != null && enabledCategories.containsAll(ALL_CATEGORIES)) {
+                edit.putLong(KEY_ALL_CATEGORIES_CENSORS,
+                        Math.addExact(preferences.getLong(KEY_ALL_CATEGORIES_CENSORS, 0), count));
+            }
+            edit.putLong(DailyStatsStore.STAMP, System.currentTimeMillis())
+                    .putString(DailyStatsStore.ZONE, java.time.ZoneId.systemDefault().getId());
+            boolean acknowledged;
+            try { acknowledged = edit.commit(); }
+            finally {
+                // Android may publish the preference memory before a false/uncertain disk result.
+                // Keep the process counter/history coherent with that observed memory, not a
+                // fabricated rollback or durability acknowledgement. The claim remains consumed.
+                sessionBlocks = Math.max(0, preferences.getInt(KEY_ACTIVE_SESSION_BLOCKS, 0));
+            }
+            if (!acknowledged) return new EvidenceRecord(EvidenceStatus.UNACKNOWLEDGED, 0, null);
+            syncDaily();
+            return new EvidenceRecord(EvidenceStatus.COMMITTED, count, load());
+        }
+    }
+
     public void endSession() {
         synchronized (SESSION_LOCK) {
             restoreActiveSession();
@@ -181,6 +257,7 @@ public final class StatsRepository {
                     .remove(KEY_ACTIVE_SESSION_POPUP_IMPRESSIONS).apply();
             sessionStartMs = 0;
             sessionBlocks = 0;
+            activeStamp = null;
             SEEN_TRACK_IDS.clear();
             DailyDurationRecorder.changed();
         }
@@ -244,6 +321,7 @@ public final class StatsRepository {
         }
         sessionStartMs = stored;
         sessionBlocks = Math.max(0, preferences.getInt(KEY_ACTIVE_SESSION_BLOCKS, 0));
+        activeStamp = new SessionStamp();
     }
 
     public List<SessionEntry> getSessionHistory() {
@@ -420,6 +498,31 @@ public final class StatsRepository {
                     .putLong(totalKey, safeAdd(preferences.getLong(totalKey, 0L), amount))
                     .putLong(activeKey, safeAdd(activeLong(activeKey), amount))
                     );
+        }
+    }
+
+    /**
+     * A committed source ledger event always contributes to lifetime totals, but never to a
+     * different newly armed session. No historical session is guessed from a wall-clock timestamp.
+     */
+    public void recordSourceTribute(SessionStamp expected, int amountCents, String currency) {
+        if (Looper.myLooper() == Looper.getMainLooper()) throw new IllegalStateException("Source tribute commit must be off main");
+        if (expected == null || amountCents <= 0) return;
+        synchronized (SESSION_LOCK) {
+            restoreActiveSession();
+            String totalKey = currencyKey(KEY_TRIBUTE_CENTS, currency);
+            SharedPreferences.Editor edit = preferences.edit()
+                    .putLong(KEY_TRIBUTE_EVENTS, safeAdd(preferences.getLong(KEY_TRIBUTE_EVENTS, 0), 1))
+                    .putLong(totalKey, safeAdd(preferences.getLong(totalKey, 0), amountCents));
+            if (activeStamp == expected && sessionStartMs != 0) {
+                String sessionKey = currencyKey(KEY_ACTIVE_SESSION_TRIBUTE_CENTS, currency);
+                edit.putLong(KEY_ACTIVE_SESSION_TRIBUTE_EVENTS, safeAdd(activeLong(KEY_ACTIVE_SESSION_TRIBUTE_EVENTS), 1))
+                        .putLong(sessionKey, safeAdd(activeLong(sessionKey), amountCents));
+            }
+            edit.putLong(DailyStatsStore.STAMP, System.currentTimeMillis())
+                    .putString(DailyStatsStore.ZONE, java.time.ZoneId.systemDefault().getId());
+            if (!edit.commit()) throw new IllegalStateException("Source tribute store unacknowledged");
+            syncDaily();
         }
     }
 

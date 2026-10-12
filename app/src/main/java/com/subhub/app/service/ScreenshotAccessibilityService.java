@@ -537,6 +537,12 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                 DiagnosticsRepository.fail(DIAGNOSTICS_MODE, new IllegalStateException("Replacement " + lane + " model unavailable"));
             }
             @Override public void sessionFailure(Throwable failure) { DiagnosticsRepository.fail(DIAGNOSTICS_MODE, failure); }
+            @Override public void accounting(CensorProductSession.AccountingResult result) {
+                if (result.status == CensorProductSession.AccountingStatus.UNACKNOWLEDGED
+                        || result.status == CensorProductSession.AccountingStatus.UNCERTAIN) {
+                    Log.w(TAG, "Replacement accounting quarantined phase=" + result.phase.name());
+                }
+            }
         });
         labCensorSubscription = CensorLabCensorSession.observe(() -> main.post(() -> {
             if (!running || productSession == null) return;

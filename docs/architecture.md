@@ -64,9 +64,31 @@ naming a removed alias is rejected, not resolved through historical aliases. Thi
 evidence consumption, not a statistics/payment transaction or proof that two prior identities
 were one physical subject. A failed downstream write must not trigger speculative recharging.
 
-The persistent product bridge is not connected yet. Before using claims for Stats, Money Rules,
-or achievements, it must validate captured/current Lab lineage, current product settings/window
-and the active statistics-session identity. Dwell and popup hints additionally need a separate
+The privately qualified product bridge forwards those receipts through its actual host/controller.
+It admits source metadata on main and persists on a separate worker; each handoff retains at most
+one active item and one latest pending item. Captured/current Lab lineage, qualified window,
+recognition configuration and an opaque active statistics-session stamp gate the original claim.
+Appearance edits retain source identity; a real session replacement starts a new source scope,
+even when its reporting timestamp is unchanged. The original claim has one downstream delivery
+to its captured session, not a persisted track-ID or alias ledger.
+
+Stats records only the claimed count after an acknowledged preference commit and returns an
+immutable transaction-time snapshot. Money Rules consumes that exact count with its existing
+enable rules, batch remainder and caps; rejected calls differ from acknowledged zero-cent progress.
+Tribute from an already-admitted old source can contribute to lifetime totals but never to a newly
+armed session. The all-categories milestone still depends on enabled detector configuration, not
+the accepted subject label. Counting does not acquire a new Dom-mode suppression policy.
+
+Lab guards linearize short authority admission only. Disk, wallet, achievement and UI work run
+outside them, and Stats releases its lock before downstream work to preserve wallet-to-Stats lock
+order. Already-admitted synchronous writes may finish after withdrawal against their captured
+context; later phases reject stale authority. Failed or ambiguous writes quarantine accounting
+without retry or stopping censor presentation. The process counter remains coherent with observed
+preference memory even after a failed disk acknowledgement; that is not proof of durability.
+Achievement persistence retains its existing asynchronous semantics. These separate stores do not
+provide cross-store crash atomicity or process-death replay guarantees.
+
+Dwell and popup hints additionally need a separate
 current-coverage/withdrawal/expiry contract; an empty input receipt does not establish absence
 across the whole viewport. Default activation and legacy retirement still require product parity,
 supported-platform checks and real-device long-scroll/reversal, detection-quality and speed

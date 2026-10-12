@@ -164,6 +164,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
                         observer.batchAccepted(batch);
                     }
                     @Override public void nativeTextAccepted(NativeTextFrame frame) { observer.nativeTextAccepted(frame); }
+                    @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { observer.evidenceAccepted(receipt); }
                     @Override public void painted(CensorEngine.PaintReceipt receipt) { observer.painted(receipt); }
                     @Override public void drained() {
                         try { observer.drained(); } finally { disposeAfterDrain(); }
@@ -247,6 +248,9 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return engine.acquireRenderView(); }
     public CensorEngine.ActiveScope activeScope() { return engine.activeScope(); }
     public boolean isCurrent(CensorEngine.ActiveScope scope) { return engine.isCurrent(scope); }
+    public CensorEngine.EvidenceClaim claimEvidence(CensorEngine.EvidenceReceipt receipt, Object consumerScope) {
+        return engine.claimEvidence(receipt, consumerScope);
+    }
     public CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long revision,
             long appearanceGeneration, java.util.List<Long> members, boolean reverseBackground) {
         return engine.acknowledgePaint(scope, revision, appearanceGeneration, members, reverseBackground);

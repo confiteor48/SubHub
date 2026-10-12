@@ -7,6 +7,7 @@ import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -30,6 +31,12 @@ import com.subhub.app.detection.DetectionEngine;
 import com.subhub.app.detection.DetectorConfig;
 import com.subhub.app.diagnostics.CensorLabCensorSession;
 import com.subhub.app.penance.CensorTapTracker;
+import com.subhub.app.penance.PenanceManager;
+import com.subhub.app.penance.PenanceInfraction;
+import com.subhub.app.penance.HardcoreAutoPayManager;
+import com.subhub.app.penance.PayPalCredentialStore;
+import com.subhub.app.stats.StatsRepository;
+import com.subhub.app.stats.AchievementManager;
 import com.subhub.app.security.HardcoreModeManager;
 import com.subhub.app.service.ScreenshotAccessibilityService;
 import com.subhub.app.settings.*;
@@ -39,6 +46,7 @@ import org.junit.*;
 import org.junit.runner.RunWith;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
@@ -46,7 +54,7 @@ import java.util.concurrent.atomic.*;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
-/** Actual production service and product selection. Models only are controlled; this is not Pixel performance acceptance. */
+/** Real service/source/accounting; explicit storage-result controls are not real disk failures or Pixel acceptance. */
 @RunWith(AndroidJUnit4.class)
 @SdkSuppress(minSdkVersion = 34)
 public final class ProductCensorSessionAndroidTest {
@@ -57,6 +65,9 @@ public final class ProductCensorSessionAndroidTest {
     private Context context;
     private SharedPreferences preferences, qualification;
     private Map<String, ?> savedPreferences, savedQualification;
+    private final Map<String, Map<String, ?>> savedStores = new LinkedHashMap<>();
+    private static final List<String> OWNED_STORES = Arrays.asList(StatsRepository.PREFS_NAME,
+            PenanceManager.PREFS_NAME, "betablocker_achievements", "subhub_hardcore_auto_pay", PayPalCredentialStore.PREFS_NAME);
     private String previousServices;
     private int previousEnabled;
     private boolean settingsOwned;
@@ -72,6 +83,12 @@ public final class ProductCensorSessionAndroidTest {
     private final List<SceneEngine.Lane> unavailable = new CopyOnWriteArrayList<>();
     private final List<Throwable> faults = new CopyOnWriteArrayList<>();
     private final List<Hold> ownedHolds = new CopyOnWriteArrayList<>();
+    private final List<CensorEngine.EvidenceReceipt> evidence = new CopyOnWriteArrayList<>();
+    private final List<CensorProductSession.AccountingResult> accountResults = new CopyOnWriteArrayList<>();
+    private final AtomicReference<Runnable> afterCommittedCount = new AtomicReference<>();
+    private final AtomicInteger storageFaultCalls = new AtomicInteger();
+    private boolean controlledStorageResult;
+    private boolean explicitNativeDemand;
 
     @Before public void ownOnlySyntheticGuestSettingsAndUnsuppressedAutomation() {
         instrumentation = InstrumentationRegistry.getInstrumentation(); context = instrumentation.getTargetContext();
@@ -86,6 +103,11 @@ public final class ProductCensorSessionAndroidTest {
         assertFalse("No existing production capture owner may be borrowed", previousServices != null
                 && (previousServices.contains("ScreenshotAccessibilityService") || previousServices.contains("ScreenCapture")));
         settingsOwned = true;
+        // Save only in test memory. No provider authorization or guest wallet may participate.
+        for (String name : OWNED_STORES) savedStores.put(name, copy(context.getSharedPreferences(name, Context.MODE_PRIVATE).getAll()));
+        new HardcoreAutoPayManager(context).disable();
+        new StatsRepository(context).endSession();
+        for (String name : OWNED_STORES) assertTrue(context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit());
         assertTrue(preferences.edit().putBoolean(AppModeManager.KEY_ARMED, true)
                 .putStringSet(AppModeManager.KEY_INCLUDED_PACKAGES, Collections.singleton(TARGET))
                 .putBoolean(AppModeManager.KEY_ALL_APPS, false).putBoolean(FeatureModuleManager.KEY_CENSOR_ENABLED, true)
@@ -100,6 +122,7 @@ public final class ProductCensorSessionAndroidTest {
                 .putBoolean(com.subhub.app.popup.PopupStormSettings.K_ENABLED, false).commit());
         assertTrue(qualification.edit().putBoolean("enabled", true).commit());
         ProductCensorQualification.fixtureModels(this::model);
+        ProductCensorQualification.fixtureStatistics(StatsRepository::new);
         ProductCensorQualification.fixtureSelectionObserved(() -> {
             assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); readCount.incrementAndGet();
             Hold held = readHold.getAndSet(null); if (held != null) held.run();
@@ -111,6 +134,15 @@ public final class ProductCensorSessionAndroidTest {
             @Override public void posted(SnapshotCensorSurface.Post receipt) { posts.add(receipt); }
             @Override public void modelUnavailable(SceneEngine.Lane lane) { unavailable.add(lane); }
             @Override public void sessionFailure(Throwable fault) { faults.add(fault); }
+            @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { evidence.add(receipt); }
+            @Override public void accounting(CensorProductSession.AccountingResult result) {
+                assertNotEquals("No accounting disk work on main", Looper.getMainLooper(), Looper.myLooper());
+                accountResults.add(result);
+                if (result.phase == CensorProductSession.AccountingPhase.COUNT && result.status == CensorProductSession.AccountingStatus.COMMITTED) {
+                    Runnable action = afterCommittedCount.getAndSet(null);
+                    if (action != null) { try { action.run(); } catch (Throwable failure) { faults.add(failure); } }
+                }
+            }
             @Override public void foreground(AccessibilityWindowReader.Window window) {
                 if (window != null && TARGET.equals(window.packageName) && stopForeground.compareAndSet(true, false)) {
                     ProductCensorQualification.current().stop(); foregroundStopped.countDown();
@@ -136,11 +168,18 @@ public final class ProductCensorSessionAndroidTest {
             secure(previousServices, previousEnabled);
             await("Actual production service unbinding", () -> !ScreenshotAccessibilityService.isRunning());
             target(true);
+            new StatsRepository(context).endSession();
+            for (Map.Entry<String, Map<String, ?>> saved : savedStores.entrySet())
+                restore(context.getSharedPreferences(saved.getKey(), Context.MODE_PRIVATE), saved.getValue());
+            new StatsRepository(context).sessionStamp();
             restore(preferences, savedPreferences); restore(qualification, savedQualification);
             ProductCensorQualification.fixtureModels(null); ProductCensorQualification.fixtureSelectionObserved(() -> { });
             ProductCensorQualification.fixtureObserver(null);
+            ProductCensorQualification.fixtureStatistics(StatsRepository::new);
         }
         assertEquals(savedPreferences, preferences.getAll()); assertEquals(savedQualification, qualification.getAll());
+        for (Map.Entry<String, Map<String, ?>> saved : savedStores.entrySet())
+            assertEquals(saved.getValue(), context.getSharedPreferences(saved.getKey(), Context.MODE_PRIVATE).getAll());
         assertEquals(previousServices, Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES));
         assertEquals(previousEnabled, Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0));
     }
@@ -293,6 +332,252 @@ public final class ProductCensorSessionAndroidTest {
         assertSame(session, ProductCensorQualification.current()); assertEquals(1, closes.get()); assertFalse(earlyClose.get());
     }
 
+    @Test public void nativeSourceEvidenceCountsOnceAndFeedsActualLedgerAndAchievementSnapshot() throws Exception {
+        nativeCounting("porn", 1, 500); connect(); awaitCount(1); awaitLedger(1, 7);
+        await("First block achievement", () -> new AchievementManager(context).isUnlocked("first_block"));
+        CensorEngine.ActiveScope scope = session.controller().activeScope(); int before = evidence.size();
+        assertTrue(preferences.edit().putInt(SettingsRepository.KEY_CENSOR_INTENSITY, 80).commit());
+        awaitNative("Fresh native reads after style change", () -> evidence.size() >= before + 6);
+        assertTrue(scope.same(session.controller().activeScope())); assertEquals(1, new StatsRepository(context).load().getTotalBlocks());
+        assertEquals(1, new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents().size());
+        assertEquals(0, new StatsRepository(context).load().getAllCategoryCensors());
+        CensorEngine.EvidenceReceipt receipt = evidence.stream().filter(r -> r.subjects.stream().anyMatch(s -> s.confirmedForConsumption)).findFirst().get();
+        assertEquals(SceneEngine.SourceKind.NATIVE_TEXT, receipt.source.kind);
+        assertEquals(5, receipt.subjects.get(0).witnesses.size()); assertEquals(0, models.get());
+        CensorEngine.EvidenceClaim replay = session.controller().claimEvidence(receipt, StatsRepository.currentSessionStamp());
+        assertTrue(replay == null || replay.subjects.isEmpty());
+        assertTrue(faults.isEmpty()); assertBinding();
+    }
+    @Test public void statisticsSessionReplacementCannotRebindHeldSelectionOrOldWitnesses() throws Exception {
+        nativeCounting("porn", 1, 500); connect(); awaitCount(1); awaitLedger(1, 7);
+        StatsRepository stats = new StatsRepository(context); StatsRepository.SessionStamp old = stats.sessionStamp();
+        CensorEngine.ActiveScope oldScope = session.controller().activeScope(); Hold hold = hold(); readHold.set(hold); main(session::request);
+        assertTrue(hold.entered.await(8, TimeUnit.SECONDS));
+        stats.endSession(); stats.startSession(); StatsRepository.SessionStamp fresh = stats.sessionStamp();
+        assertNotSame(old, fresh); assertFalse(old.isCurrent()); assertEquals(0, stats.load().getCurrentSessionBlocks());
+        hold.release.countDown();
+        await("New session requires a new owner scope", () -> session.controller().activeScope() != null
+                && !oldScope.same(session.controller().activeScope()));
+        awaitCount(2); awaitLedger(2, 7); assertEquals(1, stats.load().getCurrentSessionBlocks());
+        assertEquals(2, new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents().size()); assertTrue(faults.isEmpty());
+    }
+    @Test public void sessionReplacementAfterCountCannotChargeOrUnlockForTheNewSession() throws Exception {
+        nativeCounting("porn", 1, 500); StatsRepository stats = new StatsRepository(context);
+        afterCommittedCount.set(() -> { stats.endSession(); stats.startSession(); main(session::stop); });
+        connect(); awaitCount(1);
+        await("Ledger phase rejects replaced source session", () -> accountResults.stream().anyMatch(r -> r.phase == CensorProductSession.AccountingPhase.LEDGER
+                && r.status == CensorProductSession.AccountingStatus.REJECTED && r.count == 1));
+        assertEquals(0, stats.load().getCurrentSessionBlocks());
+        assertTrue(new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents().isEmpty());
+        assertFalse(new AchievementManager(context).isUnlocked("first_block")); assertTrue(faults.isEmpty());
+    }
+    @Test public void acknowledgedZeroCentBatchProgressAndCapsAreNeverReplayed() throws Exception {
+        nativeCounting("porn one", 2, 7); connect(); awaitCount(1); awaitLedger(1, 0);
+        assertEquals(1, context.getSharedPreferences(PenanceManager.PREFS_NAME, Context.MODE_PRIVATE).getInt("detection_batch_remainder", -1));
+        literalTarget("porn two"); awaitCount(2); awaitLedger(2, 7);
+        literalTarget("porn three"); awaitCount(3); awaitLedger(3, 0);
+        literalTarget("porn four"); awaitCount(4); awaitLedger(4, 0);
+        assertEquals(0, context.getSharedPreferences(PenanceManager.PREFS_NAME, Context.MODE_PRIVATE).getInt("detection_batch_remainder", -1));
+        assertEquals(1, new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents().size());
+        int before = evidence.size(); awaitNative("Later native redraw is not another charge", () -> evidence.size() >= before + 5);
+        assertEquals(4, new StatsRepository(context).load().getTotalBlocks()); assertTrue(faults.isEmpty());
+    }
+    @Test public void labOriginAndInactiveAbaNeverBecomeNormalCounts() throws Exception {
+        nativeCounting("porn", 1, 500);
+        CensorLabCensorSession.Lease lab = CensorLabCensorSession.acquire();
+        try {
+            connect(); awaitNative("Five real Lab native observations", () -> evidence.stream().anyMatch(r -> r.subjects.stream().anyMatch(s -> s.confirmedForConsumption)));
+            assertEquals(0, new StatsRepository(context).load().getTotalBlocks()); assertTrue(accountResults.isEmpty());
+        } finally { lab.close(); }
+        awaitCount(1); awaitLedger(1, 7);
+        assertTrue(accountResults.stream().allMatch(r -> r.receipt == null || r.receipt.scope.protectionScope.origin == ProtectionScope.Origin.NORMAL));
+        assertTrue(faults.isEmpty());
+    }
+    @Test public void armedPreferenceWithoutAnActualStatisticsSessionCannotConsumeEvidence() throws Exception {
+        nativeOnly("porn"); connect();
+        awaitNative("Five native witnesses without a statistics session", () -> evidence.stream().anyMatch(r -> r.subjects.stream().anyMatch(s -> s.confirmedForConsumption)));
+        assertNull(StatsRepository.currentSessionStamp()); assertEquals(0, new StatsRepository(context).load().getTotalBlocks());
+        assertTrue(accountResults.isEmpty()); assertTrue(new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents().isEmpty());
+    }
+    @Test public void failedCountResultBeforeWriteCannotRetryOrReachDownstreamAndLeavesCensorAlive() throws Exception {
+        storageControl(false, false, null); nativeCounting("porn", 1, 500); connect(); awaitCountFailure(CensorProductSession.AccountingStatus.UNACKNOWLEDGED);
+        int before = evidence.size(); awaitNative("Presentation/acquisition survives accounting quarantine", () -> evidence.size() >= before + 6);
+        assertTrue(session.isActive()); assertEquals(1, storageFaultCalls.get()); assertEquals(0, new StatsRepository(context).load().getTotalBlocks());
+        assertNoDownstream(); assertTrue(faults.isEmpty());
+    }
+    @Test public void falseCountResultAfterAppliedWriteKeepsObservedCounterAndHistoryCoherent() throws Exception {
+        uncertainAppliedCount(false);
+    }
+    @Test public void thrownCountResultAfterAppliedWriteCannotReplayOrLoseObservedHistory() throws Exception {
+        uncertainAppliedCount(true);
+    }
+    @Test public void closeAndLabAdmissionDoNotWaitForAHeldCountStoreButDrainDoes() throws Exception {
+        Hold disk = hold(); storageControl(true, false, disk); nativeCounting("porn", 1, 500); connect();
+        awaitNative("Controlled count store reached after five actual native reads", () -> disk.entered.getCount() == 0);
+        main(() -> { try (CensorLabCensorSession.Lease lab = CensorLabCensorSession.acquire()) { assertTrue(CensorLabCensorSession.isActive()); } session.close(); });
+        assertFalse(session.managedResourcesDrained()); disk.release.countDown();
+        await("Actual count action terminal after close", session::managedResourcesDrained);
+        awaitCountFailure(CensorProductSession.AccountingStatus.UNACKNOWLEDGED);
+        assertEquals(1, new StatsRepository(context).load().getTotalBlocks()); assertNoDownstream(); assertTrue(faults.isEmpty());
+    }
+    @Test public void mainThreadCountCommitIsRejectedBeforeAnySourceClaim() throws Exception {
+        nativeCounting("porn", 1, 500); connect(); StatsRepository stats = new StatsRepository(context); AtomicInteger claims = new AtomicInteger();
+        StatsRepository.SessionStamp stamp = stats.sessionStamp();
+        main(() -> assertThrows(IllegalStateException.class, () -> stats.recordEvidence(stamp,
+                () -> { claims.incrementAndGet(); return null; }, Collections.emptySet())));
+        assertEquals(0, claims.get()); assertTrue(faults.isEmpty());
+    }
+
+    @Test public void sessionStampSurvivesReadsButRejectsRestorationWithTheSameReportingTimestamp() throws Exception {
+        nativeCounting("porn", 1, 500); StatsRepository stats = new StatsRepository(context);
+        StatsRepository.SessionStamp old = stats.sessionStamp();
+        SharedPreferences counters = context.getSharedPreferences(StatsRepository.PREFS_NAME, Context.MODE_PRIVATE);
+        long started = counters.getLong("active_session_start_ms", 0); assertTrue(started > 0);
+        for (int i = 0; i < 5; i++) {
+            assertSame(old, new StatsRepository(context).sessionStamp()); stats.load(); stats.startSession(); assertSame(old, stats.sessionStamp());
+        }
+        stats.endSession(); assertNull(StatsRepository.currentSessionStamp());
+        assertTrue(counters.edit().putLong("active_session_start_ms", started).putInt("active_session_blocks", 0).commit());
+        StatsRepository.SessionStamp restored = stats.sessionStamp();
+        assertNotSame(old, restored); assertFalse(old.isCurrent()); assertTrue(restored.isCurrent());
+        assertEquals(started, counters.getLong("active_session_start_ms", 0));
+        PenanceManager.SourceDetectionResult rejected = new PenanceManager(context).recordSourceDetectionResult(1, System.currentTimeMillis(), old);
+        assertEquals(PenanceManager.SourceDetectionStatus.REJECTED, rejected.status); assertEquals(0, rejected.chargedCents);
+        assertEquals(0, context.getSharedPreferences(PenanceManager.PREFS_NAME, Context.MODE_PRIVATE).getInt("detection_batch_remainder", 0));
+        connect(); awaitCount(1); awaitLedger(1, 7); assertTrue(faults.isEmpty());
+    }
+    @Test public void allCategoryMilestoneUsesEnabledDetectorConfigurationNotNativeSubjectLabel() throws Exception {
+        nativeCounting("porn", 1, 500);
+        Set<String> all = new LinkedHashSet<>(Arrays.asList("genitals_female", "genitals_male", "breasts", "buttocks", "anus",
+                "face", "belly", "male_chest", "feet", "armpits", "genitals_covered", "breasts_covered", "buttocks_covered",
+                "anus_covered", "belly_covered", "feet_covered", "armpits_covered"));
+        assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, all).commit());
+        connect(); awaitCount(1); awaitLedger(1, 7);
+        assertEquals(1, new StatsRepository(context).load().getAllCategoryCensors());
+        assertTrue(accountResults.stream().anyMatch(r -> r.phase == CensorProductSession.AccountingPhase.COUNT
+                && r.status == CensorProductSession.AccountingStatus.COMMITTED && r.receipt.source.kind == SceneEngine.SourceKind.NATIVE_TEXT));
+        assertTrue(faults.isEmpty());
+    }
+    @Test public void admittedLedgerCompletionCannotAttributeOldSourceTributeToANewSession() throws Exception {
+        nativeCounting("porn", 1, 500); afterCommittedCount.set(() -> main(session::stop)); connect(); awaitCount(1);
+        await("Product withdrawal rejects later ledger admission", () -> accountResults.stream().anyMatch(r -> r.phase == CensorProductSession.AccountingPhase.LEDGER
+                && r.status == CensorProductSession.AccountingStatus.REJECTED));
+        StatsRepository stats = new StatsRepository(context); StatsRepository.SessionStamp old = stats.sessionStamp(); AtomicInteger transitions = new AtomicInteger();
+        Context walletContext = new ContextWrapper(context) {
+            @Override public Context getApplicationContext() { return this; }
+            @Override public SharedPreferences getSharedPreferences(String name, int mode) {
+                SharedPreferences actual = super.getSharedPreferences(name, mode);
+                if (!PenanceManager.PREFS_NAME.equals(name)) return actual;
+                return (SharedPreferences) Proxy.newProxyInstance(SharedPreferences.class.getClassLoader(), new Class<?>[]{SharedPreferences.class},
+                        (proxy, method, args) -> {
+                            Object result = method.invoke(actual, args);
+                            if (!method.getName().equals("edit")) return result;
+                            SharedPreferences.Editor edit = (SharedPreferences.Editor) result; AtomicBoolean ledger = new AtomicBoolean();
+                            return Proxy.newProxyInstance(SharedPreferences.Editor.class.getClassLoader(), new Class<?>[]{SharedPreferences.Editor.class},
+                                    (editorProxy, operation, values) -> {
+                                        if (operation.getName().equals("putString") && "events_v1".equals(values[0])) ledger.set(true);
+                                        if (operation.getName().equals("commit") && ledger.get()) {
+                                            assertNotEquals(Looper.getMainLooper(), Looper.myLooper());
+                                            assertTrue(old.isCurrent()); stats.endSession(); stats.startSession(); transitions.incrementAndGet();
+                                        }
+                                        Object value = operation.invoke(edit, values);
+                                        return value instanceof SharedPreferences.Editor ? editorProxy : value;
+                                    });
+                        });
+            }
+        };
+        PenanceManager.SourceDetectionResult committed = new PenanceManager(walletContext).recordSourceDetectionResult(1, System.currentTimeMillis(), old);
+        assertEquals(PenanceManager.SourceDetectionStatus.ACKNOWLEDGED, committed.status); assertEquals(7, committed.chargedCents);
+        assertEquals(1, transitions.get()); assertFalse(old.isCurrent());
+        assertEquals(0, stats.load().getCurrentSessionTributeEvents()); assertEquals(0, stats.load().getCurrentSessionTributeCents());
+        assertEquals(1, stats.load().getTributeEvents()); assertEquals(7, stats.load().getTributeCents());
+        assertEquals(0, stats.load().getCurrentSessionBlocks()); assertEquals(1, stats.getSessionHistory().get(0).getBlocks());
+        main(session::stop); assertTrue(faults.isEmpty());
+    }
+
+    private void nativeOnly(String literal) throws Exception {
+        assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
+                .putBoolean(SettingsRepository.KEY_TEXT_SMUT_ENABLED, true).commit());
+        literalTarget(literal);
+    }
+    private void nativeCounting(String literal, int batch, int dailyCap) throws Exception {
+        nativeOnly(literal); new StatsRepository(context).startSession();
+        Map<PenanceInfraction, Integer> rules = new EnumMap<>(PenanceInfraction.class); rules.put(PenanceInfraction.NEW_DETECTION, 7);
+        new PenanceManager(context).configure(true, rules, dailyCap, 2000, 10, 10, batch, 5);
+        assertFalse(new HardcoreAutoPayManager(context).isConfigured());
+        assertTrue(context.getSharedPreferences(PayPalCredentialStore.PREFS_NAME, Context.MODE_PRIVATE).getAll().isEmpty());
+    }
+    private void literalTarget(String literal) throws Exception {
+        context.startActivity(new Intent().setComponent(new ComponentName(TARGET, ProductTargetFixtureActivity.class.getName()))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION).putExtra("label", literal));
+        await("Actual provider literal target ready", () -> {
+            android.view.accessibility.AccessibilityNodeInfo root = ui.getRootInActiveWindow();
+            if (root == null) return false; List<android.view.accessibility.AccessibilityNodeInfo> nodes = Collections.emptyList();
+            try {
+                root.refresh(); nodes = root.findAccessibilityNodeInfosByText(literal);
+                for (android.view.accessibility.AccessibilityNodeInfo node : nodes)
+                    if (node != null && node.refresh() && literal.contentEquals(node.getText() == null ? "" : node.getText())) return true;
+                return false;
+            } finally { for (android.view.accessibility.AccessibilityNodeInfo node : nodes) if (node != null && node != root) node.recycle(); root.recycle(); }
+        });
+    }
+    private void awaitCount(long total) throws Exception {
+        awaitNative("Acknowledged exact native source count " + total, () -> new StatsRepository(context).load().getTotalBlocks() == total
+                && accountResults.stream().filter(r -> r.phase == CensorProductSession.AccountingPhase.COUNT
+                    && r.status == CensorProductSession.AccountingStatus.COMMITTED).mapToInt(r -> r.count).sum() == total);
+    }
+    private void awaitLedger(int total, int charged) throws Exception {
+        await("Acknowledged source ledger phase " + total, () -> accountResults.stream().filter(r -> r.phase == CensorProductSession.AccountingPhase.LEDGER
+                && r.status == CensorProductSession.AccountingStatus.COMMITTED).count() >= total
+                && accountResults.stream().filter(r -> r.phase == CensorProductSession.AccountingPhase.LEDGER
+                    && r.status == CensorProductSession.AccountingStatus.COMMITTED).skip(total - 1).findFirst().get().chargedCents == charged);
+    }
+    private void awaitCountFailure(CensorProductSession.AccountingStatus status) throws Exception {
+        awaitNative("Explicit controlled count result " + status, () -> accountResults.stream().anyMatch(r -> r.phase == CensorProductSession.AccountingPhase.COUNT && r.status == status));
+    }
+    private void assertNoDownstream() {
+        assertTrue(accountResults.stream().noneMatch(r -> r.phase == CensorProductSession.AccountingPhase.LEDGER
+                || r.phase == CensorProductSession.AccountingPhase.ACHIEVEMENTS));
+        assertTrue(new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents().isEmpty());
+        assertFalse(new AchievementManager(context).isUnlocked("first_block"));
+    }
+    private void uncertainAppliedCount(boolean throwsAfterApply) throws Exception {
+        storageControl(true, throwsAfterApply, null); nativeCounting("porn", 1, 500); connect();
+        awaitCountFailure(throwsAfterApply ? CensorProductSession.AccountingStatus.UNCERTAIN : CensorProductSession.AccountingStatus.UNACKNOWLEDGED);
+        StatsRepository stats = new StatsRepository(context); assertEquals(1, stats.load().getTotalBlocks()); assertEquals(1, stats.load().getCurrentSessionBlocks());
+        assertEquals(1, storageFaultCalls.get()); assertNoDownstream(); main(session::stop); stats.endSession();
+        assertEquals(1, stats.getSessionHistory().get(0).getBlocks()); assertTrue(faults.isEmpty());
+    }
+    private void storageControl(boolean applyUnderlying, boolean throwAfter, Hold hold) {
+        controlledStorageResult = true;
+        ProductCensorQualification.fixtureStatistics(app -> new StatsRepository(new ContextWrapper(app) {
+            @Override public Context getApplicationContext() { return this; }
+            @Override public SharedPreferences getSharedPreferences(String name, int mode) {
+                SharedPreferences actual = super.getSharedPreferences(name, mode);
+                if (!StatsRepository.PREFS_NAME.equals(name)) return actual;
+                return (SharedPreferences) Proxy.newProxyInstance(SharedPreferences.class.getClassLoader(), new Class<?>[]{SharedPreferences.class},
+                        (proxy, method, args) -> {
+                            Object result = method.invoke(actual, args);
+                            if (!method.getName().equals("edit")) return result;
+                            SharedPreferences.Editor edit = (SharedPreferences.Editor) result; AtomicBoolean target = new AtomicBoolean();
+                            return Proxy.newProxyInstance(SharedPreferences.Editor.class.getClassLoader(), new Class<?>[]{SharedPreferences.Editor.class},
+                                    (editorProxy, operation, values) -> {
+                                        if (operation.getName().equals("putInt") && "active_session_blocks".equals(values[0])) target.set(true);
+                                        if (operation.getName().equals("commit") && target.get()) {
+                                            assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); storageFaultCalls.incrementAndGet();
+                                            if (hold != null) hold.run();
+                                            if (applyUnderlying) assertTrue(edit.commit());
+                                            if (throwAfter) throw new IllegalStateException("Controlled ambiguous acknowledgement");
+                                            return false;
+                                        }
+                                        Object value = operation.invoke(edit, values);
+                                        return value instanceof SharedPreferences.Editor ? editorProxy : value;
+                                    });
+                        });
+            }
+        }));
+    }
+
     private VisualDetectorWorker model(Context app, SceneEngine.Lane lane, DetectorConfig config, long partition, String fallback) {
         assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); models.incrementAndGet();
         return new VisualDetectorWorker(lane, config, partition, new VisualDetectorWorker.Model() {
@@ -367,6 +652,19 @@ public final class ProductCensorSessionAndroidTest {
         long until = SystemClock.uptimeMillis() + 12000;
         while (!condition.getAsBoolean()) { assertTrue(label, SystemClock.uptimeMillis() < until); Thread.sleep(10); }
     }
+    /** Bookkeeping control: request fresh real provider reads; never invent source witnesses. */
+    private void awaitNative(String label, BooleanSupplier condition) throws Exception {
+        explicitNativeDemand = true;
+        long until = SystemClock.uptimeMillis() + 12000, nextDemand = 0;
+        while (!condition.getAsBoolean()) {
+            long now = SystemClock.uptimeMillis(); assertTrue(label, now < until);
+            if (now >= nextDemand) {
+                main(() -> { if (session != null && session.isActive()) session.controller().host().requestNativeText(false); });
+                nextDemand = now + 200;
+            }
+            Thread.sleep(10);
+        }
+    }
     private void assertSpacing() {
         long last = -1; for (CensorEngine.Trace trace : traces) if (trace.stage == CensorEngine.Stage.CAPTURE_DISPATCHED) {
             if (last >= 0) assertTrue("Actual API dispatch interval", trace.atMillis - last >= 334); last = trace.atMillis;
@@ -415,15 +713,50 @@ public final class ProductCensorSessionAndroidTest {
             }
             submitted.put(row);
         }
-        JSONObject metrics = new JSONObject().put("schemaVersion", 2).put("actualProductionService", session != null)
+        JSONArray evidenceRows = new JSONArray();
+        for (CensorEngine.EvidenceReceipt receipt : evidence) {
+            JSONArray subjects = new JSONArray();
+            for (SceneEngine.AcceptedSubject subject : receipt.subjects) {
+                JSONArray witnesses = new JSONArray();
+                for (SceneEngine.EvidenceWitness witness : subject.witnesses)
+                    witnesses.put(new JSONObject().put("kind", witness.kind.name()).put("producerIdentity", witness.producerIdentity)
+                            .put("sourceSequence", witness.sourceSequence));
+                subjects.put(new JSONObject().put("identity", subject.identity).put("evidenceLane", subject.evidenceLane.name())
+                        .put("confirmedForConsumption", subject.confirmedForConsumption).put("alreadyConsumed", subject.alreadyConsumed)
+                        .put("validUntilMillis", subject.validUntilMillis).put("rawWitnessCount", subject.witnesses.size()).put("witnesses", witnesses));
+            }
+            evidenceRows.put(sourceMetadata(receipt).put("triggerLane", receipt.triggerLane.name())
+                    .put("acceptedAtMillis", receipt.acceptedAtMillis).put("rawSubjectCount", receipt.subjects.size()).put("subjects", subjects));
+        }
+        JSONArray accountingRows = new JSONArray();
+        for (CensorProductSession.AccountingResult result : accountResults) {
+            JSONObject row = new JSONObject().put("phase", result.phase.name()).put("status", result.status.name())
+                    .put("count", result.count).put("chargedCents", result.chargedCents).put("pendingDrops", result.pendingDrops)
+                    .put("receiptProduced", result.receipt != null);
+            if (result.receipt != null) row.put("source", sourceMetadata(result.receipt));
+            accountingRows.put(row);
+        }
+        JSONObject metrics = new JSONObject().put("schemaVersion", 4).put("actualProductionService", session != null)
                 .put("sameInstrumentationPid", session != null && ((ScreenshotAccessibilityService) session.service()).qualificationBoundPid() == Process.myPid())
                 .put("pid", Process.myPid()).put("rawTraceCount", traces.size()).put("traces", rows).put("posts", submitted)
                 .put("rawPostCount", posts.size()).put("models", models.get()).put("closes", closes.get()).put("managedDrain", session != null && session.managedResourcesDrained())
                 .put("legacyCensorRuntimeAbsent", session != null && ((ScreenshotAccessibilityService) session.service()).legacyCensorRuntimeAbsentForQualification())
-                .put("controlledModelsOnly", true).put("physicalMotionAcceptance", false).put("pixelPerformanceAcceptance", false);
+                .put("controlledModelsOnly", !controlledStorageResult).put("physicalMotionAcceptance", false).put("pixelPerformanceAcceptance", false);
+        metrics.put("rawEvidenceCount", evidence.size()).put("evidence", evidenceRows)
+                .put("rawAccountingCount", accountResults.size()).put("accounting", accountingRows)
+                .put("controlledStorageResult", controlledStorageResult).put("storageFaultCalls", storageFaultCalls.get())
+                .put("explicitNativeDemand", explicitNativeDemand);
         try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-surface-metrics-" + System.nanoTime() + ".json"))) {
             stream.write(metrics.toString().getBytes(StandardCharsets.UTF_8));
         }
+    }
+    private static JSONObject sourceMetadata(CensorEngine.EvidenceReceipt receipt) throws Exception {
+        SceneEngine.Source source = receipt.source;
+        return new JSONObject().put("epoch", receipt.scope.epoch).put("geometry", receipt.scope.geometry)
+                .put("origin", receipt.scope.protectionScope.origin.name()).put("sequence", source.sequence).put("kind", source.kind.name())
+                .put("imageRequestIdentity", source.imageRequestIdentity).put("readStartedAtMillis", source.readStartedAtMillis)
+                .put("readFinishedAtMillis", source.readFinishedAtMillis).put("receivedAtMillis", source.receivedAtMillis)
+                .put("pixelAtMillis", source.pixelAtMillis);
     }
     private static Map<String, ?> copy(Map<String, ?> values) {
         Map<String, Object> result = new HashMap<>(); for (Map.Entry<String, ?> e : values.entrySet())

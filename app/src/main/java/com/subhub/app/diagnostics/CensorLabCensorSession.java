@@ -3,11 +3,14 @@ package com.subhub.app.diagnostics;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 /** Process-local recording ownership; never arms or persists a normal service session. */
 public final class CensorLabCensorSession {
     private static final AtomicReference<Stamp> STATE = new AtomicReference<>(new Stamp(false));
     private static final CopyOnWriteArrayList<Runnable> OBSERVERS = new CopyOnWriteArrayList<>();
+    private static final Object TRANSITION_LOCK = new Object();
+    private static Thread admittingThread;
 
     private CensorLabCensorSession() { }
 
@@ -26,11 +29,28 @@ public final class CensorLabCensorSession {
         return !labOwnedSource && !isActive();
     }
 
+    /**
+     * Linearizes a short authority admission against Lab start/stop. Never pass disk work,
+     * platform, UI or observer callbacks; those must not block a permission transition here.
+     */
+    public static <T> T withCurrentNormal(Stamp expected, Supplier<T> mutation, T rejected) {
+        Objects.requireNonNull(mutation);
+        synchronized (TRANSITION_LOCK) {
+            if (expected == null || expected.active || STATE.get() != expected) return rejected;
+            if (admittingThread != null) throw new IllegalStateException("Nested normal-effect admission");
+            admittingThread = Thread.currentThread();
+            try { return mutation.get(); } finally { admittingThread = null; }
+        }
+    }
+
     public static Lease acquire() {
-        Stamp previous = STATE.get();
-        Stamp selected = new Stamp(true);
-        if (previous.active || !STATE.compareAndSet(previous, selected)) {
-            throw new IllegalStateException("A Censor Lab session already owns recognition");
+        Stamp selected;
+        synchronized (TRANSITION_LOCK) {
+            if (admittingThread == Thread.currentThread()) throw new IllegalStateException("Lab transition during normal-effect admission");
+            Stamp previous = STATE.get(); selected = new Stamp(true);
+            if (previous.active || !STATE.compareAndSet(previous, selected)) {
+                throw new IllegalStateException("A Censor Lab session already owns recognition");
+            }
         }
         Lease lease = new Lease(selected);
         notifyObservers();
@@ -61,7 +81,9 @@ public final class CensorLabCensorSession {
         private Lease(Stamp stamp) { this.stamp = stamp; }
 
         @Override public void close() {
-            if (STATE.compareAndSet(stamp, new Stamp(false))) notifyObservers();
+            boolean changed;
+            synchronized (TRANSITION_LOCK) { changed = STATE.compareAndSet(stamp, new Stamp(false)); }
+            if (changed) notifyObservers();
         }
     }
 

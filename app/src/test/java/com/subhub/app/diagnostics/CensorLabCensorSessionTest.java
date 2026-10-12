@@ -3,9 +3,64 @@ package com.subhub.app.diagnostics;
 import static org.junit.Assert.*;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.*;
 import org.junit.Test;
 
 public final class CensorLabCensorSessionTest {
+    @Test public void normalAdmissionRejectsCapturedLabAndInactiveAba() {
+        CensorLabCensorSession.Stamp old = CensorLabCensorSession.stamp(); AtomicInteger calls = new AtomicInteger();
+        assertEquals(Integer.valueOf(1), CensorLabCensorSession.withCurrentNormal(old, calls::incrementAndGet, -1));
+        try (CensorLabCensorSession.Lease ignored = CensorLabCensorSession.acquire()) {
+            assertEquals(Integer.valueOf(-1), CensorLabCensorSession.withCurrentNormal(CensorLabCensorSession.stamp(), calls::incrementAndGet, -1));
+        }
+        assertEquals(Integer.valueOf(-1), CensorLabCensorSession.withCurrentNormal(old, calls::incrementAndGet, -1));
+        assertEquals(Integer.valueOf(-1), CensorLabCensorSession.withCurrentNormal(null, calls::incrementAndGet, -1));
+        assertEquals(1, calls.get());
+    }
+    @Test public void nestedAdmissionAndReentrantLabTransitionAreRejectedAndFinallyReleasesTheGate() {
+        CensorLabCensorSession.Stamp normal = CensorLabCensorSession.stamp();
+        assertThrows(IllegalStateException.class, () -> CensorLabCensorSession.withCurrentNormal(normal,
+                () -> CensorLabCensorSession.withCurrentNormal(normal, () -> true, false), false));
+        assertThrows(IllegalStateException.class, () -> CensorLabCensorSession.withCurrentNormal(normal,
+                CensorLabCensorSession::acquire, null));
+        assertTrue(normal.isCurrent());
+        assertThrows(IllegalArgumentException.class, () -> CensorLabCensorSession.withCurrentNormal(normal,
+                () -> { throw new IllegalArgumentException("fixture"); }, false));
+        assertTrue(CensorLabCensorSession.withCurrentNormal(normal, () -> true, false));
+        try (CensorLabCensorSession.Lease ignored = CensorLabCensorSession.acquire()) { assertTrue(CensorLabCensorSession.isActive()); }
+    }
+    @Test public void transitionLinearizesAfterAnAlreadyAdmittedShortMutation() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch admitted = new CountDownLatch(1), release = new CountDownLatch(1), starting = new CountDownLatch(1);
+        CensorLabCensorSession.Stamp normal = CensorLabCensorSession.stamp(); CensorLabCensorSession.Lease lease = null;
+        try {
+            Future<Boolean> mutation = pool.submit(() -> CensorLabCensorSession.withCurrentNormal(normal, () -> {
+                admitted.countDown();
+                try { assertTrue(release.await(5, TimeUnit.SECONDS)); } catch (InterruptedException error) { throw new AssertionError(error); }
+                assertTrue(normal.isCurrent()); return true;
+            }, false));
+            assertTrue(admitted.await(5, TimeUnit.SECONDS));
+            Future<CensorLabCensorSession.Lease> transition = pool.submit(() -> { starting.countDown(); return CensorLabCensorSession.acquire(); });
+            assertTrue(starting.await(5, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> transition.get(100, TimeUnit.MILLISECONDS));
+            release.countDown(); assertTrue(mutation.get(5, TimeUnit.SECONDS)); lease = transition.get(5, TimeUnit.SECONDS);
+            assertFalse(normal.isCurrent()); assertTrue(CensorLabCensorSession.isActive());
+        } finally { release.countDown(); if (lease != null) lease.close(); pool.shutdownNow(); }
+    }
+    @Test public void transitionObserversAreOutsideTheAuthorityLock() throws Exception {
+        ExecutorService pool = Executors.newSingleThreadExecutor(); AtomicInteger observations = new AtomicInteger();
+        try (CensorLabCensorSession.Subscription ignored = CensorLabCensorSession.observe(() -> {
+            try {
+                boolean normal = pool.submit(() -> CensorLabCensorSession.withCurrentNormal(
+                        CensorLabCensorSession.stamp(), () -> true, false)).get(5, TimeUnit.SECONDS);
+                assertEquals(!CensorLabCensorSession.isActive(), normal); observations.incrementAndGet();
+            } catch (Exception error) { throw new AssertionError(error); }
+        })) {
+            try (CensorLabCensorSession.Lease lease = CensorLabCensorSession.acquire()) { assertEquals(1, observations.get()); }
+            assertEquals(2, observations.get());
+        } finally { pool.shutdownNow(); }
+    }
+
     @Test public void stampsFenceInactiveAbaAndRecordingReplacementWithoutExposingCloseAuthority() {
         CensorLabCensorSession.Stamp inactive = CensorLabCensorSession.stamp();
         assertFalse(inactive.active); assertTrue(inactive.isCurrent());

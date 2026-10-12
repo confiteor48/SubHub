@@ -9,6 +9,7 @@ import com.subhub.app.appmode.AppModeManager;
 import com.subhub.app.appmode.AppModePolicy;
 import com.subhub.app.capture.CustomImageManager;
 import com.subhub.app.censor.engine.LatestReconciliation;
+import com.subhub.app.censor.engine.BoundedLatestWork;
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.SceneEngine;
@@ -16,11 +17,19 @@ import com.subhub.app.detection.DetectorConfig;
 import com.subhub.app.detection.text.TextSmutConfig;
 import com.subhub.app.diagnostics.CensorLabCensorSession;
 import com.subhub.app.penance.CensorTapTracker;
+import com.subhub.app.penance.PenanceManager;
+import com.subhub.app.penance.PenanceInfraction;
+import com.subhub.app.penance.PenanceChargeNotifier;
+import com.subhub.app.stats.StatsRepository;
+import com.subhub.app.stats.AchievementManager;
 import com.subhub.app.settings.*;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Function;
+import android.content.Context;
 
 /** Product eligibility and one replacement lifetime, independent of legacy censor state. */
 @RequiresApi(30)
@@ -30,6 +39,23 @@ public final class CensorProductSession implements AutoCloseable {
         default void foreground(AccessibilityWindowReader.Window window) { }
         default void activeChanged(boolean active) { }
         default void sessionFailure(Throwable failure) { }
+        /** Sanitized accounting metadata, not a native-owner or rendering failure. May be off-main. */
+        default void accounting(AccountingResult result) { }
+    }
+    public enum AccountingPhase { DISPATCH, COUNT, LEDGER, ACHIEVEMENTS, NOTIFICATION }
+    public enum AccountingStatus { REJECTED, NO_NEW_EVIDENCE, COMMITTED, APPLIED, UNACKNOWLEDGED, UNCERTAIN }
+    public static final class AccountingResult {
+        public final CensorEngine.EvidenceReceipt receipt;
+        public final AccountingPhase phase;
+        public final AccountingStatus status;
+        /** Only acknowledged counter and ledger amounts; never inferred from drawn masks. */
+        public final int count, chargedCents;
+        public final long pendingDrops;
+        private AccountingResult(CensorEngine.EvidenceReceipt receipt, AccountingPhase phase,
+                AccountingStatus status, int count, int chargedCents, long pendingDrops) {
+            this.receipt = receipt; this.phase = phase; this.status = status;
+            this.count = count; this.chargedCents = chargedCents; this.pendingDrops = pendingDrops;
+        }
     }
     private final AccessibilityService service;
     private final SharedPreferences preferences;
@@ -41,6 +67,12 @@ public final class CensorProductSession implements AutoCloseable {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService lookup = Executors.newSingleThreadExecutor(action -> new Thread(action, "Censor-product-window"));
     private final LatestReconciliation<Desired> reconciliation;
+    private final ExecutorService accountingWorker = Executors.newSingleThreadExecutor(
+            action -> new Thread(action, "Censor-product-accounting"));
+    private final BoundedLatestWork<AccountingInput> accounting;
+    private final BoundedLatestWork<CensorEngine.EvidenceReceipt> evidenceAdmission;
+    private StatsRepository stats; // Constructed/restored only on the serial lookup worker.
+    private final Function<Context, StatsRepository> statistics;
     private volatile String preferredPackage = "";
     private volatile String inputMethodPackage = "";
     private volatile Desired selected;
@@ -48,6 +80,7 @@ public final class CensorProductSession implements AutoCloseable {
     private List<Object> unavailableInference;
     private long scopeToken;
     private volatile boolean active, closed, failed;
+    private volatile boolean accountingQuarantined;
 
     public CensorProductSession(AccessibilityService service, SceneEngine.Policy policy, CensorTapTracker taps, Observer observer) {
         this(service, policy, taps, observer, VisualDetectorWorker::initialize);
@@ -58,10 +91,22 @@ public final class CensorProductSession implements AutoCloseable {
     }
     CensorProductSession(AccessibilityService service, SceneEngine.Policy policy, CensorTapTracker taps, Observer observer,
             AccessibilityCensorHost.WorkerFactory models, Runnable selectionObserved) {
+        this(service, policy, taps, observer, models, selectionObserved, StatsRepository::new);
+    }
+    /** Storage-result faults are isolated owned-emulator controls, never a product preference. */
+    CensorProductSession(AccessibilityService service, SceneEngine.Policy policy, CensorTapTracker taps, Observer observer,
+            AccessibilityCensorHost.WorkerFactory models, Runnable selectionObserved, Function<Context, StatsRepository> statistics) {
         onMain(); this.service = Objects.requireNonNull(service); this.taps = Objects.requireNonNull(taps);
         this.selectionObserved = Objects.requireNonNull(selectionObserved);
+        this.statistics = Objects.requireNonNull(statistics);
         this.observer = Objects.requireNonNull(observer); mode = new AppModeManager(service);
         preferences = new SettingsRepository(service).preferences();
+        accounting = new BoundedLatestWork<>(accountingWorker, this::recordEvidence,
+                failure -> quarantineAccounting(null, AccountingPhase.DISPATCH, AccountingStatus.UNCERTAIN, 0, 0));
+        evidenceAdmission = new BoundedLatestWork<>(action -> {
+            if (!main.post(action)) throw new RejectedExecutionException("Product main admission rejected");
+        }, this::acceptEvidence,
+                failure -> quarantineAccounting(null, AccountingPhase.DISPATCH, AccountingStatus.UNCERTAIN, 0, 0));
         controller = new AccessibilityCensorController(service, policy, taps,
                 new AccessibilityCensorController.Observer() {
                     @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) { observer.providerReady(lane, provider, millis); }
@@ -83,6 +128,10 @@ public final class CensorProductSession implements AutoCloseable {
                     @Override public void presentationChanged() { observer.presentationChanged(); }
                     @Override public void batchAccepted(SceneEngine.Batch batch) { observer.batchAccepted(batch); }
                     @Override public void nativeTextAccepted(com.subhub.app.censor.engine.NativeTextFrame frame) { observer.nativeTextAccepted(frame); }
+                    @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) {
+                        evidenceAdmission.offer(receipt);
+                        observer.evidenceAccepted(receipt);
+                    }
                     @Override public void painted(com.subhub.app.censor.engine.CensorEngine.PaintReceipt receipt) { observer.painted(receipt); }
                     @Override public void posted(SnapshotCensorSurface.Post receipt) { observer.posted(receipt); }
                     @Override public void endpointFailure() { main.post(() -> fail(new IllegalStateException("Replacement presentation endpoint failed"))); observer.endpointFailure(); }
@@ -128,6 +177,8 @@ public final class CensorProductSession implements AutoCloseable {
     public void stop() {
         onMain(); if (closed) return;
         reconciliation.invalidate();
+        evidenceAdmission.invalidate();
+        accounting.invalidate();
         selected = null; protection = null;
         boolean previous = active; active = false;
         controller.stop();
@@ -139,15 +190,20 @@ public final class CensorProductSession implements AutoCloseable {
         onMain(); if (closed) return;
         closed = true; active = false; selected = null; protection = null;
         reconciliation.close(); lookup.shutdown();
+        evidenceAdmission.close();
+        accounting.close(); accountingWorker.shutdown();
         try { controller.close(); } finally { observer.activeChanged(false); }
     }
     public boolean managedResourcesDrained() {
-        return closed && reconciliation.drained() && lookup.isTerminated() && controller.managedResourcesDrained();
+        return closed && reconciliation.drained() && lookup.isTerminated() && evidenceAdmission.drained() && accounting.drained()
+                && accountingWorker.isTerminated() && controller.managedResourcesDrained();
     }
     AccessibilityCensorController controller() { return controller; }
     AccessibilityService service() { return service; }
 
     private Desired read() {
+        if (stats == null) stats = Objects.requireNonNull(statistics.apply(service));
+        StatsRepository.SessionStamp session = stats.sessionStamp();
         ProductCensorSettings snapshot = new ProductCensorSettings(preferences);
         CensorLabCensorSession.Stamp lab = CensorLabCensorSession.stamp();
         String ime = mode.inputMethodPackage();
@@ -163,23 +219,26 @@ public final class CensorProductSession implements AutoCloseable {
         SnapshotPaintPolicy paint = SnapshotPaintPolicy.from(settings.loadDetectionPreset());
         CensorAppearance appearance = settings.loadAppearance();
         long revision = snapshot.getLong(CustomImageManager.REVISION_KEY, 0);
-        Desired result = new Desired(snapshot, lab, window, detector, text, appearance, paint, revision, eligible);
+        Desired result = new Desired(snapshot, lab, session, window, detector, text, appearance, paint, revision, eligible);
         selectionObserved.run(); // Adverse delivery control after all actual platform handles were released.
         return result;
     }
     private void commit(Desired value) {
         onMain(); if (closed || failed) return;
         long generation = reconciliation.generation();
-        if (!value.lab.isCurrent() || !value.settings.same(new ProductCensorSettings(preferences))) { request(); return; }
+        if (!value.lab.isCurrent() || value.session != StatsRepository.currentSessionStamp()
+                || !value.settings.same(new ProductCensorSettings(preferences))) { request(); return; }
         observer.foreground(value.window);
         if (!reconciliation.isCurrent(generation) || closed || failed) return;
-        if (!value.lab.isCurrent() || !value.settings.same(new ProductCensorSettings(preferences))) { request(); return; }
+        if (!value.lab.isCurrent() || value.session != StatsRepository.currentSessionStamp()
+                || !value.settings.same(new ProductCensorSettings(preferences))) { request(); return; }
         if (!value.eligible) { preferredPackage = ""; stop(); return; }
         if (value.inference.equals(unavailableInference)) { stop(); return; }
         unavailableInference = null;
         preferredPackage = value.window.packageName;
         ProtectionScope desiredProtection = value.lab.active ? ProtectionScope.lab(taps.scope()) : ProtectionScope.normal(taps.scope());
         if (active && selected != null && selected.window.same(value.window) && selected.lab == value.lab
+                && selected.session == value.session && selected.settings.sameParticipation(value.settings)
                 && selected.inference.equals(value.inference) && desiredProtection.equals(protection)) {
             if (!selected.appearanceKey.equals(value.appearanceKey)) {
                 controller.appearanceChanged(value.appearance, value.paint, value.artworkRevision);
@@ -201,18 +260,102 @@ public final class CensorProductSession implements AutoCloseable {
         failed = true; reconciliation.close();
         try { stop(); } finally { observer.sessionFailure(failure); }
     }
+    private static final class AccountingInput {
+        final Desired desired;
+        final CensorEngine.EvidenceReceipt receipt;
+        AccountingInput(Desired desired, CensorEngine.EvidenceReceipt receipt) {
+            this.desired = desired; this.receipt = receipt;
+        }
+    }
+    private void acceptEvidence(CensorEngine.EvidenceReceipt receipt) {
+        onMain(); Desired value = selected;
+        if (value == null) return;
+        AccountingInput input = new AccountingInput(value, receipt);
+        if (accountingCurrent(input)) accounting.offer(input);
+    }
+    private boolean accountingCurrent(AccountingInput input) {
+        Desired origin = input.desired, current = selected;
+        if (closed || failed || accountingQuarantined || !active || current == null || origin.lab.active
+                || !origin.lab.isCurrent() || origin.session == null || !origin.session.isCurrent()
+                || current.lab != origin.lab || current.session != origin.session
+                || !current.window.same(origin.window) || !current.inference.equals(origin.inference)
+                || !origin.settings.sameParticipation(current.settings) || !controller.evidenceCurrent(input.receipt)) return false;
+        ProductCensorSettings live = new ProductCensorSettings(preferences);
+        SettingsRepository settings = SettingsRepository.forPreferences(live);
+        return origin.settings.sameParticipation(live)
+                && origin.inference.equals(CensorConfigurationKey.inference(settings.loadDetectorConfig(), settings.loadTextSmutConfig()));
+    }
+    /** Short admission only: no disk, UI, observer or platform operation inside the Lab guard. */
+    private boolean admitAccounting(AccountingInput input) {
+        return CensorLabCensorSession.withCurrentNormal(input.desired.lab, () -> accountingCurrent(input), false);
+    }
+    private void recordEvidence(AccountingInput input) {
+        AccountingPhase phase = AccountingPhase.COUNT; int count = 0, charged = 0;
+        try {
+            if (!accountingCurrent(input)) { reportAccounting(input, phase, AccountingStatus.REJECTED, 0, 0); return; }
+            StatsRepository.EvidenceRecord record = stats.recordEvidence(input.desired.session,
+                    () -> CensorLabCensorSession.withCurrentNormal(input.desired.lab,
+                            () -> accountingCurrent(input) ? controller.claimEvidence(input.receipt, input.desired.session) : null, null),
+                    input.desired.detector.getEnabledCategories());
+            if (record.status == StatsRepository.EvidenceStatus.UNACKNOWLEDGED) {
+                quarantineAccounting(input, phase, AccountingStatus.UNACKNOWLEDGED, 0, 0); return;
+            }
+            if (record.status != StatsRepository.EvidenceStatus.COMMITTED) {
+                reportAccounting(input, phase, record.status == StatsRepository.EvidenceStatus.NO_NEW_EVIDENCE
+                        ? AccountingStatus.NO_NEW_EVIDENCE : AccountingStatus.REJECTED, 0, 0); return;
+            }
+            count = record.count;
+            reportAccounting(input, phase, AccountingStatus.COMMITTED, count, 0);
+            phase = AccountingPhase.LEDGER;
+            if (!admitAccounting(input)) { reportAccounting(input, phase, AccountingStatus.REJECTED, count, 0); return; }
+            PenanceManager penance = new PenanceManager(service);
+            long now = System.currentTimeMillis();
+            PenanceManager.SourceDetectionResult ledger = penance.recordSourceDetectionResult(count, now, input.desired.session);
+            charged = ledger.chargedCents;
+            // Zero cents can commit batch progress; never replay it.
+            reportAccounting(input, phase, ledger.status == PenanceManager.SourceDetectionStatus.ACKNOWLEDGED
+                    ? AccountingStatus.COMMITTED : AccountingStatus.REJECTED, count, charged);
+            phase = AccountingPhase.ACHIEVEMENTS;
+            if (!admitAccounting(input)) { reportAccounting(input, phase, AccountingStatus.REJECTED, count, charged); return; }
+            new AchievementManager(service).checkAchievements(record.snapshot);
+            // Existing achievement persistence uses apply(), not an acknowledged disk transaction.
+            reportAccounting(input, phase, AccountingStatus.APPLIED, count, charged);
+            phase = AccountingPhase.NOTIFICATION;
+            if (charged > 0 && admitAccounting(input)) {
+                PenanceChargeNotifier.show(service, penance, PenanceInfraction.NEW_DETECTION, charged, now,
+                        () -> accountingCurrent(input));
+            }
+        } catch (RuntimeException | Error uncertain) {
+            // Consumption/write may have happened. Retire accounting, never retry the source.
+            quarantineAccounting(input, phase, AccountingStatus.UNCERTAIN, count, charged);
+        }
+    }
+    private void quarantineAccounting(AccountingInput input, AccountingPhase phase, AccountingStatus status,
+            int count, int charged) {
+        accountingQuarantined = true; accounting.close();
+        reportAccounting(input, phase, status, count, charged);
+    }
+    private void reportAccounting(AccountingInput input, AccountingPhase phase, AccountingStatus status,
+            int count, int charged) {
+        try { observer.accounting(new AccountingResult(input == null ? null : input.receipt,
+                phase, status, count, charged, accounting.drops() + evidenceAdmission.drops())); }
+        catch (RuntimeException diagnosticFailure) { /* An observer cannot replay or strand accounting. */ }
+    }
     private static final class Desired {
         final ProductCensorSettings settings;
         final CensorLabCensorSession.Stamp lab;
+        final StatsRepository.SessionStamp session;
         final AccessibilityWindowReader.Window window;
         final DetectorConfig detector; final TextSmutConfig text;
         final CensorAppearance appearance; final SnapshotPaintPolicy paint;
         final List<Object> inference, appearanceKey;
         final long artworkRevision; final boolean eligible;
-        Desired(ProductCensorSettings settings, CensorLabCensorSession.Stamp lab, AccessibilityWindowReader.Window window,
+        Desired(ProductCensorSettings settings, CensorLabCensorSession.Stamp lab, StatsRepository.SessionStamp session,
+                AccessibilityWindowReader.Window window,
                 DetectorConfig detector, TextSmutConfig text, CensorAppearance appearance, SnapshotPaintPolicy paint,
                 long revision, boolean eligible) {
-            this.settings = settings; this.lab = lab; this.window = window; this.detector = detector; this.text = text;
+            this.settings = settings; this.lab = lab; this.session = session;
+            this.window = window; this.detector = detector; this.text = text;
             this.appearance = appearance; this.paint = paint; artworkRevision = revision; this.eligible = eligible;
             inference = CensorConfigurationKey.inference(detector, text);
             appearanceKey = CensorConfigurationKey.appearance(appearance, paint, revision);

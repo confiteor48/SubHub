@@ -177,8 +177,15 @@ public final class CensorEngine<P> implements AutoCloseable {
     public static final class EvidenceClaim {
         public final EvidenceReceipt receipt;
         public final List<SceneEngine.AcceptedSubject> subjects;
-        private EvidenceClaim(EvidenceReceipt receipt, List<SceneEngine.AcceptedSubject> subjects) {
-            this.receipt = receipt; this.subjects = subjects;
+        private final Object consumerScope;
+        private final AtomicBoolean delivered = new AtomicBoolean();
+        private EvidenceClaim(EvidenceReceipt receipt, List<SceneEngine.AcceptedSubject> subjects, Object consumerScope) {
+            this.receipt = receipt; this.subjects = subjects; this.consumerScope = consumerScope;
+        }
+        /** Original capability delivery, once, to its captured consumer. A wrapper cannot rearm it. */
+        public List<SceneEngine.AcceptedSubject> takeFor(Object expectedScope) {
+            return expectedScope != null && consumerScope == expectedScope && delivered.compareAndSet(false, true)
+                    ? subjects : null;
         }
     }
 
@@ -837,9 +844,14 @@ public final class CensorEngine<P> implements AutoCloseable {
      * This is not a transaction with a downstream store: failed writes must not be retried as claims.
      */
     public synchronized EvidenceClaim claimEvidence(EvidenceReceipt receipt) {
+        return claimEvidence(receipt, null);
+    }
+
+    /** Consumer binding is opaque to the owner, and cannot replace its captured/current scope. */
+    public synchronized EvidenceClaim claimEvidence(EvidenceReceipt receipt, Object consumerScope) {
         if (receipt == null || !isCurrent(receipt.scope)) return null;
         List<SceneEngine.AcceptedSubject> claimed = scene.consumeEvidence(receipt.source, receipt.subjects, clock.getAsLong());
-        return claimed == null ? null : new EvidenceClaim(receipt, claimed);
+        return claimed == null ? null : new EvidenceClaim(receipt, claimed, consumerScope);
     }
 
     private void acceptedEvidence(SceneEngine.Source source, SceneEngine.Lane lane, List<Runnable> actions) {

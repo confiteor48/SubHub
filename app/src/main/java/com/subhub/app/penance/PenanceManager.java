@@ -291,47 +291,88 @@ public final class PenanceManager {
 
     /** Returns the bounded amount added to the ledger in cents. */
     public int recordInfraction(PenanceInfraction infraction, int count, long nowMillis) {
+        return recordInfractionResult(infraction, count, nowMillis, null).chargedCents;
+    }
+
+    public enum SourceDetectionStatus { REJECTED, APPLIED, ACKNOWLEDGED }
+    public static final class SourceDetectionResult {
+        public final SourceDetectionStatus status;
+        public final int chargedCents;
+        private SourceDetectionResult(SourceDetectionStatus status, int chargedCents) {
+            this.status = status; this.chargedCents = chargedCents;
+        }
+    }
+
+    /** Source accounting uses acknowledged local writes; ordinary legacy callers retain apply(). */
+    public int recordSourceDetection(int count, long nowMillis, StatsRepository.SessionStamp expected) {
+        return recordSourceDetectionResult(count, nowMillis, expected).chargedCents;
+    }
+
+    /** Rejection and acknowledged zero-cent batch progress are different outcomes. */
+    public SourceDetectionResult recordSourceDetectionResult(int count, long nowMillis, StatsRepository.SessionStamp expected) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            throw new IllegalStateException("Source ledger commit must be off main");
+        }
+        if (expected == null) return new SourceDetectionResult(SourceDetectionStatus.REJECTED, 0);
+        return recordInfractionResult(PenanceInfraction.NEW_DETECTION, count, nowMillis, expected);
+    }
+
+    private SourceDetectionResult recordInfractionResult(PenanceInfraction infraction, int count, long nowMillis,
+            StatsRepository.SessionStamp sourceSession) {
+        SourceDetectionResult rejected = new SourceDetectionResult(SourceDetectionStatus.REJECTED, 0);
+        SourceDetectionStatus written = sourceSession == null ? SourceDetectionStatus.APPLIED : SourceDetectionStatus.ACKNOWLEDGED;
         if ((infraction == PenanceInfraction.NEW_DETECTION
                 || infraction == PenanceInfraction.CENSORED_DWELL
-                || infraction == PenanceInfraction.CENSORED_TAP) && !modules.isCensorEnabled()) return 0;
+                || infraction == PenanceInfraction.CENSORED_TAP) && !modules.isCensorEnabled()) return rejected;
         if (infraction == null || !isEnabled() || !isInfractionEnabled(infraction)
-                || !new AppModeManager(context).isArmed() || count <= 0) return 0;
+                || !new AppModeManager(context).isArmed() || count <= 0) return rejected;
         synchronized (LOCK) {
+            if (sourceSession != null && !sourceSession.isCurrent()) return rejected;
+            SharedPreferences.Editor acknowledged = sourceSession == null ? null : preferences.edit();
             if (infraction == PenanceInfraction.TAMPER_ATTEMPT) {
                 HardcoreModeManager hardcore = new HardcoreModeManager(context);
-                if (!hardcore.isRequested()) return 0;
+                if (!hardcore.isRequested()) return rejected;
                 long last = preferences.getLong(KEY_LAST_TAMPER_AT, 0L);
                 long cooldown = getTamperCooldownMinutes() * 60_000L;
-                if (last > 0L && nowMillis >= last && nowMillis - last < cooldown) return 0;
+                if (last > 0L && nowMillis >= last && nowMillis - last < cooldown) return rejected;
             }
             int billableCount = count;
             if (infraction == PenanceInfraction.NEW_DETECTION) {
                 int batch = getDetectionBatch();
                 int accumulated = preferences.getInt(KEY_DETECTION_REMAINDER, 0) + count;
                 billableCount = accumulated / batch;
-                preferences.edit().putInt(
-                        KEY_DETECTION_REMAINDER, accumulated % batch).apply();
-                if (billableCount <= 0) return 0;
+                if (acknowledged == null) preferences.edit().putInt(KEY_DETECTION_REMAINDER, accumulated % batch).apply();
+                else acknowledged.putInt(KEY_DETECTION_REMAINDER, accumulated % batch);
+                if (billableCount <= 0) { acknowledge(acknowledged); return new SourceDetectionResult(written, 0); }
             }
             List<PenanceEvent> events = loadEvents();
             trimHistoryForInsertion(events);
-            if (events.size() >= MAX_EVENTS) return 0;
+            if (events.size() >= MAX_EVENTS) { acknowledge(acknowledged); return new SourceDetectionResult(written, 0); }
             int amount = PenancePolicy.boundedCharge(currentCurrencyEvents(events), nowMillis, billableCount,
                     getInfractionCents(infraction), getDailyCapCents(), getWeeklyCapCents(),
                     ZoneId.systemDefault());
-            if (amount <= 0) return 0;
+            if (amount <= 0) { acknowledge(acknowledged); return new SourceDetectionResult(written, 0); }
             long mercyEnds = nowMillis + getMercyMinutes() * 60_000L;
             events.add(new PenanceEvent(UUID.randomUUID().toString(), nowMillis, mercyEnds,
                     amount, billableCount, infraction, PenanceEvent.Status.OPEN, "", getCurrency()));
-            saveEvents(events);
-            new StatsRepository(context).recordTributeEvent(amount,
-                    infraction == PenanceInfraction.TAMPER_ATTEMPT, getCurrency());
+            if (acknowledged == null) {
+                saveEvents(events);
+                new StatsRepository(context).recordTributeEvent(amount,
+                        infraction == PenanceInfraction.TAMPER_ATTEMPT, getCurrency());
+            } else {
+                acknowledge(acknowledged.putString(KEY_EVENTS, encodeEvents(events)));
+                new StatsRepository(context).recordSourceTribute(sourceSession, amount, getCurrency());
+            }
             if (infraction == PenanceInfraction.TAMPER_ATTEMPT) {
                 preferences.edit().putLong(KEY_LAST_TAMPER_AT, nowMillis).apply();
             }
             HardcoreAutoPayManager.schedule(context);
-            return amount;
+            return new SourceDetectionResult(written, amount);
         }
+    }
+
+    private static void acknowledge(SharedPreferences.Editor edit) {
+        if (edit != null && !edit.commit()) throw new IllegalStateException("Source ledger store unacknowledged");
     }
 
     private static int clampTamperCooldown(int minutes) {
@@ -727,6 +768,10 @@ public final class PenanceManager {
     }
 
     private void saveEvents(List<PenanceEvent> events) {
+        preferences.edit().putString(KEY_EVENTS, encodeEvents(events)).apply();
+    }
+
+    private static String encodeEvents(List<PenanceEvent> events) {
         trimHistory(events);
         List<String> encoded = new ArrayList<>(events.size());
         for (PenanceEvent event : events) {
@@ -738,7 +783,7 @@ public final class PenanceManager {
                     event.getStatus().name(), event.getSettlementId(),
                     event.getInfraction().name(), event.getCurrency()));
         }
-        preferences.edit().putString(KEY_EVENTS, String.join(";", encoded)).apply();
+        return String.join(";", encoded);
     }
 
     private static void trimHistory(List<PenanceEvent> events) {

@@ -122,6 +122,9 @@ public final class AccessibilityCensorController implements AutoCloseable {
             @Override public void nativeTextAccepted(com.subhub.app.censor.engine.NativeTextFrame frame) {
                 if (sourceCurrent(frame.source.epoch, frame.source.geometry)) observer.nativeTextAccepted(frame);
             }
+            @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) {
+                if (paintEligible(receipt.scope)) observer.evidenceAccepted(receipt);
+            }
             @Override public void painted(CensorEngine.PaintReceipt receipt) { observer.painted(receipt); }
             @Override public void drained() { ownerDrained = true; observer.drained(); }
             @Override public void executorsTerminated(boolean disposed) {
@@ -251,6 +254,10 @@ public final class AccessibilityCensorController implements AutoCloseable {
     }
 
     public CensorEngine.ActiveScope activeScope() { return host.activeScope(); }
+    boolean evidenceCurrent(CensorEngine.EvidenceReceipt receipt) { return receipt != null && paintEligible(receipt.scope); }
+    CensorEngine.EvidenceClaim claimEvidence(CensorEngine.EvidenceReceipt receipt, Object consumerScope) {
+        return evidenceCurrent(receipt) ? host.claimEvidence(receipt, consumerScope) : null;
+    }
     AccessibilityCensorHost host() { return host; }
     SnapshotCensorSurface surface() { return surface; }
     AccessibilityWindowReader windows() { return windows; }

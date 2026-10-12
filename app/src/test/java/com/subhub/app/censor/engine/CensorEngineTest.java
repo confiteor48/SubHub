@@ -124,6 +124,37 @@ public class CensorEngineTest {
         assertEquals(1, h.accepted.size()); assertTrue(h.evidence.isEmpty()); h.engine.close();
     }
 
+    @Test public void originalEvidenceClaimDeliversOnceOnlyToItsBoundConsumer() {
+        Harness h = fiveSourceHarness(); Object consumer = new Object();
+        CensorEngine.EvidenceClaim claim = h.engine.claimEvidence(h.evidence.get(4), consumer);
+        assertNull(claim.takeFor(null)); assertNull(claim.takeFor(new Object()));
+        assertSame(claim.subjects, claim.takeFor(consumer)); assertNull(claim.takeFor(consumer));
+        CensorEngine.EvidenceClaim freshWrapper = h.engine.claimEvidence(h.evidence.get(4), consumer);
+        assertTrue(freshWrapper.takeFor(consumer).isEmpty()); h.engine.close();
+    }
+
+    @Test public void unboundCoreClaimCannotBecomeAConsumerCapability() {
+        Harness h = fiveSourceHarness(); CensorEngine.EvidenceClaim claim = h.engine.claimEvidence(h.evidence.get(4));
+        assertEquals(1, claim.subjects.size()); assertNull(claim.takeFor(new Object())); assertNull(claim.takeFor(null)); h.engine.close();
+    }
+
+    @Test public void concurrentOriginalClaimDeliveryHasExactlyOneWinner() throws Exception {
+        Harness h = fiveSourceHarness(); Object consumer = new Object();
+        CensorEngine.EvidenceClaim claim = h.engine.claimEvidence(h.evidence.get(4), consumer);
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(4);
+        java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(4), go = new java.util.concurrent.CountDownLatch(1);
+        java.util.List<java.util.concurrent.Future<Integer>> attempts = new java.util.ArrayList<>();
+        try {
+            for (int i = 0; i < 4; i++) attempts.add(pool.submit(() -> {
+                ready.countDown(); assertTrue(go.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                return claim.takeFor(consumer) == null ? 0 : 1;
+            }));
+            assertTrue(ready.await(5, java.util.concurrent.TimeUnit.SECONDS)); go.countDown(); int winners = 0;
+            for (java.util.concurrent.Future<Integer> attempt : attempts) winners += attempt.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertEquals(1, winners);
+        } finally { go.countDown(); pool.shutdownNow(); h.engine.close(); }
+    }
+
     private static Harness fiveSourceHarness() {
         Harness h = new Harness(); h.start();
         for (int i = 0; i < 5; i++) {
