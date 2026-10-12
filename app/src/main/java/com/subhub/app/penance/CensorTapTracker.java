@@ -18,6 +18,7 @@ public final class CensorTapTracker {
     private long scope;
     private long drawnAtUptimeMillis;
     private long geometryStartedAtUptimeMillis;
+    private boolean suspended;
 
     /** One process-wide hit map shared by App Mode and Screen Capture. */
     public static CensorTapTracker shared() { return SHARED; }
@@ -52,6 +53,7 @@ public final class CensorTapTracker {
         boxes = List.copyOf(current);
         viewport = currentViewport;
         drawnAtUptimeMillis = drawnAtUptime;
+        suspended = false;
     }
 
     public synchronized boolean matchesClick(
@@ -118,6 +120,7 @@ public final class CensorTapTracker {
         owner = null;
         drawnAtUptimeMillis = 0L;
         geometryStartedAtUptimeMillis = 0L;
+        suspended = false;
     }
 
     /** An old/detached or exported View cannot invalidate another live overlay's map. */
@@ -133,11 +136,26 @@ public final class CensorTapTracker {
      */
     public synchronized void withdrawDisplayed(Object publisher) {
         if (owner != publisher) return;
-        boxes = List.of(); owner = null; drawnAtUptimeMillis = 0L; geometryStartedAtUptimeMillis = 0L;
+        boxes = List.of(); owner = null; drawnAtUptimeMillis = 0L; geometryStartedAtUptimeMillis = 0L; suspended = false;
+    }
+
+    /**
+     * Before asynchronous native submission, no prior point is billable until current admission.
+     * Identical conservative coverage retains its geometry start for delayed stationary clicks.
+     * Changed/empty coverage withdraws that continuity even if its completion is later coalesced.
+     * Supplied rectangles must already be clipped conservative interiors, not detection bounds.
+     */
+    public synchronized void suspendDisplayed(Object publisher, long expectedScope,
+            List<BBox> nextInteriors, BBox nextViewport) {
+        if (owner != publisher) return;
+        if (scope != expectedScope || nextInteriors == null || nextInteriors.isEmpty()
+                || !boxes.equals(nextInteriors) || !viewport.equals(nextViewport)) {
+            withdrawDisplayed(publisher);
+        } else suspended = true;
     }
 
     private boolean fresh(long nowUptimeMillis) {
-        return !boxes.isEmpty() && drawnAtUptimeMillis > 0L
+        return !suspended && !boxes.isEmpty() && drawnAtUptimeMillis > 0L
                 && nowUptimeMillis >= drawnAtUptimeMillis
                 && nowUptimeMillis - drawnAtUptimeMillis <= MAX_DISPLAY_AGE_MILLIS;
     }

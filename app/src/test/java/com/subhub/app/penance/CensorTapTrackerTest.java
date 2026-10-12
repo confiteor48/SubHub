@@ -58,6 +58,37 @@ public final class CensorTapTrackerTest {
         assertFalse(tracker.matchesClickAt(110, 110, 190, 190, 2050L, 2200L));
     }
 
+    @Test public void asynchronousSameCoverageSuspendsBillingButRetainsStationaryClickContinuity() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        List<BBox> regions = List.of(new BBox(100, 200, 100, 100));
+        publish(tracker, regions, 1000L);
+        tracker.suspendDisplayed(tracker, tracker.scope(), regions, viewport());
+        assertFalse(tracker.matchesPoint(150, 250, 1000, 2000, 1200L));
+        assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1200L));
+        publish(tracker, regions, 1300L);
+        assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1400L));
+    }
+
+    @Test public void changedOrEmptyCoalescedPostBreaksPriorGeometryContinuity() {
+        for (List<BBox> next : List.of(List.<BBox>of(), List.of(new BBox(100, 100, 100, 100)))) {
+            CensorTapTracker tracker = new CensorTapTracker();
+            List<BBox> original = List.of(new BBox(100, 200, 100, 100));
+            publish(tracker, original, 1000L);
+            tracker.suspendDisplayed(tracker, tracker.scope(), next, viewport());
+            assertFalse(tracker.matchesPoint(150, 250, 1000, 2000, 1200L));
+            publish(tracker, original, 1300L);
+            assertFalse(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1400L));
+            assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 1350L, 1400L));
+        }
+    }
+
+    @Test public void foreignAsyncPublisherCannotSuspendAnotherLiveMap() {
+        CensorTapTracker tracker = new CensorTapTracker();
+        publish(tracker, List.of(new BBox(100, 200, 100, 100)), 1000L);
+        tracker.suspendDisplayed(new Object(), tracker.scope(), List.of(), viewport());
+        assertTrue(tracker.matchesClickAt(110, 210, 190, 290, 1100L, 1200L));
+    }
+
     @Test public void oldScopeCannotRearmAfterStopOrForegroundChange() {
         CensorTapTracker tracker = new CensorTapTracker();
         Object publisher = new Object();
