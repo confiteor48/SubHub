@@ -405,6 +405,53 @@ public final class SceneEngine {
         }
     }
 
+    /** A distinct admitted producer operation, not a lane result, redraw or image sequence alias. */
+    public static final class EvidenceWitness {
+        public final SourceKind kind;
+        public final long producerIdentity;
+        public final long sourceSequence;
+
+        private EvidenceWitness(SourceKind kind, long producerIdentity, long sourceSequence) {
+            this.kind = kind;
+            this.producerIdentity = producerIdentity;
+            this.sourceSequence = sourceSequence;
+        }
+
+        @Override public boolean equals(Object other) {
+            if (!(other instanceof EvidenceWitness)) return false;
+            EvidenceWitness value = (EvidenceWitness) other;
+            return kind == value.kind && producerIdentity == value.producerIdentity;
+        }
+
+        @Override public int hashCode() { return 31 * kind.hashCode() + Long.hashCode(producerIdentity); }
+    }
+
+    /** Sanitized accepted evidence. No display projection, pixels, caption or provider node. */
+    public static final class AcceptedSubject {
+        public final long identity, partition, textGroup;
+        public final String category;
+        public final Source source;
+        public final Region region;
+        public final Lane evidenceLane;
+        public final List<EvidenceWitness> witnesses;
+        /** Separate from the two-QUALITY confirmation used exclusively for retention. */
+        public final boolean confirmedForConsumption;
+        public final boolean alreadyConsumed;
+        public final long validUntilMillis;
+
+        private AcceptedSubject(Track track, long validUntilMillis) {
+            identity = track.identity; partition = track.partition; textGroup = track.textGroup;
+            category = track.category; source = track.evidenceSource; region = track.evidenceRegion;
+            evidenceLane = track.latestLane;
+            List<EvidenceWitness> ordered = new ArrayList<>(track.sourceWitnesses);
+            ordered.sort((a, b) -> Long.compare(a.sourceSequence, b.sourceSequence));
+            witnesses = immutable(ordered);
+            confirmedForConsumption = witnesses.size() == CONSUMPTION_SOURCE_COUNT;
+            alreadyConsumed = track.evidenceConsumed;
+            this.validUntilMillis = validUntilMillis;
+        }
+    }
+
     /** Explicit text grouping retains every member's geometry and effect provenance. */
     public static final class Group {
         public final Region bounds;
@@ -492,6 +539,9 @@ public final class SceneEngine {
         final Set<Long> distinctFrom = new HashSet<>();
         final Set<Long> qualitySources = new HashSet<>();
         final Set<Long> negativeSources = new HashSet<>();
+        final Set<EvidenceWitness> sourceWitnesses = new HashSet<>();
+        long freshSourceSequence;
+        boolean evidenceConsumed;
         long basis;
         Region region;
         Source evidenceSource;
@@ -505,13 +555,26 @@ public final class SceneEngine {
         long nativeValidUntilMillis;
 
         Track(long identity, Batch batch, Observation observation) {
+            this(identity, batch, observation, imageWitness(batch.source));
+        }
+
+        Track(long identity, Batch batch, Observation observation, EvidenceWitness witness) {
             this.identity = identity;
             category = observation.category;
             partition = observation.partition;
-            update(batch, observation);
+            update(batch, observation, witness);
         }
 
         void update(Batch batch, Observation observation) {
+            update(batch, observation, imageWitness(batch.source));
+        }
+
+        void update(Batch batch, Observation observation, EvidenceWitness witness) {
+            // Old/out-of-order completion may improve retention, but cannot become fresh input.
+            if (batch.source.sequence > freshSourceSequence) {
+                freshSourceSequence = batch.source.sequence;
+                if (witness != null) addWitness(sourceWitnesses, witness);
+            }
             if (batch.lane == Lane.QUALITY) addIndependent(qualitySources, batch.source.sequence);
             if (batch.lane != Lane.QUALITY) fastVisible = true;
             confirmed = confirmed || qualitySources.size() >= 2;
@@ -526,6 +589,22 @@ public final class SceneEngine {
                 textGroup = batch.lane == Lane.TEXT ? observation.textGroup : 0;
                 negativeSources.clear();
             }
+        }
+    }
+
+    public static final int CONSUMPTION_SOURCE_COUNT = 5;
+
+    private static EvidenceWitness imageWitness(Source source) {
+        return source.kind == SourceKind.IMAGE
+                ? new EvidenceWitness(SourceKind.IMAGE, source.imageRequestIdentity, source.sequence) : null;
+    }
+
+    private static void addWitness(Set<EvidenceWitness> witnesses, EvidenceWitness witness) {
+        witnesses.add(witness);
+        if (witnesses.size() > CONSUMPTION_SOURCE_COUNT) {
+            EvidenceWitness oldest = Collections.min(witnesses,
+                    (a, b) -> Long.compare(a.sourceSequence, b.sourceSequence));
+            witnesses.remove(oldest);
         }
     }
 
@@ -1014,8 +1093,10 @@ public final class SceneEngine {
                             && nativeMatches(track, candidate, source)) { match = track; break; }
                 }
                 Batch batch = new Batch(source, Lane.TEXT, Collections.singletonList(observation), Collections.emptyList());
-                if (match == null) match = new Track(++nextIdentity, batch, observation);
-                else match.update(batch, observation);
+                EvidenceWitness witness = frame.requestIdentity > 0
+                        ? new EvidenceWitness(SourceKind.NATIVE_TEXT, frame.requestIdentity, source.sequence) : null;
+                if (match == null) match = new Track(++nextIdentity, batch, observation, witness);
+                else match.update(batch, observation, witness);
                 match.nativeCandidate = candidate; match.nativeLine = line;
                 match.nativeValidUntilMillis = frame.validUntilMillis;
                 match.distinctFrom.clear(); match.qualitySources.clear(); match.negativeSources.clear();
@@ -1042,6 +1123,47 @@ public final class SceneEngine {
         boolean removed = tracks.removeIf(track -> track.nativeCandidate != null && track.partition == partition);
         if (nativeFrames.remove(partition) != null || removed) revision++;
         pruneDistinctRelations();
+    }
+
+    /** Current canonical positive inventory at one source; the accepted input is only its trigger. */
+    synchronized List<AcceptedSubject> acceptedSubjects(Source source, long nowMillis) {
+        List<AcceptedSubject> accepted = new ArrayList<>();
+        if (motionConflict || source.epoch != epoch) return immutable(accepted);
+        for (Track track : tracks) {
+            if (!track.evidenceSource.sameDescriptor(source) || !track.negativeSources.isEmpty()
+                    || expired(track, nowMillis) || !track.evidenceRegion.visible(source)) continue;
+            accepted.add(new AcceptedSubject(track, evidenceValidUntil(track)));
+        }
+        return immutable(accepted);
+    }
+
+    /** Atomic validation then consumption; removed aliases and changed sources never resolve. */
+    synchronized List<AcceptedSubject> consumeEvidence(Source source, List<AcceptedSubject> subjects, long nowMillis) {
+        if (motionConflict || source.epoch != epoch) return null;
+        List<Track> selected = new ArrayList<>();
+        List<AcceptedSubject> consumed = new ArrayList<>();
+        for (AcceptedSubject subject : subjects) {
+            Track current = null;
+            for (Track track : tracks) if (track.identity == subject.identity) { current = track; break; }
+            if (current == null || !current.evidenceSource.sameDescriptor(source)
+                    || subject.source != current.evidenceSource || !current.negativeSources.isEmpty()
+                    || current.evidenceRegion != subject.region || current.latestLane != subject.evidenceLane
+                    || current.textGroup != subject.textGroup || !current.evidenceRegion.visible(source)
+                    || nowMillis > subject.validUntilMillis || expired(current, nowMillis)) return null;
+            if (subject.confirmedForConsumption && !subject.alreadyConsumed && !current.evidenceConsumed) {
+                if (current.sourceWitnesses.size() != CONSUMPTION_SOURCE_COUNT) return null;
+                selected.add(current); consumed.add(subject);
+            }
+        }
+        for (Track track : selected) track.evidenceConsumed = true;
+        return immutable(consumed);
+    }
+
+    private long evidenceValidUntil(Track track) {
+        if (track.nativeCandidate != null) return track.nativeValidUntilMillis;
+        long hold = track.confirmed ? policy.retainedMillis : policy.transientMillis;
+        long received = track.evidenceSource.receivedAtMillis;
+        return received >= Long.MAX_VALUE - hold ? Long.MAX_VALUE : received + hold;
     }
 
     /** Only this method constructs render geometry. Unknown correspondence stays explicit. */
@@ -1397,6 +1519,9 @@ public final class SceneEngine {
                 }
                 kept.distinctFrom.remove(kept.identity);
                 for (Long sequence : other.qualitySources) addIndependent(kept.qualitySources, sequence);
+                for (EvidenceWitness witness : other.sourceWitnesses) addWitness(kept.sourceWitnesses, witness);
+                kept.freshSourceSequence = Math.max(kept.freshSourceSequence, other.freshSourceSequence);
+                kept.evidenceConsumed |= other.evidenceConsumed;
                 kept.negativeSources.addAll(other.negativeSources);
                 kept.fastVisible |= other.fastVisible;
                 kept.confirmed |= other.confirmed || kept.qualitySources.size() >= 2;

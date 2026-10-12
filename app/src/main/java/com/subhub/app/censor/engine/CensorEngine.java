@@ -83,6 +83,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         default void batchAccepted(SceneEngine.Batch batch) { }
         /** Complete typed native read; no image timing/ownership is implied by this callback. */
         default void nativeTextAccepted(NativeTextFrame frame) { }
+        /** Canonical source-owned subjects; never inferred from presentation or a draw. */
+        default void evidenceAccepted(EvidenceReceipt receipt) { }
         /** Actual qualified surface recording, not capture, inference or compositor completion. */
         default void painted(PaintReceipt receipt) { }
         /** Permanent close has no remaining capture, job, pixel or draw-handle owner. */
@@ -148,6 +150,35 @@ public final class CensorEngine<P> implements AutoCloseable {
         public boolean same(ActiveScope other) {
             return other != null && authority == other.authority && epoch == other.epoch
                     && geometry == other.geometry && protectionScope.equals(other.protectionScope);
+        }
+    }
+
+    /** Immutable canonical source-state capability, minted after accepted input mutation. */
+    public static final class EvidenceReceipt {
+        public final ActiveScope scope;
+        public final SceneEngine.Source source;
+        /** Lane whose acceptance triggered this inventory, not provenance of every member. */
+        public final SceneEngine.Lane triggerLane;
+        public final long acceptedAtMillis;
+        /**
+         * All surviving positives whose latest evidence is this exact source, across its lanes.
+         * Empty means no positive at this source, not empty input or whole-viewport absence.
+         */
+        public final List<SceneEngine.AcceptedSubject> subjects;
+
+        private EvidenceReceipt(ActiveScope scope, SceneEngine.Source source, SceneEngine.Lane lane,
+                long atMillis, List<SceneEngine.AcceptedSubject> subjects) {
+            this.scope = scope; this.source = source; this.triggerLane = lane;
+            acceptedAtMillis = atMillis; this.subjects = subjects;
+        }
+    }
+
+    /** At-most-once evidence consumption, not proof of persistent statistics or a billing write. */
+    public static final class EvidenceClaim {
+        public final EvidenceReceipt receipt;
+        public final List<SceneEngine.AcceptedSubject> subjects;
+        private EvidenceClaim(EvidenceReceipt receipt, List<SceneEngine.AcceptedSubject> subjects) {
+            this.receipt = receipt; this.subjects = subjects;
         }
     }
 
@@ -801,6 +832,25 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     /**
+     * Product must check its captured/current eligibility and active stats session BEFORE claiming.
+     * Null is stale/foreign/retired evidence; an empty claim is valid but consumes no new identity.
+     * This is not a transaction with a downstream store: failed writes must not be retried as claims.
+     */
+    public synchronized EvidenceClaim claimEvidence(EvidenceReceipt receipt) {
+        if (receipt == null || !isCurrent(receipt.scope)) return null;
+        List<SceneEngine.AcceptedSubject> claimed = scene.consumeEvidence(receipt.source, receipt.subjects, clock.getAsLong());
+        return claimed == null ? null : new EvidenceClaim(receipt, claimed);
+    }
+
+    private void acceptedEvidence(SceneEngine.Source source, SceneEngine.Lane lane, List<Runnable> actions) {
+        long now = clock.getAsLong();
+        EvidenceReceipt receipt = new EvidenceReceipt(activeScope(), source, lane, now, scene.acceptedSubjects(source, now));
+        actions.add(() -> {
+            if (isCurrent(receipt.scope)) observer.evidenceAccepted(receipt);
+        });
+    }
+
+    /**
      * Called only after actual attached, visible, qualified surface recording. No first-censor
      * inference from UI delivery. Empty ordinary paint and stale/foreign identities are rejected.
      * A receipt records the drawing hook; Android compositor/pixel-arrival remains unknown.
@@ -1020,6 +1070,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                             }
                             queuePresentation(actions);
                             actions.add(() -> observer.nativeTextAccepted(frame));
+                            acceptedEvidence(source, SceneEngine.Lane.TEXT, actions);
                         }
                     }
                 }
@@ -1297,6 +1348,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                 }
                 queuePresentation(actions);
                 actions.add(() -> observer.batchAccepted(batch));
+                acceptedEvidence(batch.source, batch.lane, actions);
             } else if (batch != null) trace(Stage.RESULT_REJECTED, job.frame.source,
                     job.lane.specification.lane, 0, null, actions);
             actions.add(job.frame::release);

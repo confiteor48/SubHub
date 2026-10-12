@@ -10,6 +10,51 @@ import java.util.concurrent.Executor;
 import org.junit.Test;
 
 public class NativeTextEngineTest {
+    @Test public void nativeSourceReceiptsNeedFiveActualReadsAndConsumeOneLiveNode() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42, ProtectionScope.normal(9));
+        for (int i = 0; i < 5; i++) {
+            long at = i * 140L; if (i > 0) h.engine.requestNativeTextAt(at, false);
+            h.fire(at); h.nativeExecutor.runAll();
+            h.finishNative(i, at + 10, at + 20, 1000); h.ui.runAll();
+            CensorEngine.EvidenceReceipt receipt = h.evidence.get(i);
+            assertEquals(SceneEngine.SourceKind.NATIVE_TEXT, receipt.source.kind);
+            assertEquals(0, receipt.source.imageRequestIdentity);
+            assertEquals(ProtectionScope.normal(9), receipt.scope.protectionScope);
+            assertEquals(i + 1, receipt.subjects.get(0).witnesses.size());
+            assertEquals(i + 1, receipt.subjects.get(0).witnesses.get(i).producerIdentity);
+            assertEquals(i == 4 ? 1 : 0, h.engine.claimEvidence(receipt).subjects.size());
+        }
+        assertTrue(h.engine.claimEvidence(h.evidence.get(4)).subjects.isEmpty());
+        assertEquals(0, h.engine.livePixelFrames()); h.close(); assertEquals(1, h.drained);
+    }
+
+    @Test public void acceptedNativeEmptyWithdrawsOldIdentityClaimAuthority() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42);
+        for (int i = 0; i < 5; i++) {
+            long at = i * 140L; if (i > 0) h.engine.requestNativeTextAt(at, false);
+            h.fire(at); h.nativeExecutor.runAll(); h.finishNative(i, at + 10, at + 20, 1000); h.ui.runAll();
+        }
+        CensorEngine.EvidenceReceipt old = h.evidence.get(4);
+        h.engine.requestNativeTextAt(700, false); h.fire(700); h.nativeExecutor.runAll(); h.finishNative(5, 710, 720); h.ui.runAll();
+        assertNull(h.engine.claimEvidence(old)); assertTrue(h.evidence.get(5).subjects.isEmpty());
+        assertTrue(h.engine.claimEvidence(h.evidence.get(5)).subjects.isEmpty()); h.close();
+    }
+
+    @Test public void nativeEvidenceExpiresWithoutAnotherProviderReadAndKeepsCapturedProtection() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42, ProtectionScope.lab(9));
+        for (int i = 0; i < 5; i++) {
+            long at = i * 140L; if (i > 0) h.engine.requestNativeTextAt(at, false);
+            h.fire(at); h.nativeExecutor.runAll(); h.finishNative(i, at + 10, at + 20, 1000); h.ui.runAll();
+        }
+        CensorEngine.EvidenceReceipt receipt = h.evidence.get(4);
+        assertFalse(receipt.scope.protectionScope.isNormal());
+        h.now = receipt.subjects.get(0).validUntilMillis + 1; assertNull(h.engine.claimEvidence(receipt));
+        h.engine.changeScope(42, ProtectionScope.normal(10)); assertNull(h.engine.claimEvidence(receipt)); h.close();
+    }
+
     @Test public void onlyFiniteAcceptedNativeCoverageSuppressesImageOcrFallback() {
         Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
         h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); assertFalse(h.engine.imageTextSuppressed());
@@ -297,6 +342,7 @@ public class NativeTextEngineTest {
         final List<CensorEngine.NativeTextInput> nativeInputs = new ArrayList<>();
         final List<CensorEngine.NativeTextCompletion> nativeCompletions = new ArrayList<>();
         final List<NativeTextFrame> nativeFrames = new ArrayList<>();
+        final List<CensorEngine.EvidenceReceipt> evidence = new ArrayList<>();
         final List<CensorEngine.Trace> traces = new ArrayList<>();
         final CensorEngine<Pixel> engine;
         Harness() { this(16); }
@@ -314,6 +360,7 @@ public class NativeTextEngineTest {
                     new CensorEngine.Observer() {
                         @Override public void trace(CensorEngine.Trace trace) { traces.add(trace); }
                         @Override public void nativeTextAccepted(NativeTextFrame frame) { nativeFrames.add(frame); }
+                        @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { evidence.add(receipt); }
                         @Override public void drained() { drained++; }
                     }, new CensorEngine.NativeTextLane(nativePartition, 120, 1000, nativeExecutor, (input, completion) -> {
                         nativeInputs.add(input); nativeCompletions.add(completion);

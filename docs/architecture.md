@@ -39,6 +39,39 @@ Source-dependent effects transfer the already-owned capture bitmap to the overla
 
 `BootReceiver` is non-exported and performs no capture. Normal boot preserves the last armed/disarmed state. An active service lock or Hardcore Mode forces the persisted App Mode state back to armed; a prior MediaProjection session can only produce a notification that returns to the app for fresh Android approval. The notification Disarm action clears automatic recognition and pending session intent only when service is not locked.
 
+## Replacement evidence boundary (qualification only)
+
+The default services still use the pipeline above. The replacement `CensorEngine` and
+`SceneEngine` own a separate, privately qualified Accessibility runtime; this is not default
+activation or proof of a physical-device speed improvement.
+
+Accepted inputs can issue immutable `EvidenceReceipt` objects containing canonical `long`
+identities and source-local positive geometry after association, merging, negative replay and
+capacity retirement. Each live identity stores at most five distinct producer-operation
+witnesses. A receipt is a source-state inventory across lanes: `triggerLane` identifies the
+accepted input that prompted it, while each subject retains its own `evidenceLane`. An empty
+QUALITY input at the same source therefore need not erase a retained FAST positive. FAST and
+QUALITY from one image request contribute once; a native witness requires
+its admitted native request identity. Old completions, redraws, display-rate motion estimates,
+style changes and retained masks do not add fresh witnesses. Five-source consumption eligibility
+is independent of the two-QUALITY confirmation used for retention. Complete OCR replacement
+does not establish identity continuity between its source frames.
+
+`claimEvidence` atomically validates the issuing owner, current protection scope, still-live
+canonical identities, unchanged evidence record/region, current visibility, negative evidence and finite lifetime before consuming
+eligible identities once. Merges union bounded witnesses and preserve consumption; a receipt
+naming a removed alias is rejected, not resolved through historical aliases. This is at-most-once
+evidence consumption, not a statistics/payment transaction or proof that two prior identities
+were one physical subject. A failed downstream write must not trigger speculative recharging.
+
+The persistent product bridge is not connected yet. Before using claims for Stats, Money Rules,
+or achievements, it must validate captured/current Lab lineage, current product settings/window
+and the active statistics-session identity. Dwell and popup hints additionally need a separate
+current-coverage/withdrawal/expiry contract; an empty input receipt does not establish absence
+across the whole viewport. Default activation and legacy retirement still require product parity,
+supported-platform checks and real-device long-scroll/reversal, detection-quality and speed
+acceptance.
+
 ## High-value code areas
 
 | Area | Readable JADX path | Rebuildable APKTool path |

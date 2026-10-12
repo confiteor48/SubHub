@@ -22,6 +22,119 @@ public class CensorEngineTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(3, 10, 2);
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    @Test public void acceptedSourceReceiptsConsumeFiveFreshFastInputsExactlyOnce() {
+        Harness h = new Harness(); h.start();
+        for (int i = 0; i < 6; i++) {
+            h.fire(i * 334L); h.deliver(i, i + 1);
+            if (i > 0) assertTrue(h.engine.motion(new SceneEngine.Motion(h.engine.currentEpoch(), i, i + 1,
+                    1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE, SUPPORT, 0, 0)));
+            h.fastExecutor.runOne(); h.fast.succeed(i, face(500)); h.ui.runAll();
+            CensorEngine.EvidenceReceipt receipt = h.evidence.get(i);
+            assertEquals(i + 1, receipt.source.imageRequestIdentity);
+            assertEquals(Math.min(5, i + 1), receipt.subjects.get(0).witnesses.size());
+            CensorEngine.EvidenceClaim claim = h.engine.claimEvidence(receipt);
+            assertNotNull(claim); assertEquals(i == 4 ? 1 : 0, claim.subjects.size());
+            assertTrue(h.engine.claimEvidence(receipt).subjects.isEmpty());
+            assertFalse(receipt.subjects.get(0).confirmedForConsumption && i < 4);
+        }
+        assertThrows(UnsupportedOperationException.class, () -> h.evidence.get(4).subjects.clear());
+        h.engine.close(); assertEquals(1, h.drained);
+    }
+
+    @Test public void foreignOwnerAndOldScopeCannotConsumeAnEqualNumericIdentity() {
+        Harness first = fiveSourceHarness(); Harness second = fiveSourceHarness();
+        CensorEngine.EvidenceReceipt receipt = first.evidence.get(4);
+        assertEquals(receipt.subjects.get(0).identity, second.evidence.get(4).subjects.get(0).identity);
+        assertNull(second.engine.claimEvidence(receipt));
+        first.engine.changeScope(43, ProtectionScope.normal(9));
+        assertNull(first.engine.claimEvidence(receipt));
+        first.engine.close(); second.engine.close();
+    }
+
+    @Test public void oldReceiptCannotGainEligibilityFromALaterSourceOrClaimAnUpdatedIdentity() {
+        Harness h = fiveSourceHarness();
+        assertNull(h.engine.claimEvidence(h.evidence.get(3)));
+        assertEquals(1, h.engine.claimEvidence(h.evidence.get(4)).subjects.size());
+        h.engine.stop(); assertNull(h.engine.claimEvidence(h.evidence.get(4)));
+        h.engine.start(42); assertNull(h.engine.claimEvidence(h.evidence.get(4)));
+        h.engine.close();
+    }
+
+    @Test public void lateMotionMergesDoNotMintAnEvidenceReceiptOrRescueRemovedAliases() {
+        Harness h = new Harness(); h.start();
+        for (int i = 0; i < 5; i++) {
+            h.fire(i * 334L); h.deliver(i, i + 1); h.fastExecutor.runOne(); h.fast.succeed(i, face(500)); h.ui.runAll();
+            assertEquals(1, h.evidence.get(i).subjects.get(0).witnesses.size());
+        }
+        CensorEngine.EvidenceReceipt oldAlias = h.evidence.get(4);
+        for (int i = 1; i < 5; i++) assertTrue(h.engine.motion(new SceneEngine.Motion(h.engine.currentEpoch(), i, i + 1,
+                1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE, SUPPORT, 0, 0)));
+        h.ui.runAll(); assertEquals(5, h.evidence.size()); assertNull(h.engine.claimEvidence(oldAlias));
+        h.fire(5 * 334L); h.deliver(5, 6);
+        assertTrue(h.engine.motion(new SceneEngine.Motion(h.engine.currentEpoch(), 5, 6,
+                1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE, SUPPORT, 0, 0)));
+        h.fastExecutor.runOne(); h.fast.succeed(5, face(500)); h.ui.runAll();
+        assertEquals(1, h.engine.claimEvidence(h.evidence.get(5)).subjects.size()); h.engine.close();
+    }
+
+    @Test public void presentationStyleAndDrawCallbacksCannotSupplyFreshEvidence() {
+        Harness h = fiveSourceHarness(); int accepted = h.evidence.size();
+        h.engine.canvasSamplingControls(true); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            h.engine.drawn(view.snapshot.revision);
+        }
+        h.ui.runAll(); assertEquals(accepted, h.evidence.size());
+        assertEquals(1, h.engine.claimEvidence(h.evidence.get(4)).subjects.size());
+        h.engine.close();
+    }
+
+    @Test public void emptyAcceptedInputHasNoCarriedSubjectAuthorityAndFailedInputHasNoReceipt() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne(); h.fast.calls.get(1).completion.failure(); h.ui.runAll();
+        assertEquals(1, h.evidence.size());
+        h.fire(668); h.deliver(2, 3); h.fastExecutor.runOne(); h.fast.succeed(2); h.ui.runAll();
+        assertEquals(2, h.evidence.size()); assertTrue(h.evidence.get(1).subjects.isEmpty());
+        assertTrue(h.engine.claimEvidence(h.evidence.get(1)).subjects.isEmpty()); h.engine.close();
+    }
+
+    @Test public void expiredReceiptRejectsEvenBeforeALateDisplayTimerRuns() {
+        Harness h = fiveSourceHarness(); CensorEngine.EvidenceReceipt receipt = h.evidence.get(4);
+        h.now = receipt.subjects.get(0).validUntilMillis + 1;
+        assertNull(h.engine.claimEvidence(receipt)); h.engine.close();
+    }
+
+    @Test public void sameSourceEmptyOtherLaneReceiptIsExplicitlyASourceStateInventory() {
+        Harness h = new Harness(true, false, true, 8, 2, 16);
+        h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fast.succeed(0, face(500)); h.qualityExecutor.runOne(); h.quality.succeed(0); h.ui.runAll();
+        assertEquals(2, h.evidence.size());
+        CensorEngine.EvidenceReceipt inventory = h.evidence.get(1);
+        assertEquals(QUALITY, inventory.triggerLane);
+        assertEquals(1, inventory.subjects.size());
+        assertEquals(FAST, inventory.subjects.get(0).evidenceLane);
+        assertEquals(1, inventory.subjects.get(0).witnesses.size());
+        assertFalse(inventory.subjects.get(0).confirmedForConsumption);
+        assertTrue(h.engine.claimEvidence(inventory).subjects.isEmpty()); h.engine.close();
+    }
+
+    @Test public void reentrantAcceptanceRevocationCannotDeliverAnEvidenceCapability() {
+        Harness h = new Harness(); h.acceptHook = ignored -> h.engine.stop();
+        h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        assertEquals(1, h.accepted.size()); assertTrue(h.evidence.isEmpty()); h.engine.close();
+    }
+
+    private static Harness fiveSourceHarness() {
+        Harness h = new Harness(); h.start();
+        for (int i = 0; i < 5; i++) {
+            h.fire(i * 334L); h.deliver(i, i + 1);
+            if (i > 0) assertTrue(h.engine.motion(new SceneEngine.Motion(h.engine.currentEpoch(), i, i + 1,
+                    1, 1, SceneEngine.MotionAuthority.IMAGE_CORRESPONDENCE, SUPPORT, 0, 0)));
+            h.fastExecutor.runOne(); h.fast.succeed(i, face(500)); h.ui.runAll();
+        }
+        return h;
+    }
+
     @Test public void independentImageOcrBDoesNotStealBlockedFastCanvasA() {
         Harness h = new Harness(false, true, false, 8, 2, 16);
         h.start(); h.fire(0); Pixel a = h.deliver(0, 1);
@@ -1222,6 +1335,8 @@ public class CensorEngineTest {
         final List<CaptureCall> captures = new ArrayList<>();
         final List<CensorEngine.Trace> traces = Collections.synchronizedList(new ArrayList<>());
         final List<SceneEngine.Batch> accepted = new ArrayList<>();
+        final List<CensorEngine.EvidenceReceipt> evidence = new ArrayList<>();
+        java.util.function.Consumer<SceneEngine.Batch> acceptHook;
         BiConsumer<CensorEngine.CaptureRequest, CensorEngine.CaptureCallback<Pixel>> behavior;
         java.util.function.Consumer<CensorEngine.Trace> traceHook;
         final FakeTimer timer = new FakeTimer();
@@ -1248,7 +1363,13 @@ public class CensorEngineTest {
                             if (traceHook != null) traceHook.accept(trace);
                         }
                         @Override public void presentationChanged() { presentations++; }
-                        @Override public void batchAccepted(SceneEngine.Batch batch) { accepted.add(batch); }
+                        @Override public void batchAccepted(SceneEngine.Batch batch) {
+                            accepted.add(batch); if (acceptHook != null) acceptHook.accept(batch);
+                        }
+                        @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) {
+                            assertFalse("evidence callback owns runtime lock", Thread.holdsLock(engine));
+                            evidence.add(receipt);
+                        }
                         @Override public void drained() { drained++; }
                     });
         }
