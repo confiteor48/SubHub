@@ -317,6 +317,15 @@ public final class PenanceManager {
         return recordInfractionResult(PenanceInfraction.NEW_DETECTION, count, nowMillis, expected);
     }
 
+    /** One admitted viewport episode; same acknowledged/stamped result without detection batching. */
+    public SourceDetectionResult recordSourceDwellResult(long nowMillis, StatsRepository.SessionStamp expected) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            throw new IllegalStateException("Source ledger commit must be off main");
+        }
+        if (expected == null) return new SourceDetectionResult(SourceDetectionStatus.REJECTED, 0);
+        return recordInfractionResult(PenanceInfraction.CENSORED_DWELL, 1, nowMillis, expected);
+    }
+
     private SourceDetectionResult recordInfractionResult(PenanceInfraction infraction, int count, long nowMillis,
             StatsRepository.SessionStamp sourceSession) {
         SourceDetectionResult rejected = new SourceDetectionResult(SourceDetectionStatus.REJECTED, 0);

@@ -16,6 +16,39 @@ import org.junit.Test;
 public class SceneEngineTest {
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    @Test public void completeEmptyFastMissesDwellWithoutRemovingRetainedSupportedGeometry() {
+        SceneEngine engine = engine(); register(engine, 2); engine.motion(motion(1, 2, 0));
+        engine.observe(batch(source(1), FAST, face(500)));
+        assertTrue(masks(engine.snapshot(1, 110, false)).get(0).dwellPositive);
+        engine.observe(batch(source(2), FAST));
+        SceneEngine.Mask retained = masks(engine.snapshot(2, 210, false)).get(0);
+        assertFalse(retained.dwellPositive); assertEquals(500, retained.displayRegion.top, 0);
+        assertEquals(1, retained.evidenceSource.sequence); assertEquals(2, retained.geometrySource.sequence);
+    }
+    @Test public void oldEmptyFastCannotMissANewerPositiveOrPoisonANewEpoch() {
+        SceneEngine engine = engine(); register(engine, 2); engine.observe(batch(source(2), FAST, face(500)));
+        engine.observe(batch(source(1), FAST));
+        assertTrue(masks(engine.snapshot(2, 210, false)).get(0).dwellPositive);
+        engine.reset(2); SceneEngine.Source fresh = new SceneEngine.Source(2, 1, 42, 1000, 2400, 100, -1);
+        engine.register(fresh); engine.observe(batch(fresh, FAST, face(500)));
+        assertTrue(masks(engine.snapshot(1, 110, false)).get(0).dwellPositive);
+    }
+    @Test public void oneQualifiedRegionalNegativeOnlyMissesItsMemberNotUnrelatedPositive() {
+        SceneEngine engine = engine(); register(engine, 2); engine.motion(motion(1, 2, 0));
+        engine.observe(batch(source(1), FAST, face(500), face(900)));
+        engine.observe(emptyQuality(source(2), "FACE", 1, new SceneEngine.Region(0, 400, 1000, 700)));
+        List<SceneEngine.Mask> retained = masks(engine.snapshot(2, 210, false)); assertEquals(2, retained.size());
+        for (SceneEngine.Mask member : retained) assertEquals(member.displayRegion.top != 500, member.dwellPositive);
+    }
+    @Test public void cachedConfirmedQualityRemainsPositiveOnEmptyFastWithoutRenewingEvidence() {
+        SceneEngine engine = engine(); register(engine, 3); engine.motion(motion(1, 2, 0)); engine.motion(motion(2, 3, 0));
+        engine.observe(batch(source(1), QUALITY, face(500))); engine.observe(batch(source(2), QUALITY, face(500)));
+        engine.observe(batch(source(3), FAST));
+        SceneEngine.Mask member = masks(engine.snapshot(3, 310, false)).get(0);
+        assertTrue(member.dwellPositive); assertTrue(member.confirmed); assertEquals(2, member.evidenceSource.sequence);
+        assertEquals(3, member.geometrySource.sequence); assertEquals(200, member.evidenceSource.receivedAtMillis);
+    }
+
     @Test public void completeOcrSetReplacesOnlyItsImagePartitionWithoutMotionOrDuplicateRows() {
         SceneEngine engine = engine(); register(engine, 3);
         engine.observe(batch(source(1), FAST, face(500)));

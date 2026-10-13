@@ -22,6 +22,62 @@ public class CensorEngineTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(3, 10, 2);
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    @Test public void scrollRevokesOriginalObservationAuthorityWithoutChangingCoverageOrCountClaims() {
+        Harness h = new Harness(true, false, false, 8, 2, 16); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+        CensorEngine.EvidenceReceipt old = h.evidence.get(0); CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertTrue(h.engine.dwellPresent(old, coverage, coverage.regions));
+        h.engine.discardDwellObservations(h.engine.activeScope());
+        assertTrue(h.engine.coverageCurrent(coverage)); assertNotNull(h.engine.claimEvidence(old));
+        assertFalse(h.engine.observationCurrent(old, coverage)); assertFalse(h.engine.dwellPresent(old, coverage, coverage.regions));
+        h.qualityExecutor.runOne(); h.quality.succeed(0, face(500));
+        CensorEngine.EvidenceReceipt current = h.evidence.get(1); CensorEngine.ViewportCoverage updated = h.engine.viewportCoverage();
+        assertTrue(h.engine.dwellPresent(current, updated, updated.regions));
+        assertEquals(1, current.subjects.get(0).witnesses.size()); h.engine.close(); h.ui.runAll();
+    }
+
+    @Test public void authenticDwellObservationDoesNotConsumeWitnessesAndRejectsStaleOrForeignJoins() {
+        Harness h = new Harness(), other = new Harness(); h.start(); other.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+        CensorEngine.EvidenceReceipt tick = h.evidence.get(0); CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertTrue(tick.positiveInput); assertTrue(h.engine.dwellPresent(tick, coverage, coverage.regions));
+        assertFalse(other.engine.dwellPresent(tick, coverage, coverage.regions));
+        assertTrue(h.engine.claimEvidence(tick).subjects.isEmpty()); assertEquals(1, tick.subjects.get(0).witnesses.size());
+        h.ui.runAll(); h.fire(334); h.deliver(1, 2); h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, 0));
+        CensorEngine.ViewportCoverage supported = h.engine.viewportCoverage(); assertEquals(1, supported.regions.size());
+        assertFalse(h.engine.dwellPresent(tick, supported, supported.regions));
+        h.engine.close(); other.engine.close(); h.fastExecutor.runAll(); h.ui.runAll(); other.ui.runAll();
+    }
+    @Test public void emptySameSourceQualityCannotBorrowFastInventoryAsADwellPositive() {
+        Harness h = new Harness(true, false, false, 8, 2, 16); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.qualityExecutor.runOne(); h.quality.succeed(0);
+        CensorEngine.EvidenceReceipt emptyQuality = h.evidence.get(1);
+        assertFalse(emptyQuality.positiveInput); assertEquals(1, emptyQuality.subjects.size());
+        assertEquals(FAST, emptyQuality.subjects.get(0).evidenceLane);
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage(); assertTrue(coverage.regions.get(0).dwellPositive);
+        assertTrue(h.engine.observationCurrent(emptyQuality, coverage));
+        assertFalse(h.engine.dwellPresent(emptyQuality, coverage, coverage.regions)); h.engine.close(); h.ui.runAll();
+    }
+    @Test public void emptyFastMissRemainsAHintButNotADwellPositive() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+        h.ui.runAll(); h.fire(334); h.deliver(1, 2); h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, 0));
+        h.fastExecutor.runOne(); h.fast.succeed(1);
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage(); assertEquals(1, coverage.regions.size());
+        assertFalse(coverage.regions.get(0).dwellPositive);
+        assertFalse(h.engine.dwellPresent(h.evidence.get(1), coverage, coverage.regions)); h.engine.close(); h.ui.runAll();
+    }
+    @Test public void dwellCannotUseForeignVisibleMembersOrAnExpiredReceiptAfterStyleQueries() {
+        Harness h = new Harness(), other = new Harness(); h.start(); other.start();
+        for (Harness value : Arrays.asList(h, other)) {
+            value.fire(0); value.deliver(0, 1); value.fastExecutor.runOne(); value.fast.succeed(0, face(500));
+        }
+        CensorEngine.EvidenceReceipt tick = h.evidence.get(0); CensorEngine.ViewportCoverage initial = h.engine.viewportCoverage();
+        assertFalse(h.engine.dwellPresent(tick, initial, other.engine.viewportCoverage().regions));
+        h.now = 5001; assertFalse(h.engine.dwellPresent(tick, initial, initial.regions));
+        assertEquals(1, h.evidence.size()); assertEquals(1, h.captures.size());
+        h.engine.close(); other.engine.close(); h.ui.runAll(); other.ui.runAll();
+    }
+
     @Test public void viewportStatesDistinguishWithdrawalUnobservedAndAcceptedEmpty() {
         Harness h = new Harness();
         CensorEngine.ViewportCoverage withdrawn = h.engine.viewportCoverage();

@@ -24,6 +24,7 @@ import com.subhub.app.censor.engine.NativeTextFrame;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.Objects;
+import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -250,6 +251,12 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public boolean isCurrent(CensorEngine.ActiveScope scope) { return engine.isCurrent(scope); }
     public CensorEngine.ViewportCoverage viewportCoverage() { return engine.viewportCoverage(); }
     public boolean coverageCurrent(CensorEngine.ViewportCoverage receipt) { return engine.coverageCurrent(receipt); }
+    public boolean observationCurrent(CensorEngine.EvidenceReceipt observation, CensorEngine.ViewportCoverage coverage) {
+        return engine.observationCurrent(observation, coverage);
+    }
+    public void discardDwellObservations(CensorEngine.ActiveScope scope) { engine.discardDwellObservations(scope); }
+    public boolean dwellPresent(CensorEngine.EvidenceReceipt observation, CensorEngine.ViewportCoverage coverage,
+            List<CensorEngine.DetectedRegion> visible) { return engine.dwellPresent(observation, coverage, visible); }
     public CensorEngine.EvidenceClaim claimEvidence(CensorEngine.EvidenceReceipt receipt, Object consumerScope) {
         return engine.claimEvidence(receipt, consumerScope);
     }

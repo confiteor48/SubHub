@@ -9,6 +9,7 @@ import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.NativeTextFrame;
 import com.subhub.app.penance.CensorTapTracker;
+import com.subhub.app.penance.PenanceManager;
 import android.accessibilityservice.AccessibilityService;
 import com.subhub.app.stats.StatsRepository;
 import java.util.function.Function;
@@ -20,6 +21,7 @@ public final class ProductCensorQualification {
     private static volatile Runnable fixtureSelectionObserved = () -> { };
     private static volatile CensorProductSession.Observer fixtureObserver;
     private static volatile Function<Context, StatsRepository> fixtureStatistics = StatsRepository::new;
+    private static volatile Function<Context, PenanceManager> fixturePenance = PenanceManager::new;
     private static volatile CensorProductSession current;
     private ProductCensorQualification() { }
     @ChecksSdkIntAtLeast(api = 34)
@@ -40,6 +42,9 @@ public final class ProductCensorQualification {
     static void fixtureStatistics(Function<Context, StatsRepository> factory) {
         requireInactive(); fixtureStatistics = java.util.Objects.requireNonNull(factory);
     }
+    static void fixturePenance(Function<Context, PenanceManager> factory) {
+        requireInactive(); fixturePenance = java.util.Objects.requireNonNull(factory);
+    }
     private static void requireInactive() {
         if (!supported()) throw new IllegalStateException("Owned-emulator qualification required");
         if (current != null && current.managedResourcesDrained()) current = null;
@@ -58,6 +63,7 @@ public final class ProductCensorQualification {
             @Override public void activeChanged(boolean active) { observer.activeChanged(active); probe.activeChanged(active); }
             @Override public void sessionFailure(Throwable failure) { observer.sessionFailure(failure); probe.sessionFailure(failure); }
             @Override public void accounting(CensorProductSession.AccountingResult result) { observer.accounting(result); probe.accounting(result); }
+            @Override public void dwell(CensorProductSession.DwellResult result) { observer.dwell(result); probe.dwell(result); }
             @Override public void trace(CensorEngine.Trace trace) { observer.trace(trace); probe.trace(trace); }
             @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) { observer.providerReady(lane, provider, millis); probe.providerReady(lane, provider, millis); }
             @Override public void modelUnavailable(SceneEngine.Lane lane) { observer.modelUnavailable(lane); probe.modelUnavailable(lane); }
@@ -76,7 +82,7 @@ public final class ProductCensorQualification {
             @Override public void executorsTerminated(boolean disposed) { observer.executorsTerminated(disposed); probe.executorsTerminated(disposed); }
         };
         current = new CensorProductSession(service, policy, taps, delivery,
-                models == null ? VisualDetectorWorker::initialize : models, fixtureSelectionObserved, fixtureStatistics);
+                models == null ? VisualDetectorWorker::initialize : models, fixtureSelectionObserved, fixtureStatistics, fixturePenance);
         return current;
     }
     public static CensorProductSession current() { return current; }

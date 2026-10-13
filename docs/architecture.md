@@ -49,7 +49,8 @@ Accepted inputs can issue immutable `EvidenceReceipt` objects containing canonic
 identities and source-local positive geometry after association, merging, negative replay and
 capacity retirement. Each live identity stores at most five distinct producer-operation
 witnesses. A receipt is a source-state inventory across lanes: `triggerLane` identifies the
-accepted input that prompted it, while each subject retains its own `evidenceLane`. An empty
+accepted input that prompted it, while `positiveInput` distinguishes an empty triggering lane
+from its surviving inventory and each subject retains its own `evidenceLane`. An empty
 QUALITY input at the same source therefore need not erase a retained FAST positive. FAST and
 QUALITY from one image request contribute once; a native witness requires
 its admitted native request identity. Old completions, redraws, display-rate motion estimates,
@@ -102,8 +103,36 @@ display coordinates to the actual application window once, without another origi
 Detected geometry is distinct from ordinary paint/tap interiors: reverse paint has no billable
 members but does not erase detected regions, while a cold reverse background invents no subject.
 Presentation-delivery rejection does not erase independently constructed detection metadata.
-This contract does not yet drive product dwell charges or popup hints; existing gap timing and
-popup participation remain unchanged. Default activation and legacy retirement still require product parity,
+The privately qualified product consumes this metadata without rebuilding legacy tracker aliases.
+`ViewportDwellEpisode` retains one viewport start, spent state and opaque pending ticket; detector
+identity churn and empty gaps retain the existing elapsed-time policy. Only an original-owner,
+current-source accepted observation advances dwell. A complete empty FAST result excludes missed
+FAST members even if their supported geometry remains retained; a regional QUALITY inspection
+excludes only its qualified contradicted members. Current unexpired native and uncontradicted
+QUALITY/OCR positives may remain eligible without promoting redraws into new producer reads.
+Empty regional QUALITY inputs cannot borrow a same-source FAST inventory as positive input.
+Scroll, real scope/window/session transitions and stop revoke the episode; appearance edits do not.
+Scroll also rotates an opaque dwell-observation authority in the original owner before resetting
+the episode, so a queued pre-scroll receipt cannot seed its successor with an old timestamp.
+The same receipt's independent geometry and detection-count claims are not revoked by this barrier.
+Elapsed duration uses accepted-observation monotonic time, separate from ledger calendar dates.
+
+One bounded pending dwell ticket reaches the same serial accounting worker. Original observation,
+coverage, normal Lab lineage, configuration, window, episode and statistics-session stamp are
+revalidated at admission. A definitely rejected queued request releases without charge; an admitted
+write is never replayed. `recordSourceDwellResult` acknowledges one `CENSORED_DWELL` event with the
+existing rules/caps and captured-session tribute semantics, not Every-N detection batching.
+Ambiguous acknowledgement quarantines accounting without stopping censor geometry or popup hints.
+Already-admitted writes can finish their captured context but cannot tribute a successor session.
+
+Popup cover/avoid placement queries supported clipped member interiors at the actual placement
+point. Its scoped supplier holds no persistent region copy, pixels or capture/read demand. Old
+bindings cannot clear a successor; stop releases the binding so other capture-mode hint writers
+remain independent. Hint presence never changes popup participation and does not require a Stats
+session. Reverse uses detected subjects for both consumers, not its source-free background paint.
+Availability is still not physical/compositor coverage or glyph-exact proof.
+
+Default activation and legacy retirement still require product parity,
 supported-platform checks and real-device long-scroll/reversal, detection-quality and speed
 acceptance.
 

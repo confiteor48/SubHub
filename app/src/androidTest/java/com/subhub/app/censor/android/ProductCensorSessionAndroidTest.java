@@ -12,6 +12,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.RectF;
 import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
@@ -35,6 +36,9 @@ import com.subhub.app.penance.PenanceManager;
 import com.subhub.app.penance.PenanceInfraction;
 import com.subhub.app.penance.HardcoreAutoPayManager;
 import com.subhub.app.penance.PayPalCredentialStore;
+import com.subhub.app.popup.PopupStormManager;
+import com.subhub.app.popup.PopupStormSettings;
+import com.subhub.app.popup.ScopedDetectionHints;
 import com.subhub.app.stats.StatsRepository;
 import com.subhub.app.stats.AchievementManager;
 import com.subhub.app.security.HardcoreModeManager;
@@ -85,23 +89,25 @@ public final class ProductCensorSessionAndroidTest {
     private final List<Hold> ownedHolds = new CopyOnWriteArrayList<>();
     private final List<CensorEngine.EvidenceReceipt> evidence = new CopyOnWriteArrayList<>();
     private final List<CensorProductSession.AccountingResult> accountResults = new CopyOnWriteArrayList<>();
+    private final List<CensorProductSession.DwellResult> dwellResults = new CopyOnWriteArrayList<>();
     private final AtomicReference<Runnable> afterCommittedCount = new AtomicReference<>();
     private final AtomicInteger storageFaultCalls = new AtomicInteger();
     private boolean controlledStorageResult;
     private boolean explicitNativeDemand;
+    private boolean controlledObservationRedelivery;
 
     @Before public void ownOnlySyntheticGuestSettingsAndUnsuppressedAutomation() {
         instrumentation = InstrumentationRegistry.getInstrumentation(); context = instrumentation.getTargetContext();
         assertEquals("Owned guest opt-in required", "true", InstrumentationRegistry.getArguments().getString("bound_censor_fixture"));
         assertTrue("Never authorized on a phone", ProductCensorQualification.supported());
-        ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
         preferences = new SettingsRepository(context).preferences();
         qualification = context.getSharedPreferences(ProductCensorQualification.PREFERENCES, Context.MODE_PRIVATE);
         savedPreferences = copy(preferences.getAll()); savedQualification = copy(qualification.getAll());
         previousServices = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
         previousEnabled = Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0);
-        assertFalse("No existing production capture owner may be borrowed", previousServices != null
+        assertFalse("No enabled production capture intent may be borrowed", previousEnabled != 0 && previousServices != null
                 && (previousServices.contains("ScreenshotAccessibilityService") || previousServices.contains("ScreenCapture")));
+        assertFalse("No live capture owner may be borrowed", ScreenshotAccessibilityService.isRunning());
         settingsOwned = true;
         // Save only in test memory. No provider authorization or guest wallet may participate.
         for (String name : OWNED_STORES) savedStores.put(name, copy(context.getSharedPreferences(name, Context.MODE_PRIVATE).getAll()));
@@ -123,6 +129,7 @@ public final class ProductCensorSessionAndroidTest {
         assertTrue(qualification.edit().putBoolean("enabled", true).commit());
         ProductCensorQualification.fixtureModels(this::model);
         ProductCensorQualification.fixtureStatistics(StatsRepository::new);
+        ProductCensorQualification.fixturePenance(PenanceManager::new);
         ProductCensorQualification.fixtureSelectionObserved(() -> {
             assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); readCount.incrementAndGet();
             Hold held = readHold.getAndSet(null); if (held != null) held.run();
@@ -143,16 +150,24 @@ public final class ProductCensorSessionAndroidTest {
                     if (action != null) { try { action.run(); } catch (Throwable failure) { faults.add(failure); } }
                 }
             }
+            @Override public void dwell(CensorProductSession.DwellResult result) {
+                assertNotEquals("No dwell ledger disk work on main", Looper.getMainLooper(), Looper.myLooper());
+                dwellResults.add(result);
+            }
             @Override public void foreground(AccessibilityWindowReader.Window window) {
                 if (window != null && TARGET.equals(window.packageName) && stopForeground.compareAndSet(true, false)) {
                     ProductCensorQualification.current().stop(); foregroundStopped.countDown();
                 }
             }
         });
+        // Registration can enable Accessibility and bind a remembered component. Save and
+        // reject pre-existing authority first; prepare this owned route before registration.
+        ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
         target(false);
     }
     @After public void closeActualOwnerBeforeRestoringExactGuestState() throws Exception {
         if (!settingsOwned) return;
+        if (ui == null) ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
         for (Hold owned : ownedHolds) owned.release.countDown();
         Hold held = readHold.getAndSet(null); if (held != null) held.release.countDown();
         held = modelHold.getAndSet(null); if (held != null) held.release.countDown();
@@ -165,6 +180,9 @@ public final class ProductCensorSessionAndroidTest {
             }
             writeMetrics();
         } finally {
+            // The test's Accessibility registration otherwise forces the global enabled state.
+            // All capture and metadata work is already drained before this supported switch.
+            ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
             secure(previousServices, previousEnabled);
             await("Actual production service unbinding", () -> !ScreenshotAccessibilityService.isRunning());
             target(true);
@@ -176,12 +194,214 @@ public final class ProductCensorSessionAndroidTest {
             ProductCensorQualification.fixtureModels(null); ProductCensorQualification.fixtureSelectionObserved(() -> { });
             ProductCensorQualification.fixtureObserver(null);
             ProductCensorQualification.fixtureStatistics(StatsRepository::new);
+            ProductCensorQualification.fixturePenance(PenanceManager::new);
         }
         assertEquals(savedPreferences, preferences.getAll()); assertEquals(savedQualification, qualification.getAll());
         for (Map.Entry<String, Map<String, ?>> saved : savedStores.entrySet())
             assertEquals(saved.getValue(), context.getSharedPreferences(saved.getKey(), Context.MODE_PRIVATE).getAll());
         assertEquals(previousServices, Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES));
         assertEquals(previousEnabled, Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0));
+    }
+
+    @Test public void currentNativeObservationsChargeOneViewportEpisodeWithoutDetectionBatching() throws Exception {
+        nativeDwell("porn"); connect(); awaitDwell(1); assertOnlyDwell(1);
+        long until = SystemClock.uptimeMillis() + 3500;
+        awaitNative("Further real native observations keep the same charged episode", () -> SystemClock.uptimeMillis() >= until);
+        assertOnlyDwell(1); assertEquals(1, committedDwell()); assertBinding();
+        assertTrue(dwellResults.stream().filter(r -> r.status == CensorProductSession.AccountingStatus.COMMITTED)
+                .allMatch(r -> r.chargedCents == 7 && r.observation.positiveInput && r.coverage.windowQualified));
+    }
+
+    @Test public void queuedPreScrollImageReceiptCannotSeedTheSuccessorDwellEpisode() throws Exception {
+        configureDwellRule(); connect(); awaitPaint(); controlledObservationRedelivery = true;
+        CensorEngine<PixelFrame> engine = actualEngineForControl();
+        main(() -> engine.executionControls(10000, false, EnumSet.of(SceneEngine.Lane.FAST)));
+        await("Actual image callback returned before the delayed delivery control", () -> !session.controller().host().captureInFlight());
+        AtomicReference<CensorEngine.EvidenceReceipt> selected = new AtomicReference<>();
+        await("Quiet actual latest image and drained main admission", () -> {
+            main(() -> {
+                CensorEngine.EvidenceReceipt receipt = evidence.stream().filter(r -> r.source.kind == SceneEngine.SourceKind.IMAGE && r.triggerLane == SceneEngine.Lane.FAST)
+                        .max(Comparator.comparingLong(r -> r.source.sequence)).orElse(null);
+                AccessibilityCensorController.WindowCoverage coverage = session.controller().viewportCoverage();
+                if (receipt != null && actualEvidenceAdmission().retainedItems() == 0
+                        && session.controller().observationCurrent(coverage, receipt)) selected.set(receipt);
+            });
+            return selected.get() != null;
+        });
+        CensorEngine.EvidenceReceipt old = selected.get();
+        long until = SystemClock.uptimeMillis() + 1000;
+        await("Bounded pre-scroll queue delay without new captures", () -> SystemClock.uptimeMillis() >= until);
+        AtomicLong scrollAt = new AtomicLong();
+        main(() -> {
+            AccessibilityCensorController.WindowCoverage coverage = session.controller().viewportCoverage();
+            assertTrue("Original real image still current at adverse queue admission", session.controller().observationCurrent(coverage, old));
+            actualEvidenceAdmission().offer(old); // Original capability, not a new producer/witness.
+            scrollAt.set(SystemClock.uptimeMillis()); session.scrolled(session.window().id);
+            assertFalse(session.controller().observationCurrent(coverage, old));
+            assertTrue(session.controller().coverageCurrent(coverage));
+            assertNotNull(session.controller().claimEvidence(old, StatsRepository.currentSessionStamp()));
+        });
+        barrier(); main(() -> engine.executionControls(334, false, EnumSet.of(SceneEngine.Lane.FAST)));
+        await("Fresh real image observations charge only the new stationary interval", () -> committedDwell() == 1);
+        CensorProductSession.DwellResult result = dwellResults.stream().filter(r -> r.status == CensorProductSession.AccountingStatus.COMMITTED)
+                .findFirst().get();
+        assertTrue(result.observation.source.sequence > old.source.sequence);
+        assertTrue(result.observation.acceptedAtMillis - scrollAt.get() >= 3000); assertOnlyDwell(1); assertBinding();
+    }
+
+    @Test public void nativeEmptyGapKeepsElapsedDwellAndActualWindowScrollEventStartsAnotherEpisode() throws Exception {
+        nativeDwell("porn");
+        context.startActivity(new Intent().setComponent(new ComponentName(TARGET, ProductTargetFixtureActivity.class.getName()))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION).putExtra("label", "porn").putExtra("scrollFixture", true));
+        connect(); AccessibilityCensorController.WindowCoverage first = awaitNativeViewport(); barrier();
+        CensorEngine.ActiveScope scope = session.controller().activeScope(); long firstAt = first.receipt.queriedAtMillis;
+        literalTarget("Hello");
+        awaitNative("Real native empty replacement, not a missed callback", () -> evidence.stream().anyMatch(r ->
+                r.source.kind == SceneEngine.SourceKind.NATIVE_TEXT && r.source.sequence > first.receipt.canvas.sequence && !r.positiveInput));
+        assertTrue(scope.same(session.controller().activeScope()));
+        waitWithoutDwell(firstAt + 3200); long restoredAt = SystemClock.uptimeMillis();
+        literalTarget("porn"); awaitDwell(1); assertOnlyDwell(1);
+        assertTrue("Empty gap did not start a new three-second dwell threshold", dwellResults.stream().filter(r ->
+                r.status == CensorProductSession.AccountingStatus.COMMITTED).findFirst().get().observation.acceptedAtMillis - firstAt >= 3000);
+        assertTrue("Restored positive charges the elapsed episode, not a restarted threshold", dwellResults.stream().filter(r ->
+                r.status == CensorProductSession.AccountingStatus.COMMITTED).findFirst().get().observation.acceptedAtMillis - restoredAt < 3000);
+        android.view.accessibility.AccessibilityNodeInfo root = ui.getRootInActiveWindow();
+        assertNotNull("Actual qualified target root", root);
+        assertEquals(TARGET, root.getPackageName().toString()); assertEquals(first.window.id, root.getWindowId());
+        android.view.accessibility.AccessibilityNodeInfo scrollNode = null;
+        ArrayDeque<android.view.accessibility.AccessibilityNodeInfo> nodes = new ArrayDeque<>(); nodes.add(root);
+        try {
+            for (int visited = 0; !nodes.isEmpty(); visited++) {
+                assertTrue("Bounded synthetic target node inventory", visited < 128);
+                android.view.accessibility.AccessibilityNodeInfo node = nodes.remove();
+                if ("android.widget.ScrollView".contentEquals(node.getClassName())) { scrollNode = node; break; }
+                try {
+                    for (int child = 0; child < node.getChildCount(); child++) {
+                        android.view.accessibility.AccessibilityNodeInfo value = node.getChild(child);
+                        if (value != null) nodes.add(value);
+                    }
+                } finally { node.recycle(); }
+            }
+        } finally { for (android.view.accessibility.AccessibilityNodeInfo node : nodes) node.recycle(); }
+        assertNotNull("Actual target scroll node", scrollNode);
+        assertEquals("android.widget.ScrollView", scrollNode.getClassName().toString());
+        assertTrue("Actual provider reports a scrollable range", scrollNode.isScrollable());
+        scrollNode.recycle();
+        long scrollAt = SystemClock.uptimeMillis();
+        // Android 15's animated ScrollView path accumulates the same displacement twice.
+        // Drive the owned View directly; preserve framework-produced event and exact delta checks.
+        android.view.accessibility.AccessibilityEvent scroll = ui.executeAndWaitForEvent(() ->
+                context.startActivity(new Intent().setComponent(new ComponentName(TARGET, ProductTargetFixtureActivity.class.getName()))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                        .putExtra("label", "porn").putExtra("scrollToY", 1)),
+                event -> event.getEventType() == android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED
+                        && TARGET.contentEquals(event.getPackageName()) && event.getWindowId() == first.window.id, 12000);
+        try {
+            assertEquals("android.widget.ScrollView", scroll.getClassName().toString());
+            assertEquals("Actual framework scroll position: " + scroll, 1, scroll.getScrollY());
+            assertEquals("Actual framework scroll displacement: " + scroll, 1, scroll.getScrollDeltaY());
+            assertEquals("Actual framework scroll range: " + scroll, 1, scroll.getMaxScrollY());
+        } finally { scroll.recycle(); }
+        awaitDwell(2); assertOnlyDwell(2);
+        CensorProductSession.DwellResult second = dwellResults.stream().filter(r -> r.status == CensorProductSession.AccountingStatus.COMMITTED)
+                .skip(1).findFirst().get();
+        assertTrue("Framework-delivered window scroll resets the elapsed threshold", second.observation.acceptedAtMillis - scrollAt >= 3000);
+        assertTrue(scope.same(session.controller().activeScope())); assertBinding();
+    }
+
+    @Test public void queriesStyleAndExpiryCannotInventDwellObservationsOrNewNativeReads() throws Exception {
+        nativeDwell("porn"); connect(); AccessibilityCensorController.WindowCoverage first = awaitNativeViewport(); barrier();
+        int observed = evidence.size();
+        main(() -> {
+            SettingsRepository settings = new SettingsRepository(context);
+            session.controller().appearanceChanged(settings.loadAppearance(), SnapshotPaintPolicy.from(settings.loadDetectionPreset()), 1);
+            for (int i = 0; i < 50; i++) session.controller().viewportCoverage();
+        });
+        waitWithoutDwell(first.receipt.queriedAtMillis + 3200);
+        assertEquals(observed, evidence.size()); assertFalse(session.controller().coverageCurrent(first));
+        assertTrue(dwellResults.isEmpty()); assertOnlyDwell(0);
+        awaitDwell(1); assertOnlyDwell(1); assertTrue(evidence.size() > observed); assertBinding();
+    }
+
+    @Test public void reverseNativeDwellUsesDetectedSubjectsNotSourceFreeBackgroundPaint() throws Exception {
+        nativeDwell("porn"); assertTrue(preferences.edit().putBoolean(SettingsRepository.KEY_REVERSE_MODE, true).commit());
+        connect(); awaitDwell(1); assertOnlyDwell(1);
+        assertTrue(posts.stream().anyMatch(p -> p.acceptedPaint != null && p.acceptedPaint.reverseBackground && p.acceptedPaint.members.isEmpty()));
+        assertTrue(dwellResults.stream().filter(r -> r.status == CensorProductSession.AccountingStatus.COMMITTED)
+                .allMatch(r -> !r.coverage.regions.isEmpty() && r.coverage.regions.stream().allMatch(m -> m.member.nativeValidated)));
+        assertBinding();
+    }
+
+    @Test public void labObservationsAndOldStatisticsStampCannotReachDwellLedger() throws Exception {
+        nativeDwell("porn"); StatsRepository stats = new StatsRepository(context); StatsRepository.SessionStamp original = stats.sessionStamp();
+        try (CensorLabCensorSession.Lease lab = CensorLabCensorSession.acquire()) {
+            connect(); long until = SystemClock.uptimeMillis() + 3500;
+            awaitNative("Real Lab observations span the dwell threshold", () -> SystemClock.uptimeMillis() >= until);
+            assertTrue(evidence.stream().anyMatch(r -> r.scope.protectionScope.origin == ProtectionScope.Origin.LAB));
+            assertTrue(dwellResults.isEmpty()); assertOnlyDwell(0);
+        }
+        main(session::stop); stats.endSession(); stats.startSession();
+        assertFalse(original.isCurrent());
+        PenanceManager.SourceDetectionResult rejected = new PenanceManager(context).recordSourceDwellResult(System.currentTimeMillis(), original);
+        assertEquals(PenanceManager.SourceDetectionStatus.REJECTED, rejected.status); assertEquals(0, rejected.chargedCents);
+        assertOnlyDwell(0); assertEquals(0, stats.load().getCurrentSessionTributeEvents()); assertBinding();
+    }
+
+    @Test public void admittedDwellWriteMayFinishCapturedLedgerButNeverAttributesToANewSession() throws Exception {
+        nativeDwell("porn"); Hold held = hold(); AtomicInteger writes = new AtomicInteger();
+        dwellStorageControl(true, true, false, held, writes); connect();
+        explicitNativeDemand = true;
+        awaitNative("Actual admitted dwell ledger write enters its commit boundary", () -> held.entered.getCount() == 0);
+        StatsRepository stats = new StatsRepository(context); StatsRepository.SessionStamp original = stats.sessionStamp();
+        stats.endSession(); stats.startSession(); main(session::close);
+        assertFalse(original.isCurrent()); assertFalse(session.managedResourcesDrained()); held.release.countDown();
+        await("Admitted dwell terminal and actual worker drain", session::managedResourcesDrained);
+        assertOnlyDwell(1); assertEquals(1, writes.get()); assertEquals(1, committedDwell());
+        assertEquals(1, stats.load().getTributeEvents()); assertEquals(7, stats.load().getTributeCents());
+        assertEquals(0, stats.load().getCurrentSessionTributeEvents()); assertEquals(0, stats.load().getCurrentSessionTributeCents());
+    }
+
+    @Test public void unacknowledgedDwellStoreIsQuarantinedWithoutReplayOrStoppingDetectedGeometry() throws Exception {
+        nativeDwell("porn"); AtomicInteger writes = new AtomicInteger(); dwellStorageControl(false, true, false, null, writes); connect();
+        awaitNative("Explicit controlled unacknowledged dwell store", () -> dwellResults.stream().anyMatch(r ->
+                r.status == CensorProductSession.AccountingStatus.UNCERTAIN));
+        long until = SystemClock.uptimeMillis() + 3500;
+        awaitNative("More actual observations cannot replay uncertain dwell accounting", () -> SystemClock.uptimeMillis() >= until);
+        assertEquals(1, writes.get()); assertEquals(0, committedDwell()); assertOnlyDwell(1);
+        assertEquals(0, new StatsRepository(context).load().getTributeEvents());
+        assertFalse(actualPopupHints().isEmpty()); assertTrue(session.isActive()); assertBinding();
+    }
+
+    @Test public void actualPopupCoverAndAvoidUseCurrentWindowHintsWithoutStatisticsOrParticipationMutation() throws Exception {
+        nativeOnly("porn"); connect(); AccessibilityCensorController.WindowCoverage first = awaitNativeViewport();
+        assertNull(StatsRepository.currentSessionStamp()); PopupStormManager manager = PopupStormManager.get();
+        main(() -> manager.reloadSettings(context)); assertFalse(manager.isRunning());
+        List<RectF> hints = actualPopupHints(); assertEquals(first.regions.size(), hints.size());
+        for (int i = 0; i < hints.size(); i++) {
+            SceneEngine.Region region = first.regions.get(i).displayRegion; RectF actual = hints.get(i);
+            assertEquals((float) region.left, actual.left, 0); assertEquals((float) region.top, actual.top, 0);
+            assertEquals((float) region.right, actual.right, 0); assertEquals((float) region.bottom, actual.bottom, 0);
+        }
+        assertTrue(preferences.edit().putString(PopupStormSettings.K_DETECTION_MODE, "cover").commit());
+        float[] cover = popupPosition(40, 40); RectF box = hints.get(0);
+        assertEquals(box.centerX() - 20, cover[0], 0);
+        assertEquals(Math.max(popupReservedTop(), box.centerY() - 20), cover[1], 0);
+        assertTrue(preferences.edit().putString(PopupStormSettings.K_DETECTION_MODE, "avoid").commit());
+        float[] avoid = popupPosition(40, 40);
+        RectF candidate = new RectF(avoid[0], avoid[1], avoid[0] + 40, avoid[1] + 40);
+        for (RectF hint : hints) assertFalse(RectF.intersects(candidate, hint));
+        int reads = evidence.size();
+        await("Literal source expiry before another accepted observation", () -> SystemClock.uptimeMillis() >= first.receipt.validBeforeMillis);
+        assertTrue(actualPopupHints().isEmpty()); assertEquals(reads, evidence.size());
+        main(() -> session.controller().host().requestNativeText(false)); awaitNativeViewport();
+        main(() -> session.controller().contentChanged(first.window.id)); assertTrue(actualPopupHints().isEmpty());
+        awaitNativeViewport(); assertFalse(actualPopupHints().isEmpty()); main(session::stop); assertTrue(actualPopupHints().isEmpty());
+        assertTrue(preferences.edit().putString(PopupStormSettings.K_DETECTION_MODE, "cover").commit());
+        main(() -> manager.updateDetections(Collections.singletonList(new RectF(400, 800, 500, 900))));
+        float[] legacy = popupPosition(40, 40); assertArrayEquals(new float[]{430, 830}, legacy, 0);
+        main(() -> manager.updateDetections(Collections.emptyList()));
+        assertFalse(manager.isRunning()); assertFalse(preferences.getBoolean(PopupStormSettings.K_ENABLED, false));
+        assertTrue(dwellResults.isEmpty()); assertOnlyDwell(0); assertBinding();
     }
 
     @Test public void detectedViewportUsesActualInsetWindowAndNativeDisplayCoordinatesOnce() throws Exception {
@@ -627,7 +847,8 @@ public final class ProductCensorSessionAndroidTest {
             main(() -> {
                 AccessibilityCensorController.WindowCoverage candidate = session.controller().viewportCoverage();
                 if (candidate.windowQualified && !candidate.regions.isEmpty() && session.controller().coverageCurrent(candidate)
-                        && candidate.regions.stream().allMatch(region -> region.member.nativeValidated)) result.set(candidate);
+                        && candidate.regions.stream().allMatch(region -> region.member.nativeValidated)
+                        && evidence.stream().anyMatch(receipt -> receipt.source == candidate.regions.get(0).member.evidenceSource)) result.set(candidate);
             });
             return result.get() != null;
         });
@@ -746,6 +967,95 @@ public final class ProductCensorSessionAndroidTest {
         assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
                 .putBoolean(SettingsRepository.KEY_TEXT_SMUT_ENABLED, true).commit());
         literalTarget(literal);
+    }
+    private void nativeDwell(String literal) throws Exception {
+        nativeOnly(literal); configureDwellRule();
+    }
+    private void configureDwellRule() {
+        new StatsRepository(context).startSession();
+        Map<PenanceInfraction, Integer> rules = new EnumMap<>(PenanceInfraction.class); rules.put(PenanceInfraction.CENSORED_DWELL, 7);
+        new PenanceManager(context).configure(true, rules, 500, 2000, 10, 3, 50, 5);
+        assertFalse(new HardcoreAutoPayManager(context).isConfigured());
+        assertTrue(context.getSharedPreferences(PayPalCredentialStore.PREFS_NAME, Context.MODE_PRIVATE).getAll().isEmpty());
+    }
+    @SuppressWarnings("unchecked") private CensorEngine<PixelFrame> actualEngineForControl() throws Exception {
+        java.lang.reflect.Field field = AccessibilityCensorHost.class.getDeclaredField("engine"); field.setAccessible(true);
+        return (CensorEngine<PixelFrame>) field.get(session.controller().host());
+    }
+    @SuppressWarnings("unchecked") private com.subhub.app.censor.engine.BoundedLatestWork<CensorEngine.EvidenceReceipt> actualEvidenceAdmission() {
+        try {
+            java.lang.reflect.Field field = CensorProductSession.class.getDeclaredField("evidenceAdmission"); field.setAccessible(true);
+            return (com.subhub.app.censor.engine.BoundedLatestWork<CensorEngine.EvidenceReceipt>) field.get(session);
+        } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+    }
+    private long committedDwell() {
+        return dwellResults.stream().filter(r -> r.status == CensorProductSession.AccountingStatus.COMMITTED).count();
+    }
+    private void awaitDwell(int count) throws Exception { awaitNative("Acknowledged real viewport dwell " + count, () -> committedDwell() >= count); }
+    private void assertOnlyDwell(int count) {
+        List<com.subhub.app.penance.PenanceEvent> events = new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents();
+        assertEquals(count, events.size());
+        for (com.subhub.app.penance.PenanceEvent event : events) {
+            assertEquals(PenanceInfraction.CENSORED_DWELL, event.getInfraction()); assertEquals(7, event.getAmountCents());
+            assertEquals(1, event.getStrikeCount());
+        }
+    }
+    private void waitWithoutDwell(long until) throws Exception {
+        while (SystemClock.uptimeMillis() < until) { assertEquals(0, committedDwell()); Thread.sleep(10); }
+        assertEquals(0, committedDwell());
+    }
+    private void dwellStorageControl(boolean acknowledged, boolean applyUnderlying, boolean throwAfter, Hold hold, AtomicInteger writes) {
+        controlledStorageResult = true;
+        ProductCensorQualification.fixturePenance(app -> new PenanceManager(new ContextWrapper(app) {
+            @Override public Context getApplicationContext() { return this; }
+            @Override public SharedPreferences getSharedPreferences(String name, int mode) {
+                SharedPreferences actual = super.getSharedPreferences(name, mode);
+                if (!PenanceManager.PREFS_NAME.equals(name)) return actual;
+                return (SharedPreferences) Proxy.newProxyInstance(SharedPreferences.class.getClassLoader(), new Class<?>[]{SharedPreferences.class},
+                        (proxy, method, args) -> {
+                            Object result = method.invoke(actual, args); if (!method.getName().equals("edit")) return result;
+                            SharedPreferences.Editor edit = (SharedPreferences.Editor) result; AtomicBoolean ledger = new AtomicBoolean();
+                            return Proxy.newProxyInstance(SharedPreferences.Editor.class.getClassLoader(), new Class<?>[]{SharedPreferences.Editor.class},
+                                    (editorProxy, operation, values) -> {
+                                        if (operation.getName().equals("putString") && "events_v1".equals(values[0])) ledger.set(true);
+                                        if (operation.getName().equals("commit") && ledger.get()) {
+                                            assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); writes.incrementAndGet(); storageFaultCalls.incrementAndGet();
+                                            if (hold != null) hold.run();
+                                            if (applyUnderlying) assertTrue(edit.commit());
+                                            if (throwAfter) throw new IllegalStateException("Controlled ambiguous dwell acknowledgement");
+                                            return acknowledged;
+                                        }
+                                        Object value = operation.invoke(edit, values); return value instanceof SharedPreferences.Editor ? editorProxy : value;
+                                    });
+                        });
+            }
+        }));
+    }
+    @SuppressWarnings("unchecked") private List<RectF> actualPopupHints() throws Exception {
+        AtomicReference<List<RectF>> result = new AtomicReference<>();
+        main(() -> {
+            try {
+                java.lang.reflect.Field field = PopupStormManager.class.getDeclaredField("detectionHints"); field.setAccessible(true);
+                java.lang.reflect.Field fallback = PopupStormManager.class.getDeclaredField("detections"); fallback.setAccessible(true);
+                result.set(((ScopedDetectionHints<RectF>) field.get(PopupStormManager.get()))
+                        .read((List<RectF>) fallback.get(PopupStormManager.get())));
+            } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        });
+        return result.get();
+    }
+    private float[] popupPosition(int width, int height) {
+        AtomicReference<float[]> result = new AtomicReference<>();
+        main(() -> {
+            try {
+                java.lang.reflect.Method method = PopupStormManager.class.getDeclaredMethod("choosePosition", PopupStormSettings.class, int.class, int.class);
+                method.setAccessible(true); result.set((float[]) method.invoke(PopupStormManager.get(), PopupStormSettings.load(context), width, height));
+            } catch (ReflectiveOperationException failure) { throw new AssertionError(failure); }
+        });
+        return result.get();
+    }
+    private int popupReservedTop() throws Exception {
+        java.lang.reflect.Field field = PopupStormManager.class.getDeclaredField("reservedTop"); field.setAccessible(true);
+        return field.getInt(PopupStormManager.get());
     }
     private void nativeCounting(String literal, int batch, int dailyCap) throws Exception {
         nativeOnly(literal); new StatsRepository(context).startSession();
@@ -973,6 +1283,7 @@ public final class ProductCensorSessionAndroidTest {
                         .put("validUntilMillis", subject.validUntilMillis).put("rawWitnessCount", subject.witnesses.size()).put("witnesses", witnesses));
             }
             evidenceRows.put(sourceMetadata(receipt).put("triggerLane", receipt.triggerLane.name())
+                    .put("positiveInput", receipt.positiveInput)
                     .put("acceptedAtMillis", receipt.acceptedAtMillis).put("rawSubjectCount", receipt.subjects.size()).put("subjects", subjects));
         }
         JSONArray accountingRows = new JSONArray();
@@ -983,16 +1294,39 @@ public final class ProductCensorSessionAndroidTest {
             if (result.receipt != null) row.put("source", sourceMetadata(result.receipt));
             accountingRows.put(row);
         }
-        JSONObject metrics = new JSONObject().put("schemaVersion", 4).put("actualProductionService", session != null)
+        JSONArray dwellRows = new JSONArray();
+        for (CensorProductSession.DwellResult result : dwellResults) {
+            JSONObject row = new JSONObject().put("status", result.status.name()).put("chargedCents", result.chargedCents)
+                    .put("pendingDrops", result.pendingDrops).put("observationProduced", result.observation != null);
+            if (result.observation != null) {
+                CensorEngine.EvidenceReceipt observation = result.observation;
+                row.put("observation", sourceMetadata(observation).put("triggerLane", observation.triggerLane.name())
+                        .put("positiveInput", observation.positiveInput).put("acceptedAtMillis", observation.acceptedAtMillis));
+                JSONArray regions = new JSONArray();
+                for (AccessibilityCensorController.WindowRegion region : result.coverage.regions)
+                    regions.put(new JSONObject().put("identity", region.member.identity).put("nativeValidated", region.member.nativeValidated)
+                            .put("dwellPositive", region.member.dwellPositive).put("displayRegion", regionMetadata(region.displayRegion))
+                            .put("evidenceSource", viewportSource(region.member.evidenceSource)).put("geometrySource", viewportSource(region.member.geometrySource)));
+                assertEquals(result.coverage.regions.size(), regions.length());
+                row.put("coverage", new JSONObject().put("state", result.coverage.receipt.state.name())
+                        .put("queriedAtMillis", result.coverage.receipt.queriedAtMillis).put("validBeforeMillis", result.coverage.receipt.validBeforeMillis)
+                        .put("windowQualified", result.coverage.windowQualified).put("rawRegionCount", result.coverage.regions.size()).put("regions", regions));
+            }
+            dwellRows.put(row);
+        }
+        assertEquals(dwellResults.size(), dwellRows.length());
+        JSONObject metrics = new JSONObject().put("schemaVersion", 5).put("actualProductionService", session != null)
                 .put("sameInstrumentationPid", session != null && ((ScreenshotAccessibilityService) session.service()).qualificationBoundPid() == Process.myPid())
                 .put("pid", Process.myPid()).put("rawTraceCount", traces.size()).put("traces", rows).put("posts", submitted)
                 .put("rawPostCount", posts.size()).put("models", models.get()).put("closes", closes.get()).put("managedDrain", session != null && session.managedResourcesDrained())
                 .put("legacyCensorRuntimeAbsent", session != null && ((ScreenshotAccessibilityService) session.service()).legacyCensorRuntimeAbsentForQualification())
-                .put("controlledModelsOnly", !controlledStorageResult).put("physicalMotionAcceptance", false).put("pixelPerformanceAcceptance", false);
+                .put("controlledModelsOnly", !controlledStorageResult && !controlledObservationRedelivery)
+                .put("physicalMotionAcceptance", false).put("pixelPerformanceAcceptance", false);
         metrics.put("rawEvidenceCount", evidence.size()).put("evidence", evidenceRows)
                 .put("rawAccountingCount", accountResults.size()).put("accounting", accountingRows)
+                .put("rawDwellCount", dwellResults.size()).put("dwell", dwellRows)
                 .put("controlledStorageResult", controlledStorageResult).put("storageFaultCalls", storageFaultCalls.get())
-                .put("explicitNativeDemand", explicitNativeDemand);
+                .put("explicitNativeDemand", explicitNativeDemand).put("controlledObservationRedelivery", controlledObservationRedelivery);
         try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-surface-metrics-" + System.nanoTime() + ".json"))) {
             stream.write(metrics.toString().getBytes(StandardCharsets.UTF_8));
         }

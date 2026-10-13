@@ -543,6 +543,11 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
                     Log.w(TAG, "Replacement accounting quarantined phase=" + result.phase.name());
                 }
             }
+            @Override public void dwell(CensorProductSession.DwellResult result) {
+                if (result.status == CensorProductSession.AccountingStatus.UNCERTAIN) {
+                    Log.w(TAG, "Replacement dwell accounting quarantined");
+                }
+            }
         });
         labCensorSubscription = CensorLabCensorSession.observe(() -> main.post(() -> {
             if (!running || productSession == null) return;
@@ -5474,7 +5479,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             session.foregroundEvent(packageName, className, event.getWindowId(), type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
         } else if ((type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || type == AccessibilityEvent.TYPE_VIEW_SCROLLED)
                 && packageName.equals(foregroundPackage)) {
-            if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) dwellTracker.onScroll();
+            if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) session.scrolled(event.getWindowId());
             session.contentChanged(event.getWindowId());
         } else if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && !packageName.equals(foregroundPackage)) {
             session.request();

@@ -10,6 +10,37 @@ import java.util.concurrent.Executor;
 import org.junit.Test;
 
 public class NativeTextEngineTest {
+    @Test public void nativeScrollObservationBarrierDoesNotWithdrawValidGeometryOrCountEvidence() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000);
+        CensorEngine.EvidenceReceipt old = h.evidence.get(0); CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        h.engine.discardDwellObservations(h.engine.activeScope());
+        assertTrue(h.engine.coverageCurrent(coverage)); assertNotNull(h.engine.claimEvidence(old));
+        assertFalse(h.engine.dwellPresent(old, coverage, coverage.regions)); h.close();
+    }
+    @Test public void emptyImageResultMayUseCurrentCachedNativeButChangedGenerationCannot() {
+        Harness h = new Harness(); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        h.finishNative(0, 10, 20, 1000); h.deliverImage(0, 30, 1000, 2400); h.imageExecutor.runAll();
+        h.now = 40; h.imageCompletions.get(0).success(new SceneEngine.Batch(h.images.get(0).source,
+                SceneEngine.Lane.FAST, Collections.emptyList(), Collections.emptyList()), new CensorEngine.WorkTiming(1, 2, 1));
+        CensorEngine.EvidenceReceipt tick = h.evidence.get(1); assertFalse(tick.positiveInput); assertTrue(tick.subjects.isEmpty());
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertEquals(1, coverage.regions.size()); assertTrue(coverage.regions.get(0).nativeValidated);
+        assertTrue(h.engine.dwellPresent(tick, coverage, coverage.regions));
+        h.engine.requestNativeTextAt(40, true);
+        assertFalse(h.engine.dwellPresent(tick, coverage, coverage.regions));
+        CensorEngine.ViewportCoverage gap = h.engine.viewportCoverage();
+        assertFalse(h.engine.dwellPresent(tick, gap, gap.regions)); h.close();
+    }
+    @Test public void currentNativePositiveIsIndependentOfFiveWitnessConsumptionAndCannotSurviveExpiry() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000);
+        CensorEngine.EvidenceReceipt tick = h.evidence.get(0); CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertTrue(h.engine.dwellPresent(tick, coverage, coverage.regions));
+        assertEquals(1, tick.subjects.get(0).witnesses.size()); assertTrue(h.engine.claimEvidence(tick).subjects.isEmpty());
+        h.now = coverage.validBeforeMillis; assertFalse(h.engine.dwellPresent(tick, coverage, coverage.regions));
+        assertEquals(1, h.nativeInputs.size()); assertEquals(1, h.evidence.size()); h.close();
+    }
     @Test public void nativeViewportHasRealReadSourceAndFiniteDeadlineWithoutPixelLease() {
         Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
         h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000);

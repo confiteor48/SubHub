@@ -304,6 +304,21 @@ public final class AccessibilityCensorController implements AutoCloseable {
                 && coverage.windowQualified == coverageWindowQualified(coverage.origin, coverage.receipt)
                 && host.coverageCurrent(coverage.receipt);
     }
+    public boolean observationCurrent(WindowCoverage coverage, CensorEngine.EvidenceReceipt observation) {
+        return coverageCurrent(coverage) && coverage.windowQualified
+                && host.observationCurrent(observation, coverage.receipt);
+    }
+    public void scrolled(int windowId) {
+        onMain(); Configuration value = configuration;
+        if (!closed && active && value != null && value.window.id == windowId)
+            host.discardDwellObservations(host.activeScope());
+    }
+    public boolean dwellPresent(WindowCoverage coverage, CensorEngine.EvidenceReceipt observation) {
+        if (!observationCurrent(coverage, observation)) return false;
+        List<CensorEngine.DetectedRegion> visible = new ArrayList<>();
+        for (WindowRegion member : coverage.regions) visible.add(member.member);
+        return host.dwellPresent(observation, coverage.receipt, visible);
+    }
     private boolean coverageWindowQualified(Transition selected, CensorEngine.ViewportCoverage receipt) {
         if (!current(selected) || !paintEligible(receipt.scope)) return false;
         AccessibilityWindowReader.Window window = selected.configuration.window;

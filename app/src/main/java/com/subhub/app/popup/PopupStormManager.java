@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /** Safe, bounded reconstruction of the licensed multi-window popup renderer. */
 public final class PopupStormManager {
@@ -45,6 +46,7 @@ public final class PopupStormManager {
     private final CopyOnWriteArrayList<LivePopup> popups = new CopyOnWriteArrayList<>();
     private final Random random = new Random();
     private volatile List<RectF> detections = List.of();
+    private final ScopedDetectionHints<RectF> detectionHints = new ScopedDetectionHints<>();
     private Context context;
     private PopupBitmapCache bitmapCache;
     private PopupLibrary library;
@@ -184,6 +186,13 @@ public final class PopupStormManager {
         List<RectF> copies = new ArrayList<>();
         for (RectF box : boxes) copies.add(new RectF(box));
         detections = Collections.unmodifiableList(copies);
+    }
+
+    /** Replacement metadata is queried at placement, not copied into the legacy detection cache. */
+    public ScopedDetectionHints<RectF>.Binding bindDetectionHints(Supplier<List<RectF>> source) {
+        if (Looper.myLooper() != Looper.getMainLooper()) throw new IllegalStateException("Main hint ownership required");
+        detections = List.of(); // Do not resurrect a former legacy window after this owner closes.
+        return detectionHints.bind(source);
     }
 
     public void updateTrackedObjects(List<TrackedObject> tracks, int frameWidth, int frameHeight) {
@@ -354,7 +363,7 @@ public final class PopupStormManager {
     }
 
     private float[] choosePosition(PopupStormSettings current, int width, int height) {
-        List<RectF> boxes = detections;
+        List<RectF> boxes = detectionHints.read(detections);
         if ("cover".equals(current.getDetectionMode()) && !boxes.isEmpty()) {
             RectF box = boxes.get(random.nextInt(boxes.size()));
             return clampPosition(box.centerX() - width / 2f, box.centerY() - height / 2f, width, height);

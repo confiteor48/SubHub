@@ -381,6 +381,8 @@ public final class SceneEngine {
         public final boolean physicalErrorKnown = false;
         public final boolean nativeValidated;
         public final boolean nativeNodeIdentityKnown;
+        /** Accepted positive, not merely retained geometry. Does not itself admit a dwell charge. */
+        public final boolean dwellPositive;
         /** A bounded hold at an older supported source, never correspondence to the requested basis. */
         public final boolean heldGeometry;
         public final Region displayRegion;
@@ -390,11 +392,8 @@ public final class SceneEngine {
         public final Source evidenceSource;
         public final Region evidenceRegion;
 
-        private Mask(Track track, Projection projected, Source geometrySource) {
-            this(track, projected, geometrySource, false);
-        }
-
-        private Mask(Track track, Projection projected, Source geometrySource, boolean heldGeometry) {
+        private Mask(Track track, Projection projected, Source geometrySource, boolean heldGeometry,
+                long latestFastSequence) {
             identity = track.identity;
             category = track.category;
             partition = track.partition;
@@ -404,6 +403,8 @@ public final class SceneEngine {
             imageEstimated = projected.imageEstimated;
             nativeValidated = track.nativeCandidate != null;
             nativeNodeIdentityKnown = nativeValidated && track.nativeCandidate.nodeKey != null;
+            dwellPositive = track.negativeSources.isEmpty()
+                    && (track.latestLane != Lane.FAST || track.evidenceSource.sequence >= latestFastSequence);
             this.heldGeometry = heldGeometry;
             displayRegion = projected.region;
             this.geometrySource = geometrySource;
@@ -633,6 +634,8 @@ public final class SceneEngine {
     private final Set<String> delivered = new HashSet<>();
     private long epoch;
     private long highestSource;
+    /** Complete accepted FAST results, including empty; regional QUALITY is not a viewport miss. */
+    private long latestFastSequence;
     private long nextIdentity;
     private long revision;
     private long capacityDrops;
@@ -650,6 +653,7 @@ public final class SceneEngine {
         if (nextEpoch <= epoch) throw new IllegalArgumentException("epoch must advance");
         epoch = nextEpoch;
         highestSource = 0;
+        latestFastSequence = 0;
         sources.clear();
         pins.clear();
         motions.clear();
@@ -992,6 +996,7 @@ public final class SceneEngine {
         }
         String delivery = batch.source.sequence + ":" + batch.lane;
         if (!delivered.add(delivery)) return false;
+        if (batch.lane == Lane.FAST) latestFastSequence = Math.max(latestFastSequence, source.sequence);
         if (batch.replacementTextPartition != null) {
             long partition = batch.replacementTextPartition;
             // Supersede the old OCR presentation atomically. This does not prove absence of an
@@ -1333,7 +1338,7 @@ public final class SceneEngine {
         Projection projected = destination.sequence == track.evidenceSource.sequence
                 ? new Projection(destination.sequence, track.evidenceRegion, false)
                 : project(track.basis, destination.sequence, track.partition, track.region, estimates);
-        return projected == null ? null : new Mask(track, projected, destination, held);
+        return projected == null ? null : new Mask(track, projected, destination, held, latestFastSequence);
     }
 
     private Mask supportedOrHeldMask(Track track, Source canvas, Source requested, Mask mapped) {
@@ -1348,7 +1353,8 @@ public final class SceneEngine {
         }
         if (mapped != null && (previous == null || mapped.geometrySource.sequence >= previous.geometrySource.sequence)) return mapped;
         Mask best = previous == null ? null : new Mask(track,
-                new Projection(previous.geometrySource.sequence, previous.displayRegion, false), previous.geometrySource, true);
+                new Projection(previous.geometrySource.sequence, previous.displayRegion, false), previous.geometrySource,
+                true, latestFastSequence);
         // A map may precede the first detector result, so no previous snapshot is required.
         // Every newer candidate still needs its own fully supported measured path for this member.
         List<Source> candidates = new ArrayList<>(sources.values());
@@ -1396,7 +1402,7 @@ public final class SceneEngine {
             if (applicable != null) {
                 try {
                     return new Mask(track, new Projection(target.sequence,
-                            applicable.envelope(track.evidenceRegion), true, true), target);
+                            applicable.envelope(track.evidenceRegion), true, true), target, false, latestFastSequence);
                 } catch (IllegalArgumentException unrepresentable) { /* Explicit unknown. */ }
             }
         }
@@ -1405,7 +1411,7 @@ public final class SceneEngine {
         if (previous != null && (existing == null || existing.estimatedMotion
                 || existing.geometrySource.sequence <= previous.geometrySource.sequence)) {
             return new Mask(track, new Projection(previous.geometrySource.sequence,
-                    previous.displayRegion, true, true), previous.geometrySource, true);
+                    previous.displayRegion, true, true), previous.geometrySource, true, latestFastSequence);
         }
         return existing;
     }

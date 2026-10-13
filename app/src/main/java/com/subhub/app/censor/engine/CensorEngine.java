@@ -159,16 +159,21 @@ public final class CensorEngine<P> implements AutoCloseable {
         public final SceneEngine.Source source;
         /** Lane whose acceptance triggered this inventory, not provenance of every member. */
         public final SceneEngine.Lane triggerLane;
+        /** Trigger input contained positives; subjects alone cannot distinguish an empty lane. */
+        public final boolean positiveInput;
         public final long acceptedAtMillis;
         /**
          * All surviving positives whose latest evidence is this exact source, across its lanes.
          * Empty means no positive at this source, not empty input or whole-viewport absence.
          */
         public final List<SceneEngine.AcceptedSubject> subjects;
+        private final Object observationAuthority;
 
-        private EvidenceReceipt(ActiveScope scope, SceneEngine.Source source, SceneEngine.Lane lane,
+        private EvidenceReceipt(ActiveScope scope, Object observationAuthority, SceneEngine.Source source, SceneEngine.Lane lane, boolean positiveInput,
                 long atMillis, List<SceneEngine.AcceptedSubject> subjects) {
             this.scope = scope; this.source = source; this.triggerLane = lane;
+            this.observationAuthority = observationAuthority;
+            this.positiveInput = positiveInput;
             acceptedAtMillis = atMillis; this.subjects = subjects;
         }
     }
@@ -216,12 +221,14 @@ public final class CensorEngine<P> implements AutoCloseable {
         /** Clipped once to the physical display canvas; never a group-union interior. */
         public final SceneEngine.Region displayRegion;
         public final boolean nativeValidated;
+        public final boolean dwellPositive;
         public final boolean physicalErrorKnown = false;
         private DetectedRegion(SceneEngine.Mask member, SceneEngine.Region clipped) {
             identity = member.identity; partition = member.partition; textGroup = member.textGroup;
             category = member.category; evidenceSource = member.evidenceSource;
             geometrySource = member.geometrySource; displayRegion = clipped;
             nativeValidated = member.nativeValidated;
+            dwellPositive = member.dwellPositive;
         }
     }
 
@@ -593,6 +600,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     // Metadata publication owns no pixel leases. Source admission also fences its receipts.
     private SceneEngine.Snapshot coverageSnapshot;
     private Object coveragePublication = new Object();
+    private Object observationAuthority = new Object();
     private boolean notificationQueued;
     private long notificationIdentity;
     private long callbackFailures;
@@ -932,6 +940,38 @@ public final class CensorEngine<P> implements AutoCloseable {
                 && (receipt.validBeforeMillis == Long.MAX_VALUE || now < receipt.validBeforeMillis);
     }
 
+    /** An accepted observation tick, not a display/query clock or a delayed obsolete result. */
+    public synchronized boolean observationCurrent(EvidenceReceipt observation, ViewportCoverage coverage) {
+        return observation != null && coverageCurrent(coverage) && isCurrent(observation.scope)
+                && observation.observationAuthority == observationAuthority
+                && observation.acceptedAtMillis <= coverage.queriedAtMillis
+                && (observation.source.kind == SceneEngine.SourceKind.IMAGE
+                    ? observation.source == latestImageSource
+                    : nativeEnabled && nativeBasisGeneration == nativeGeneration && observation.source == nativeBasis);
+    }
+
+    /** Current-window scroll revokes queued dwell observations without changing count or geometry. */
+    public synchronized void discardDwellObservations(ActiveScope scope) {
+        if (isCurrent(scope)) observationAuthority = new Object();
+    }
+
+    /** Source-supported positive policy for a caller's clipped subset, never physical paint proof. */
+    public synchronized boolean dwellPresent(EvidenceReceipt observation, ViewportCoverage coverage,
+            List<DetectedRegion> visible) {
+        if (!observationCurrent(observation, coverage)) return false;
+        // Regional QUALITY and OCR/native triggers cannot borrow another lane's surviving inventory.
+        if (observation.triggerLane != SceneEngine.Lane.FAST && !observation.positiveInput) return false;
+        for (DetectedRegion member : visible) {
+            if (!coverage.regions.contains(member) || !member.dwellPositive) continue;
+            if (observation.triggerLane == SceneEngine.Lane.FAST) return true;
+            for (SceneEngine.AcceptedSubject subject : observation.subjects) {
+                if (subject.identity == member.identity && subject.source == member.evidenceSource
+                        && subject.evidenceLane == observation.triggerLane) return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Product must check its captured/current eligibility and active stats session BEFORE claiming.
      * Null is stale/foreign/retired evidence; an empty claim is valid but consumes no new identity.
@@ -948,9 +988,11 @@ public final class CensorEngine<P> implements AutoCloseable {
         return claimed == null ? null : new EvidenceClaim(receipt, claimed, consumerScope);
     }
 
-    private void acceptedEvidence(SceneEngine.Source source, SceneEngine.Lane lane, List<Runnable> actions) {
+    private void acceptedEvidence(SceneEngine.Source source, SceneEngine.Lane lane, boolean positiveInput,
+            List<Runnable> actions) {
         long now = clock.getAsLong();
-        EvidenceReceipt receipt = new EvidenceReceipt(activeScope(), source, lane, now, scene.acceptedSubjects(source, now));
+        EvidenceReceipt receipt = new EvidenceReceipt(activeScope(), observationAuthority, source, lane, positiveInput,
+                now, scene.acceptedSubjects(source, now));
         actions.add(() -> {
             if (isCurrent(receipt.scope)) observer.evidenceAccepted(receipt);
         });
@@ -1179,7 +1221,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                             }
                             queuePresentation(actions);
                             actions.add(() -> observer.nativeTextAccepted(frame));
-                            acceptedEvidence(source, SceneEngine.Lane.TEXT, actions);
+                            acceptedEvidence(source, SceneEngine.Lane.TEXT, !frame.read.candidates.isEmpty(), actions);
                         }
                     }
                 }
@@ -1457,7 +1499,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                 }
                 queuePresentation(actions);
                 actions.add(() -> observer.batchAccepted(batch));
-                acceptedEvidence(batch.source, batch.lane, actions);
+                acceptedEvidence(batch.source, batch.lane, !batch.observations.isEmpty(), actions);
             } else if (batch != null) trace(Stage.RESULT_REJECTED, job.frame.source,
                     job.lane.specification.lane, 0, null, actions);
             actions.add(job.frame::release);
