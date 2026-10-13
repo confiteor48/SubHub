@@ -206,6 +206,55 @@ public final class CensorEngine<P> implements AutoCloseable {
         }
     }
 
+    public enum CoverageState { WITHDRAWN, UNOBSERVED, EXPIRED, NO_ELIGIBLE_REGIONS, AVAILABLE }
+
+    /** Supported detected geometry, not ordinary paint, tap interiors or a physical pixel bound. */
+    public static final class DetectedRegion {
+        public final long identity, partition, textGroup;
+        public final String category;
+        public final SceneEngine.Source evidenceSource, geometrySource;
+        /** Clipped once to the physical display canvas; never a group-union interior. */
+        public final SceneEngine.Region displayRegion;
+        public final boolean nativeValidated;
+        public final boolean physicalErrorKnown = false;
+        private DetectedRegion(SceneEngine.Mask member, SceneEngine.Region clipped) {
+            identity = member.identity; partition = member.partition; textGroup = member.textGroup;
+            category = member.category; evidenceSource = member.evidenceSource;
+            geometrySource = member.geometrySource; displayRegion = clipped;
+            nativeValidated = member.nativeValidated;
+        }
+    }
+
+    /**
+     * Metadata-only viewport availability, independent of paint and source-witness inventories.
+     * NO_ELIGIBLE_REGIONS is NOT whole-viewport absence or detector completeness. AVAILABLE is
+     * source-supported geometry, not a claim that it still matches physical pixels now.
+     */
+    public static final class ViewportCoverage {
+        public final CoverageState state;
+        /** Null when withdrawn. Cold reverse has no observed source or detected region. */
+        public final ActiveScope scope;
+        public final SceneEngine.Source canvas;
+        public final long queriedAtMillis, validBeforeMillis;
+        public final int unresolvedTracks, tentativeTracks, ineligibleMembers;
+        public final List<DetectedRegion> regions;
+        public final long compositorAtMillis = -1;
+        private final Object owner, publication;
+        private final SceneEngine.Source imageTarget;
+        private final long nativeGeneration;
+        private ViewportCoverage(Object owner, Object publication, ActiveScope scope,
+                SceneEngine.Source imageTarget, long nativeGeneration, CoverageState state,
+                SceneEngine.Snapshot snapshot, long now, List<DetectedRegion> regions, int ineligible) {
+            this.owner = owner; this.publication = publication; this.scope = scope;
+            this.imageTarget = imageTarget; this.nativeGeneration = nativeGeneration; this.state = state;
+            canvas = snapshot == null ? null : snapshot.destination; queriedAtMillis = now;
+            validBeforeMillis = snapshot == null ? Long.MAX_VALUE : snapshot.nextChangeAtMillis;
+            unresolvedTracks = snapshot == null ? 0 : snapshot.unresolvedTracks;
+            tentativeTracks = snapshot == null ? 0 : snapshot.tentativeTracks;
+            ineligibleMembers = ineligible; this.regions = Collections.unmodifiableList(regions);
+        }
+    }
+
     public static final class Policy {
         public final long minimumCaptureMillis;
         public final long failureBackoffMillis;
@@ -522,6 +571,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     /** Actual successful image acquisition, independent of FAST/QUALITY/TEXT completion. */
     private SceneEngine.Source latestImageSource;
     private SceneEngine.Source nativeBasis;
+    private long nativeBasisGeneration = -1;
     private int displayWidth, displayHeight;
     private long nextSource, nextNativeRequest, nativeGeneration;
     private long nativeDemandAt = Long.MAX_VALUE, lastNativeCompletedAt = -1;
@@ -540,6 +590,9 @@ public final class CensorEngine<P> implements AutoCloseable {
     private TimerTicket presentationTimer;
     private Presentation pendingPresentation;
     private Presentation currentPresentation;
+    // Metadata publication owns no pixel leases. Source admission also fences its receipts.
+    private SceneEngine.Snapshot coverageSnapshot;
+    private Object coveragePublication = new Object();
     private boolean notificationQueued;
     private long notificationIdentity;
     private long callbackFailures;
@@ -838,6 +891,47 @@ public final class CensorEngine<P> implements AutoCloseable {
                 && scope.geometry == geometry && scope.protectionScope.equals(protectionScope);
     }
 
+    /** Read-only: no scene rebuild, source-age renewal, capture/read demand or pixel ownership. */
+    public synchronized ViewportCoverage viewportCoverage() {
+        long now = clock.getAsLong();
+        ActiveScope scope = activeScope();
+        SceneEngine.Snapshot snapshot = coverageSnapshot;
+        List<DetectedRegion> regions = new ArrayList<>();
+        CoverageState state;
+        int ineligible = 0;
+        if (scope == null) state = CoverageState.WITHDRAWN;
+        else if (snapshot == null) state = CoverageState.UNOBSERVED;
+        else if (snapshot.nextChangeAtMillis != Long.MAX_VALUE && now >= snapshot.nextChangeAtMillis) {
+            state = CoverageState.EXPIRED;
+        } else {
+            SceneEngine.Region display = new SceneEngine.Region(0, 0, snapshot.destination.width, snapshot.destination.height);
+            for (SceneEngine.Group group : snapshot.groups) for (SceneEngine.Mask member : group.members) {
+                boolean supported = !member.heldGeometry && !member.estimatedMotion && !member.imageEstimated
+                        && (member.nativeValidated
+                        ? nativeEnabled && nativeBasisGeneration == nativeGeneration && member.evidenceSource == nativeBasis
+                        : member.geometrySource == latestImageSource);
+                SceneEngine.Region clipped = supported ? member.displayRegion.clippedTo(display) : null;
+                if (clipped == null) ineligible++;
+                else regions.add(new DetectedRegion(member, clipped));
+            }
+            state = regions.isEmpty() ? CoverageState.NO_ELIGIBLE_REGIONS : CoverageState.AVAILABLE;
+        }
+        return new ViewportCoverage(scopeAuthority, coveragePublication, scope, latestImageSource,
+                nativeGeneration, state, snapshot, now, regions, ineligible);
+    }
+
+    /** Validate the original receipt again immediately before use; no wrapper can renew it. */
+    public synchronized boolean coverageCurrent(ViewportCoverage receipt) {
+        if (receipt == null || receipt.owner != scopeAuthority || receipt.publication != coveragePublication
+                || receipt.imageTarget != latestImageSource || receipt.nativeGeneration != nativeGeneration) return false;
+        long now = clock.getAsLong();
+        if (now < receipt.queriedAtMillis) return false;
+        // Withdrawal is authenticated without an ActiveScope. It cannot clear a restarted owner.
+        if (receipt.state == CoverageState.WITHDRAWN) return receipt.scope == null && (!active || closed);
+        return isCurrent(receipt.scope) && receipt.state != CoverageState.EXPIRED
+                && (receipt.validBeforeMillis == Long.MAX_VALUE || now < receipt.validBeforeMillis);
+    }
+
     /**
      * Product must check its captured/current eligibility and active stats session BEFORE claiming.
      * Null is stale/foreign/retired evidence; an empty claim is valid but consumes no new identity.
@@ -935,6 +1029,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         canvasLane = null;
         latestImageSource = null;
         nativeBasis = null;
+        nativeBasisGeneration = -1;
+        coverageSnapshot = null; coveragePublication = new Object();
         displayWidth = 0; displayHeight = 0;
         nativeGeneration++; nativeDemandAt = Long.MAX_VALUE;
         firstFastCompleted = false;
@@ -1072,6 +1168,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                         if (scene.admitNativeFrame(frame)) {
                             if (nativeBasis != null) scene.unpin(nativeBasis);
                             nativeBasis = source;
+                            nativeBasisGeneration = job.generation;
                             if (!frame.read.candidates.isEmpty()) scene.clearImageText();
                             displayWidth = read.width; displayHeight = read.height;
                             if (destinationSource == null || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT) {
@@ -1421,6 +1518,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         }
         SceneEngine.Snapshot snapshot = scene.snapshot(destination, clock.getAsLong(), true, bases,
                 latestImageSource == null ? 0 : latestImageSource.sequence);
+        coverageSnapshot = snapshot; coveragePublication = new Object();
         Set<Long> activePartitions = scene.activeImagePartitions();
         for (Iterator<Map.Entry<Long, SceneEngine.Source>> iterator = renderBases.entrySet().iterator(); iterator.hasNext();) {
             Map.Entry<Long, SceneEngine.Source> entry = iterator.next();

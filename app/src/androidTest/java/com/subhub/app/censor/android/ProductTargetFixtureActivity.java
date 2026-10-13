@@ -21,6 +21,15 @@ public final class ProductTargetFixtureActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); apply(intent); }
     private void apply(Intent intent) {
         if (intent.getBooleanExtra("finish", false)) { finish(); return; }
+        if (intent.getBooleanExtra("insetWindow", false)) {
+            android.view.WindowManager.LayoutParams layout = getWindow().getAttributes();
+            android.util.DisplayMetrics display = new android.util.DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(display);
+            layout.gravity = android.view.Gravity.TOP | android.view.Gravity.LEFT;
+            layout.x = 40; layout.y = 80;
+            layout.width = display.widthPixels - 80; layout.height = display.heightPixels - 160;
+            getWindow().setAttributes(layout);
+        }
         label.setText(intent.getStringExtra("label") == null ? "Target" : intent.getStringExtra("label"));
     }
 }

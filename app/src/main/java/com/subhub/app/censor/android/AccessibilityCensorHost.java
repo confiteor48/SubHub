@@ -248,6 +248,8 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return engine.acquireRenderView(); }
     public CensorEngine.ActiveScope activeScope() { return engine.activeScope(); }
     public boolean isCurrent(CensorEngine.ActiveScope scope) { return engine.isCurrent(scope); }
+    public CensorEngine.ViewportCoverage viewportCoverage() { return engine.viewportCoverage(); }
+    public boolean coverageCurrent(CensorEngine.ViewportCoverage receipt) { return engine.coverageCurrent(receipt); }
     public CensorEngine.EvidenceClaim claimEvidence(CensorEngine.EvidenceReceipt receipt, Object consumerScope) {
         return engine.claimEvidence(receipt, consumerScope);
     }

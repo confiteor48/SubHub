@@ -10,6 +10,88 @@ import java.util.concurrent.Executor;
 import org.junit.Test;
 
 public class NativeTextEngineTest {
+    @Test public void nativeViewportHasRealReadSourceAndFiniteDeadlineWithoutPixelLease() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000);
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, coverage.state); assertEquals(1011, coverage.validBeforeMillis);
+        assertEquals(1, coverage.regions.size()); CensorEngine.DetectedRegion member = coverage.regions.get(0);
+        assertTrue(member.nativeValidated); assertEquals(SceneEngine.SourceKind.NATIVE_TEXT, member.evidenceSource.kind);
+        assertSame(member.evidenceSource, member.geometrySource); assertEquals(-1, member.evidenceSource.pixelAtMillis);
+        assertEquals(1000, member.displayRegion.top, 0); assertEquals(0, h.engine.livePixelFrames());
+        assertEquals(0, h.captures.size()); assertTrue(h.engine.coverageCurrent(coverage)); h.close();
+    }
+
+    @Test public void contentChangeRevokesNativeViewportImmediatelyWhileOldPaintIsStillRetained() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000); h.ui.runAll();
+        CensorEngine.ViewportCoverage old = h.engine.viewportCoverage(); h.engine.requestNativeTextAt(20, true);
+        assertFalse(h.engine.coverageCurrent(old));
+        CensorEngine.ViewportCoverage gap = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, gap.state); assertEquals(1, gap.ineligibleMembers);
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertEquals(1, masks(view).size()); }
+        h.fire(140); h.nativeExecutor.runAll(); h.finishNative(1, 150, 160, 1100);
+        assertFalse(h.engine.coverageCurrent(gap));
+        assertEquals(1100, h.engine.viewportCoverage().regions.get(0).displayRegion.top, 0); h.close();
+    }
+
+    @Test public void failedNativeRefreshIsNotAnEmptyViewportOrADeadlineRenewal() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000); h.ui.runAll();
+        CensorEngine.ViewportCoverage old = h.engine.viewportCoverage(); h.engine.requestNativeTextAt(20, false);
+        assertTrue(h.engine.coverageCurrent(old)); h.fire(140); h.nativeExecutor.runAll(); h.nativeCompletions.get(1).failure();
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, h.engine.viewportCoverage().state);
+        assertEquals(old.validBeforeMillis, h.engine.viewportCoverage().validBeforeMillis);
+        h.now = 1011; assertFalse(h.engine.coverageCurrent(old));
+        assertEquals(CensorEngine.CoverageState.EXPIRED, h.engine.viewportCoverage().state); h.close();
+    }
+
+    @Test public void acceptedNativeEmptyHasNoViewportRegionsAndRejectsOldReceipt() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000); h.ui.runAll();
+        CensorEngine.ViewportCoverage old = h.engine.viewportCoverage();
+        h.engine.requestNativeTextAt(140, false); h.fire(140); h.nativeExecutor.runAll(); h.finishNative(1, 150, 160);
+        assertFalse(h.engine.coverageCurrent(old));
+        CensorEngine.ViewportCoverage empty = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, empty.state); assertTrue(empty.regions.isEmpty());
+        assertTrue(h.engine.coverageCurrent(empty)); assertEquals(2, h.evidence.size()); h.close();
+    }
+
+    @Test public void newerRawImageDoesNotPretendToMoveNativeBoundsOrRevalidateOldReceipt() {
+        Harness h = new Harness(); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        h.finishNative(0, 10, 20, 1000); h.ui.runAll(); CensorEngine.ViewportCoverage old = h.engine.viewportCoverage();
+        h.deliverImage(0, 30, 1000, 2400); // Native geometry does not use an IMAGE graph edge.
+        assertFalse(h.engine.coverageCurrent(old));
+        CensorEngine.ViewportCoverage current = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, current.state); assertEquals(1, current.regions.size());
+        CensorEngine.DetectedRegion member = current.regions.get(0);
+        assertEquals(1, member.evidenceSource.sequence); assertSame(member.evidenceSource, member.geometrySource);
+        assertEquals(1000, member.displayRegion.top, 0); h.close();
+    }
+
+    @Test public void mixedViewportUsesEarliestSourceExpiryThenRefreshesSurvivingImageOnly() {
+        Harness h = new Harness(); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        h.finishNative(0, 10, 20, 1000); h.deliverImage(0, 30, 1000, 2400); h.imageExecutor.runAll();
+        h.finishImage(0, 40, 500); h.ui.runAll(); CensorEngine.ViewportCoverage mixed = h.engine.viewportCoverage();
+        assertEquals(2, mixed.regions.size()); assertEquals(1011, mixed.validBeforeMillis);
+        h.now = 1011; assertFalse(h.engine.coverageCurrent(mixed));
+        assertEquals(CensorEngine.CoverageState.EXPIRED, h.engine.viewportCoverage().state);
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertEquals(1, masks(view).size()); }
+        CensorEngine.ViewportCoverage imageOnly = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, imageOnly.state); assertEquals(1, imageOnly.regions.size());
+        assertFalse(imageOnly.regions.get(0).nativeValidated); assertEquals(5031, imageOnly.validBeforeMillis); h.close();
+    }
+
+    @Test public void repeatedViewportQueriesCannotStartNativeReadsOrSupplyMoreWitnesses() {
+        Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000); h.ui.runAll();
+        for (int i = 0; i < 100; i++) assertEquals(1, h.engine.viewportCoverage().regions.size());
+        assertEquals(1, h.nativeInputs.size()); assertEquals(1, h.nativeFrames.size()); assertEquals(1, h.evidence.size());
+        assertEquals(1, h.evidence.get(0).subjects.get(0).witnesses.size()); assertEquals(0, h.engine.livePixelFrames());
+        h.engine.nativeTextControls(false);
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, h.engine.viewportCoverage().state); h.close();
+    }
+
     @Test public void nativeSourceReceiptsNeedFiveActualReadsAndConsumeOneLiveNode() {
         Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
         h.engine.start(42, ProtectionScope.normal(9));

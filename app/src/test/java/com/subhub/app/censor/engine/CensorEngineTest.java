@@ -22,6 +22,179 @@ public class CensorEngineTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(3, 10, 2);
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    @Test public void viewportStatesDistinguishWithdrawalUnobservedAndAcceptedEmpty() {
+        Harness h = new Harness();
+        CensorEngine.ViewportCoverage withdrawn = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.WITHDRAWN, withdrawn.state);
+        assertNull(withdrawn.scope); assertNull(withdrawn.canvas); assertTrue(h.engine.coverageCurrent(withdrawn));
+        h.start(); assertFalse(h.engine.coverageCurrent(withdrawn));
+        CensorEngine.ViewportCoverage unseen = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.UNOBSERVED, unseen.state); assertTrue(h.engine.coverageCurrent(unseen));
+        h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        assertEquals(CensorEngine.CoverageState.UNOBSERVED, h.engine.viewportCoverage().state);
+        h.fast.succeed(0);
+        CensorEngine.ViewportCoverage empty = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, empty.state);
+        assertTrue(empty.regions.isEmpty()); assertEquals(1, empty.canvas.sequence);
+        assertFalse(h.engine.coverageCurrent(unseen)); assertTrue(h.engine.coverageCurrent(empty));
+        h.engine.close();
+    }
+
+    @Test public void detectedViewportIsAvailableBeforePaintWithoutMintingCountWitnesses() {
+        Harness h = new Harness(); h.start(); h.fire(0); Pixel pixel = h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, coverage.state);
+        assertEquals(1, coverage.regions.size()); assertTrue(h.engine.coverageCurrent(coverage));
+        CensorEngine.DetectedRegion member = coverage.regions.get(0);
+        assertSame(coverage.canvas, member.evidenceSource); assertSame(member.evidenceSource, member.geometrySource);
+        assertEquals(500, member.displayRegion.top, 0); assertFalse(member.physicalErrorKnown);
+        assertEquals(-1, coverage.compositorAtMillis); assertFalse(member.nativeValidated);
+        assertThrows(UnsupportedOperationException.class, () -> coverage.regions.clear());
+        assertEquals(1, h.evidence.size()); assertEquals(1, h.evidence.get(0).subjects.get(0).witnesses.size());
+        assertTrue(h.engine.claimEvidence(h.evidence.get(0)).subjects.isEmpty());
+        assertEquals(0, pixel.closes); h.engine.close(); h.ui.runAll(); assertEquals(1, pixel.closes);
+    }
+
+    @Test public void rawImageAdmissionRevokesCoverageBeforeFastOrUiWithoutChangingOldPresentation() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine.ViewportCoverage old = h.engine.viewportCoverage();
+        long revision;
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { revision = view.snapshot.revision; }
+        h.fire(334); h.deliver(1, 2); // FAST and UI intentionally held.
+        assertFalse(h.engine.coverageCurrent(old));
+        CensorEngine.ViewportCoverage unknown = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, unknown.state);
+        assertEquals(1, unknown.ineligibleMembers); assertTrue(unknown.regions.isEmpty());
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(revision, view.snapshot.revision); assertEquals(1, view.snapshot.destination.sequence);
+        }
+        h.fastExecutor.runOne(); h.fast.succeed(1, face(700));
+        assertFalse(h.engine.coverageCurrent(unknown));
+        assertEquals(2, h.engine.viewportCoverage().regions.get(0).geometrySource.sequence);
+        h.engine.close(); h.ui.runAll();
+    }
+
+    @Test public void imageEstimateAndHeldGeometryNeverBecomeEligibleDetectedViewport() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2); assertTrue(h.engine.presentationEstimate(imageHint(h, 1, 2, -400)));
+        CensorEngine.ViewportCoverage estimate = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, estimate.state);
+        assertEquals(1, estimate.ineligibleMembers); h.ui.runAll();
+        h.fastExecutor.runOne(); h.fast.succeed(1); h.ui.runAll();
+        h.fire(668); h.deliver(2, 3); h.fastExecutor.runOne(); h.fast.succeed(2); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertTrue(masks(view.snapshot).get(0).heldGeometry);
+        }
+        CensorEngine.ViewportCoverage held = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, held.state);
+        assertEquals(1, held.ineligibleMembers); h.engine.close();
+    }
+
+    @Test public void supportedMeasuredProjectionPreservesBothSourceOrigins() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        h.fire(334); h.deliver(1, 2);
+        assertTrue(h.engine.motion(motion(h.engine.currentEpoch(), 1, 2, -300)));
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, coverage.state);
+        CensorEngine.DetectedRegion member = coverage.regions.get(0);
+        assertEquals(1, member.evidenceSource.sequence); assertEquals(2, member.geometrySource.sequence);
+        assertEquals(200, member.displayRegion.top, 0); assertFalse(member.physicalErrorKnown);
+        h.engine.close(); h.fastExecutor.runAll(); h.ui.runAll();
+    }
+
+    @Test public void viewportExpiryRejectsBeforeLateTimerAndDoesNotRenewOnQueriesOrStyle() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine.ViewportCoverage initial = h.engine.viewportCoverage(); assertEquals(5001, initial.validBeforeMillis);
+        h.now = 5000; assertTrue(h.engine.coverageCurrent(initial));
+        h.engine.canvasSamplingControls(true);
+        CensorEngine.ViewportCoverage styled = h.engine.viewportCoverage(); assertEquals(5001, styled.validBeforeMillis);
+        for (int i = 0; i < 50; i++) assertEquals(5001, h.engine.viewportCoverage().validBeforeMillis);
+        assertEquals(1, h.evidence.size()); assertEquals(1, h.captures.size());
+        h.now = 5001; assertFalse(h.engine.coverageCurrent(styled));
+        CensorEngine.ViewportCoverage expired = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.EXPIRED, expired.state); assertTrue(expired.regions.isEmpty());
+        assertFalse(h.engine.coverageCurrent(expired)); h.engine.close(); h.ui.runAll();
+    }
+
+    @Test public void rendererExpiryRefreshProducesExplicitNoEligibleRegionsWithoutNewCapture() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll(); h.now = 5001;
+        assertEquals(CensorEngine.CoverageState.EXPIRED, h.engine.viewportCoverage().state);
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertTrue(view.snapshot.groups.isEmpty()); }
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, h.engine.viewportCoverage().state);
+        assertEquals(1, h.captures.size()); assertEquals(1, h.evidence.size()); h.engine.close(); h.ui.runAll();
+    }
+
+    @Test public void viewportReceiptRejectsForeignOwnerAndScopeAbaIncludingOldWithdrawal() {
+        Harness first = new Harness(), other = new Harness(); first.start(); other.start();
+        CensorEngine.ViewportCoverage unseen = first.engine.viewportCoverage();
+        assertFalse(other.engine.coverageCurrent(unseen));
+        first.engine.stop(); CensorEngine.ViewportCoverage stopped = first.engine.viewportCoverage();
+        assertTrue(first.engine.coverageCurrent(stopped)); assertFalse(first.engine.coverageCurrent(unseen));
+        first.start(); assertFalse(first.engine.coverageCurrent(stopped));
+        first.engine.changeScope(42); assertFalse(first.engine.coverageCurrent(unseen));
+        first.engine.close(); other.engine.close(); first.ui.runAll(); other.ui.runAll();
+    }
+
+    @Test public void textGroupViewportRetainsSeparateInteriorsRatherThanItsUnionHole() {
+        Harness h = new Harness(false, true, false, 8, 2, 16); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0); h.textExecutor.runOne(); h.text.succeed(0, text(500), text(1000));
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        assertEquals(2, coverage.regions.size()); assertEquals(77, coverage.regions.get(0).textGroup);
+        assertEquals(600, coverage.regions.get(0).displayRegion.bottom, 0);
+        assertEquals(1000, coverage.regions.get(1).displayRegion.top, 0);
+        h.engine.close(); h.ui.runAll();
+    }
+
+    @Test public void displayClipUsesHalfOpenBoundsWithoutCoordinateConversion() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne();
+        h.fast.succeed(0, new SceneEngine.Observation("FACE", 1, 0,
+                new SceneEngine.Region(-100, -20, 1200, 2500), .9f), face(2400));
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage(); assertEquals(1, coverage.regions.size());
+        SceneEngine.Region clipped = coverage.regions.get(0).displayRegion;
+        assertEquals(0, clipped.left, 0); assertEquals(0, clipped.top, 0);
+        assertEquals(1000, clipped.right, 0); assertEquals(2400, clipped.bottom, 0);
+        SceneEngine.Region window = new SceneEngine.Region(20, 80, 900, 2000);
+        SceneEngine.Region withinWindow = clipped.clippedTo(window);
+        assertEquals(20, withinWindow.left, 0); assertEquals(80, withinWindow.top, 0);
+        assertEquals(900, withinWindow.right, 0); assertEquals(2000, withinWindow.bottom, 0);
+        assertNull(new SceneEngine.Region(900, 80, 1000, 2000).clippedTo(window));
+        h.engine.close(); h.ui.runAll();
+    }
+
+    @Test public void coldReverseAndReversePaintCannotInventOrSuppressDetectedRegions() {
+        Harness h = new Harness(); h.start();
+        CensorEngine.PaintReceipt cold = h.engine.acknowledgePaint(h.engine.activeScope(), -1, 1,
+                Collections.emptyList(), true);
+        assertNotNull(cold); assertEquals(CensorEngine.CoverageState.UNOBSERVED, h.engine.viewportCoverage().state);
+        h.fire(0); h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine.ViewportCoverage detected = h.engine.viewportCoverage();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            CensorEngine.PaintReceipt reverse = h.engine.acknowledgePaint(h.engine.activeScope(), view.snapshot.revision,
+                    2, Collections.emptyList(), true);
+            assertNotNull(reverse); assertTrue(reverse.members.isEmpty());
+        }
+        assertTrue(h.engine.coverageCurrent(detected)); assertEquals(1, detected.regions.size());
+        assertEquals(1, h.engine.viewportCoverage().regions.size()); h.engine.close();
+    }
+
+    @Test public void rejectedPresentationCannotRestoreAnOlderViewportReceipt() {
+        Harness h = new Harness(); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        CensorEngine.ViewportCoverage old = h.engine.viewportCoverage(); h.ui.reject = true;
+        h.engine.canvasSamplingControls(true);
+        assertFalse(h.engine.coverageCurrent(old));
+        CensorEngine.ViewportCoverage constructed = h.engine.viewportCoverage();
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, constructed.state);
+        assertTrue(h.engine.coverageCurrent(constructed)); assertEquals(1, constructed.regions.size());
+        h.ui.reject = false; h.engine.close(); h.ui.runAll();
+    }
+
     @Test public void acceptedSourceReceiptsConsumeFiveFreshFastInputsExactlyOnce() {
         Harness h = new Harness(); h.start();
         for (int i = 0; i < 6; i++) {

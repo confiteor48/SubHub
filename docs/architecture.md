@@ -88,9 +88,22 @@ preference memory even after a failed disk acknowledgement; that is not proof of
 Achievement persistence retains its existing asynchronous semantics. These separate stores do not
 provide cross-store crash atomicity or process-death replay guarantees.
 
-Dwell and popup hints additionally need a separate
-current-coverage/withdrawal/expiry contract; an empty input receipt does not establish absence
-across the whole viewport. Default activation and legacy retirement still require product parity,
+Dwell and popup placement have a separate metadata-only `viewportCoverage` contract in the
+replacement owner and its actual Accessibility host/controller. It distinguishes withdrawn,
+unobserved, expired and no-eligible-region states from available detected geometry. No state
+proves whole-viewport absence, detector completeness or compositor arrival. Supported members
+retain their original evidence and geometry sources; held and estimated poses are ineligible.
+A new acquired image invalidates an old receipt even before inference or UI delivery, and a
+native content-generation change excludes the old read immediately. Queries borrow no pixels,
+start no work and renew no source age. The earliest source-local first-invalid deadline fences
+the whole receipt even if an expiry callback is late. The qualified controller clips physical
+display coordinates to the actual application window once, without another origin or scale.
+
+Detected geometry is distinct from ordinary paint/tap interiors: reverse paint has no billable
+members but does not erase detected regions, while a cold reverse background invents no subject.
+Presentation-delivery rejection does not erase independently constructed detection metadata.
+This contract does not yet drive product dwell charges or popup hints; existing gap timing and
+popup participation remain unchanged. Default activation and legacy retirement still require product parity,
 supported-platform checks and real-device long-scroll/reversal, detection-quality and speed
 acceptance.
 

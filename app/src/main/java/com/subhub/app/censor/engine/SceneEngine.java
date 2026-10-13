@@ -135,6 +135,13 @@ public final class SceneEngine {
             return new Region(left + dx, top + dy, right + dx, bottom + dy);
         }
 
+        /** Half-open intersection in the same coordinate system; no origin or scale conversion. */
+        public Region clippedTo(Region viewport) {
+            double x1 = Math.max(left, viewport.left), y1 = Math.max(top, viewport.top);
+            double x2 = Math.min(right, viewport.right), y2 = Math.min(bottom, viewport.bottom);
+            return x2 > x1 && y2 > y1 ? new Region(x1, y1, x2, y2) : null;
+        }
+
         public boolean contains(Region other) {
             return left <= other.left && top <= other.top && right >= other.right && bottom >= other.bottom;
         }

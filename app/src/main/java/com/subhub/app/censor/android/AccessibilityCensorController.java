@@ -20,6 +20,8 @@ import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.settings.CensorAppearance;
 
 import java.util.List;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -56,6 +58,29 @@ public final class AccessibilityCensorController implements AutoCloseable {
             this.protection = Objects.requireNonNull(protection); this.appearance = Objects.requireNonNull(appearance);
             this.paintPolicy = Objects.requireNonNull(paintPolicy); this.artworkRevision = artworkRevision;
             if (window.id < 0) throw new IllegalArgumentException("A real application window is required");
+        }
+    }
+
+    /** Actual qualified app-window clipping of detected metadata, not paint/tap coverage. */
+    public static final class WindowRegion {
+        public final CensorEngine.DetectedRegion member;
+        /** Physical display coordinates; native bounds receive no second offset or scale. */
+        public final SceneEngine.Region displayRegion;
+        private WindowRegion(CensorEngine.DetectedRegion member, SceneEngine.Region clipped) {
+            this.member = member; displayRegion = clipped;
+        }
+    }
+    public static final class WindowCoverage {
+        public final CensorEngine.ViewportCoverage receipt;
+        public final AccessibilityWindowReader.Window window;
+        public final boolean windowQualified;
+        public final List<WindowRegion> regions;
+        private final Transition origin;
+        private WindowCoverage(CensorEngine.ViewportCoverage receipt, Transition origin,
+                boolean qualified, List<WindowRegion> regions) {
+            this.receipt = receipt; this.origin = origin; windowQualified = qualified;
+            window = origin == null ? null : origin.configuration.window;
+            this.regions = Collections.unmodifiableList(regions);
         }
     }
 
@@ -254,6 +279,37 @@ public final class AccessibilityCensorController implements AutoCloseable {
     }
 
     public CensorEngine.ActiveScope activeScope() { return host.activeScope(); }
+    /** No Binder/window refresh or render lease. A caller must revalidate just before use. */
+    public WindowCoverage viewportCoverage() {
+        Transition selected = transition;
+        CensorEngine.ViewportCoverage receipt = host.viewportCoverage();
+        List<WindowRegion> regions = new ArrayList<>();
+        boolean qualified = coverageWindowQualified(selected, receipt);
+        AccessibilityWindowReader.Window window = selected == null ? null : selected.configuration.window;
+        if (qualified && host.coverageCurrent(receipt)) {
+            SceneEngine.Region viewport = new SceneEngine.Region(window.left, window.top,
+                    (double) window.left + window.width, (double) window.top + window.height);
+            for (CensorEngine.DetectedRegion member : receipt.regions) {
+                SceneEngine.Region clipped = member.displayRegion.clippedTo(viewport);
+                if (clipped != null) regions.add(new WindowRegion(member, clipped));
+            }
+        }
+        // Actual window qualification can be withdrawn concurrently with this metadata-only read.
+        qualified &= coverageWindowQualified(selected, receipt);
+        if (!qualified) regions.clear();
+        return new WindowCoverage(receipt, selected, qualified, regions);
+    }
+    public boolean coverageCurrent(WindowCoverage coverage) {
+        return coverage != null && coverage.origin == transition
+                && coverage.windowQualified == coverageWindowQualified(coverage.origin, coverage.receipt)
+                && host.coverageCurrent(coverage.receipt);
+    }
+    private boolean coverageWindowQualified(Transition selected, CensorEngine.ViewportCoverage receipt) {
+        if (!current(selected) || !paintEligible(receipt.scope)) return false;
+        AccessibilityWindowReader.Window window = selected.configuration.window;
+        return receipt.canvas == null || (receipt.canvas.width == window.displayWidth
+                && receipt.canvas.height == window.displayHeight);
+    }
     boolean evidenceCurrent(CensorEngine.EvidenceReceipt receipt) { return receipt != null && paintEligible(receipt.scope); }
     CensorEngine.EvidenceClaim claimEvidence(CensorEngine.EvidenceReceipt receipt, Object consumerScope) {
         return evidenceCurrent(receipt) ? host.claimEvidence(receipt, consumerScope) : null;

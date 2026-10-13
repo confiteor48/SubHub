@@ -184,12 +184,138 @@ public final class ProductCensorSessionAndroidTest {
         assertEquals(previousEnabled, Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0));
     }
 
+    @Test public void detectedViewportUsesActualInsetWindowAndNativeDisplayCoordinatesOnce() throws Exception {
+        nativeOnly("porn");
+        context.startActivity(new Intent().setComponent(new ComponentName(TARGET, ProductTargetFixtureActivity.class.getName()))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                .putExtra("label", "porn").putExtra("insetWindow", true));
+        connect();
+        AccessibilityCensorController.WindowCoverage coverage = awaitNativeViewport();
+        ProviderGeometry glyphs = providerGeometry("porn"); writeViewport("native-inset", coverage, glyphs);
+        assertTrue("Actual nonzero-origin window, not a synthetic coordinate expectation", coverage.window.left > 0 && coverage.window.top > 0);
+        assertNotNull("Independent provider character locations, not widget bounds", glyphs);
+        assertEquals(coverage.window.id, glyphs.windowId);
+        android.graphics.RectF line = new android.graphics.RectF(glyphs.characters.get(0));
+        for (int i = 1; i < glyphs.characters.size(); i++) line.union(glyphs.characters.get(i));
+        // Existing AccessibilityTextGeometry uses floor/ceil and exactly two edge pixels.
+        SceneEngine.Region independent = new SceneEngine.Region(Math.max(0, Math.floor(line.left) - 2),
+                Math.max(0, Math.floor(line.top) - 2), Math.min(coverage.window.displayWidth, Math.ceil(line.right) + 2),
+                Math.min(coverage.window.displayHeight, Math.ceil(line.bottom) + 2));
+        SceneEngine.Region window = windowRegion(coverage.window);
+        assertEquals(CensorEngine.CoverageState.AVAILABLE, coverage.receipt.state);
+        assertEquals(coverage.receipt.regions.size(), coverage.regions.size());
+        for (AccessibilityCensorController.WindowRegion region : coverage.regions) {
+            assertTrue(region.member.nativeValidated); assertFalse(region.member.physicalErrorKnown);
+            assertEquals(SceneEngine.SourceKind.NATIVE_TEXT, region.member.evidenceSource.kind);
+            assertSame(region.member.evidenceSource, region.member.geometrySource);
+            assertRegion(independent.clippedTo(window), region.displayRegion); assertTrue(window.contains(region.displayRegion));
+            assertRegion(region.member.displayRegion.clippedTo(window), region.displayRegion);
+        }
+        assertEquals(0, new StatsRepository(context).load().getTotalBlocks()); assertNoDownstream(); assertBinding();
+    }
+
+    @Test public void nativeContentChangeWithdrawsDetectedMetadataBeforeReplacementRead() throws Exception {
+        nativeOnly("porn"); connect(); AccessibilityCensorController.WindowCoverage old = awaitNativeViewport();
+        AtomicReference<AccessibilityCensorController.WindowCoverage> gap = new AtomicReference<>();
+        main(() -> {
+            session.controller().contentChanged(old.window.id);
+            assertFalse(session.controller().coverageCurrent(old));
+            gap.set(session.controller().viewportCoverage());
+            assertTrue(session.controller().coverageCurrent(gap.get()));
+            assertTrue(gap.get().regions.isEmpty());
+        });
+        writeViewport("native-content-gap", gap.get());
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, gap.get().receipt.state);
+        assertEquals(1, gap.get().receipt.ineligibleMembers);
+        AccessibilityCensorController.WindowCoverage restored = awaitNativeViewport(); writeViewport("native-content-restored", restored);
+        assertTrue(restored.receipt.regions.get(0).evidenceSource.sequence > old.receipt.regions.get(0).evidenceSource.sequence);
+        assertFalse(session.controller().coverageCurrent(old)); assertNoDownstream(); assertBinding();
+    }
+
+    @Test public void detectedViewportStopAndRestartRejectsOldWithdrawalWithoutAnotherOwner() throws Exception {
+        nativeOnly("porn"); connect(); AccessibilityCensorController.WindowCoverage old = awaitNativeViewport();
+        AtomicReference<AccessibilityCensorController.WindowCoverage> stopped = new AtomicReference<>();
+        main(() -> {
+            session.stop(); assertFalse(session.controller().coverageCurrent(old));
+            stopped.set(session.controller().viewportCoverage());
+            assertTrue(session.controller().coverageCurrent(stopped.get()));
+        });
+        writeViewport("native-stopped", stopped.get());
+        assertEquals(CensorEngine.CoverageState.WITHDRAWN, stopped.get().receipt.state);
+        assertFalse(stopped.get().windowQualified); assertTrue(stopped.get().regions.isEmpty());
+        main(session::request); AccessibilityCensorController.WindowCoverage restarted = awaitNativeViewport();
+        writeViewport("native-restarted", restarted);
+        assertFalse(session.controller().coverageCurrent(stopped.get())); assertFalse(session.controller().coverageCurrent(old));
+        assertFalse(old.receipt.scope.same(restarted.receipt.scope)); assertBinding(); assertNoDownstream();
+    }
+
+    @Test public void reversePaintKeepsDetectedNativeRegionsAndDoesNotRenewTheirSourceDeadline() throws Exception {
+        nativeOnly("porn"); connect(); AccessibilityCensorController.WindowCoverage original = awaitNativeViewport();
+        AtomicReference<AccessibilityCensorController.WindowCoverage> reverse = new AtomicReference<>();
+        main(() -> {
+            assertTrue(preferences.edit().putBoolean(SettingsRepository.KEY_REVERSE_MODE, true).commit());
+            SettingsRepository settings = new SettingsRepository(context);
+            session.controller().appearanceChanged(settings.loadAppearance(), SnapshotPaintPolicy.from(settings.loadDetectionPreset()), 0);
+            reverse.set(session.controller().viewportCoverage());
+            assertTrue(session.controller().coverageCurrent(reverse.get()));
+        });
+        writeViewport("native-reverse", reverse.get());
+        assertEquals(original.receipt.validBeforeMillis, reverse.get().receipt.validBeforeMillis);
+        assertEquals(original.receipt.regions.get(0).identity, reverse.get().receipt.regions.get(0).identity);
+        assertSame(original.receipt.regions.get(0).evidenceSource, reverse.get().receipt.regions.get(0).evidenceSource);
+        assertEquals(1, reverse.get().regions.size());
+        await("Actual reverse Surface post", () -> posts.stream().anyMatch(p -> p.acceptedPaint != null
+                && p.acceptedPaint.scope.same(original.receipt.scope) && p.acceptedPaint.reverseBackground
+                && p.acceptedPaint.members.isEmpty()));
+        assertNoDownstream(); assertBinding();
+    }
+
+    @Test public void nativeViewportExpiresWithoutQueriesStartingFreshProviderReads() throws Exception {
+        nativeOnly("porn"); connect(); AccessibilityCensorController.WindowCoverage original = awaitNativeViewport();
+        long source = original.receipt.regions.get(0).evidenceSource.sequence;
+        int reads = evidence.size();
+        assertTrue(original.receipt.validBeforeMillis < Long.MAX_VALUE);
+        for (int i = 0; i < 20; i++) {
+            AccessibilityCensorController.WindowCoverage queried = session.controller().viewportCoverage();
+            assertEquals(original.receipt.validBeforeMillis, queried.receipt.validBeforeMillis);
+            assertEquals(source, queried.receipt.regions.get(0).evidenceSource.sequence);
+        }
+        await("Exact finite native viewport expiry", () -> SystemClock.uptimeMillis() >= original.receipt.validBeforeMillis);
+        AccessibilityCensorController.WindowCoverage expired = session.controller().viewportCoverage(); writeViewport("native-expired", expired);
+        assertFalse(session.controller().coverageCurrent(original)); assertTrue(expired.regions.isEmpty());
+        assertTrue(expired.receipt.state == CensorEngine.CoverageState.EXPIRED
+                || expired.receipt.state == CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS);
+        assertEquals(reads, evidence.size()); assertNoDownstream(); assertBinding();
+    }
+
     @Test public void realProductionServiceUsesOneReplacementAndComposedSurfaceWithoutLegacyWorkers() throws Exception {
         connect(); awaitPaint(); assertBinding(); composed("product-covered", COVER);
         assertTrue(preparations.contains(PixelFrame.Kind.ACCESSIBILITY_WINDOW)); assertEquals(1, models.get());
         assertFalse(batches.isEmpty());
-        assertTrue(batches.stream().allMatch(b -> b.source.kind == SceneEngine.SourceKind.IMAGE && b.source.windowId == -1
-                && b.source.geometry == session.controller().activeScope().geometry));
+        assertTrue(batches.stream().allMatch(b -> b.source.kind == SceneEngine.SourceKind.IMAGE && b.source.windowId == -1));
+        AtomicBoolean currentSource = new AtomicBoolean();
+        await("Actual current-scope image source and accepted paint, not historical batch scopes", () -> {
+            currentSource.set(false);
+            main(() -> {
+                CensorEngine.ActiveScope scope = session.controller().activeScope();
+                if (scope == null) return;
+                for (SnapshotCensorSurface.Post post : posts) {
+                    CensorEngine.PaintReceipt paint = post.acceptedPaint;
+                    if (paint == null || !paint.scope.same(scope) || paint.canvas == null) continue;
+                    SceneEngine.Source source = paint.canvas;
+                    assertEquals(SceneEngine.SourceKind.IMAGE, source.kind); assertEquals(-1, source.windowId);
+                    assertEquals(scope.epoch, source.epoch); assertEquals(scope.geometry, source.geometry);
+                    for (SceneEngine.Mask member : paint.members) {
+                        assertEquals(scope.epoch, member.evidenceSource.epoch); assertEquals(scope.geometry, member.evidenceSource.geometry);
+                        assertEquals(scope.epoch, member.geometrySource.epoch); assertEquals(scope.geometry, member.geometrySource.geometry);
+                    }
+                    if (batches.stream().anyMatch(batch -> batch.source == source) && session.controller().host().isCurrent(scope)) {
+                        currentSource.set(true); return;
+                    }
+                }
+            });
+            return currentSource.get();
+        });
         assertTrue(posts.stream().anyMatch(p -> p.acceptedPaint != null && !p.mainThread));
         assertSpacing(); assertTrue(faults.isEmpty());
     }
@@ -493,6 +619,127 @@ public final class ProductCensorSessionAndroidTest {
         assertEquals(1, stats.load().getTributeEvents()); assertEquals(7, stats.load().getTributeCents());
         assertEquals(0, stats.load().getCurrentSessionBlocks()); assertEquals(1, stats.getSessionHistory().get(0).getBlocks());
         main(session::stop); assertTrue(faults.isEmpty());
+    }
+
+    private AccessibilityCensorController.WindowCoverage awaitNativeViewport() throws Exception {
+        AtomicReference<AccessibilityCensorController.WindowCoverage> result = new AtomicReference<>();
+        await("Current detected native viewport", () -> {
+            main(() -> {
+                AccessibilityCensorController.WindowCoverage candidate = session.controller().viewportCoverage();
+                if (candidate.windowQualified && !candidate.regions.isEmpty() && session.controller().coverageCurrent(candidate)
+                        && candidate.regions.stream().allMatch(region -> region.member.nativeValidated)) result.set(candidate);
+            });
+            return result.get() != null;
+        });
+        return result.get();
+    }
+    private static final class ProviderGeometry {
+        final int windowId;
+        final long startedAtMillis, finishedAtMillis;
+        final android.graphics.Rect nodeBounds;
+        final List<android.graphics.RectF> characters;
+        ProviderGeometry(int windowId, long start, android.graphics.Rect nodeBounds, List<android.graphics.RectF> characters) {
+            this.windowId = windowId; startedAtMillis = start; finishedAtMillis = SystemClock.uptimeMillis();
+            this.nodeBounds = nodeBounds; this.characters = characters;
+        }
+    }
+    private ProviderGeometry providerGeometry(String literal) {
+        long start = SystemClock.uptimeMillis();
+        android.view.accessibility.AccessibilityNodeInfo root = ui.getRootInActiveWindow();
+        if (root == null) return null;
+        List<android.view.accessibility.AccessibilityNodeInfo> nodes = Collections.emptyList();
+        try {
+            root.refresh(); nodes = root.findAccessibilityNodeInfosByText(literal);
+            for (android.view.accessibility.AccessibilityNodeInfo node : nodes) {
+                if (node != null && node.refresh() && literal.contentEquals(node.getText() == null ? "" : node.getText())) {
+                    android.graphics.Rect bounds = new android.graphics.Rect(); node.getBoundsInScreen(bounds);
+                    String key = android.view.accessibility.AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY;
+                    List<String> extraData = node.getAvailableExtraData();
+                    if (bounds.isEmpty() || extraData == null || !extraData.contains(key)) return null;
+                    android.os.Bundle arguments = new android.os.Bundle();
+                    arguments.putInt(android.view.accessibility.AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_START_INDEX, 0);
+                    arguments.putInt(android.view.accessibility.AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_LENGTH, literal.length());
+                    if (!node.refreshWithExtraData(key, arguments)
+                            || !literal.contentEquals(node.getText() == null ? "" : node.getText())) return null;
+                    android.os.Parcelable[] locations = node.getExtras().getParcelableArray(key);
+                    if (locations == null || locations.length != literal.length()) return null;
+                    List<android.graphics.RectF> characters = new ArrayList<>();
+                    for (android.os.Parcelable location : locations) {
+                        if (!(location instanceof android.graphics.RectF)) return null;
+                        android.graphics.RectF character = new android.graphics.RectF((android.graphics.RectF) location);
+                        if (!Float.isFinite(character.left) || !Float.isFinite(character.top) || !Float.isFinite(character.right)
+                                || !Float.isFinite(character.bottom) || character.isEmpty()) return null;
+                        characters.add(character);
+                    }
+                    return new ProviderGeometry(node.getWindowId(), start, bounds, characters);
+                }
+            }
+            return null;
+        } finally { for (android.view.accessibility.AccessibilityNodeInfo node : nodes) if (node != null && node != root) node.recycle(); root.recycle(); }
+    }
+    private static SceneEngine.Region windowRegion(AccessibilityWindowReader.Window window) {
+        return new SceneEngine.Region(window.left, window.top, (double) window.left + window.width, (double) window.top + window.height);
+    }
+    private static void assertRegion(SceneEngine.Region expected, SceneEngine.Region actual) {
+        assertNotNull(expected); assertEquals(expected.left, actual.left, 0); assertEquals(expected.top, actual.top, 0);
+        assertEquals(expected.right, actual.right, 0); assertEquals(expected.bottom, actual.bottom, 0);
+    }
+    private void writeViewport(String label, AccessibilityCensorController.WindowCoverage coverage) throws Exception {
+        writeViewport(label, coverage, null);
+    }
+    private void writeViewport(String label, AccessibilityCensorController.WindowCoverage coverage, ProviderGeometry independent) throws Exception {
+        JSONArray detected = new JSONArray(), clipped = new JSONArray();
+        for (CensorEngine.DetectedRegion region : coverage.receipt.regions) {
+            detected.put(new JSONObject().put("identity", region.identity).put("partition", region.partition).put("textGroup", region.textGroup)
+                    .put("category", region.category).put("nativeValidated", region.nativeValidated).put("physicalErrorKnown", region.physicalErrorKnown)
+                    .put("displayRegion", regionMetadata(region.displayRegion)).put("evidenceSource", viewportSource(region.evidenceSource))
+                    .put("geometrySource", viewportSource(region.geometrySource)));
+        }
+        for (AccessibilityCensorController.WindowRegion region : coverage.regions)
+            clipped.put(new JSONObject().put("identity", region.member.identity).put("displayRegion", regionMetadata(region.displayRegion)));
+        assertEquals(coverage.receipt.regions.size(), detected.length()); assertEquals(coverage.regions.size(), clipped.length());
+        JSONObject window = coverage.window == null ? null : new JSONObject().put("id", coverage.window.id)
+                .put("left", coverage.window.left).put("top", coverage.window.top).put("width", coverage.window.width).put("height", coverage.window.height)
+                .put("displayWidth", coverage.window.displayWidth).put("displayHeight", coverage.window.displayHeight);
+        JSONObject row = new JSONObject().put("schemaVersion", 1).put("label", label).put("pid", Process.myPid())
+                .put("state", coverage.receipt.state.name()).put("queriedAtMillis", coverage.receipt.queriedAtMillis)
+                .put("sampledAtMillis", SystemClock.uptimeMillis()).put("validBeforeMillis", coverage.receipt.validBeforeMillis)
+                .put("currentAtSample", session.controller().coverageCurrent(coverage)).put("windowQualified", coverage.windowQualified)
+                .put("window", window == null ? JSONObject.NULL : window)
+                .put("canvas", coverage.receipt.canvas == null ? JSONObject.NULL : viewportSource(coverage.receipt.canvas))
+                .put("rawDetectedCount", coverage.receipt.regions.size()).put("detectedRegions", detected)
+                .put("rawWindowRegionCount", coverage.regions.size()).put("windowRegions", clipped)
+                .put("unresolvedTracks", coverage.receipt.unresolvedTracks).put("tentativeTracks", coverage.receipt.tentativeTracks)
+                .put("ineligibleMembers", coverage.receipt.ineligibleMembers).put("compositorAtMillis", coverage.receipt.compositorAtMillis)
+                .put("physicalMotionAcceptance", false).put("pixelPerformanceAcceptance", false);
+        if (label.equals("native-inset")) {
+            JSONObject provider = null;
+            if (independent != null) {
+                JSONArray characters = new JSONArray();
+                for (android.graphics.RectF character : independent.characters)
+                    characters.put(new JSONArray().put(character.left).put(character.top).put(character.right).put(character.bottom));
+                android.graphics.Rect node = independent.nodeBounds;
+                provider = new JSONObject().put("windowId", independent.windowId).put("readStartedAtMillis", independent.startedAtMillis)
+                        .put("readFinishedAtMillis", independent.finishedAtMillis).put("rawCharacterCount", independent.characters.size())
+                        .put("characters", characters).put("nodeBounds", new JSONArray().put(node.left).put(node.top).put(node.right).put(node.bottom));
+                assertEquals(independent.characters.size(), characters.length());
+            }
+            row.put("schemaVersion", 2).put("independentProviderGeometry", provider == null ? JSONObject.NULL : provider);
+        }
+        try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-mask-viewport-" + label + "-" + System.nanoTime() + ".json"))) {
+            stream.write(row.toString().getBytes(StandardCharsets.UTF_8));
+        }
+    }
+    private static JSONArray regionMetadata(SceneEngine.Region region) throws Exception {
+        return new JSONArray().put(region.left).put(region.top).put(region.right).put(region.bottom);
+    }
+    private static JSONObject viewportSource(SceneEngine.Source source) throws Exception {
+        return new JSONObject().put("epoch", source.epoch).put("sequence", source.sequence).put("geometry", source.geometry)
+                .put("width", source.width).put("height", source.height).put("kind", source.kind.name())
+                .put("imageRequestIdentity", source.imageRequestIdentity).put("receivedAtMillis", source.receivedAtMillis)
+                .put("pixelAtMillis", source.pixelAtMillis).put("readStartedAtMillis", source.readStartedAtMillis)
+                .put("readFinishedAtMillis", source.readFinishedAtMillis).put("windowId", source.windowId)
+                .put("origin", source.protectionScope.origin.name());
     }
 
     private void nativeOnly(String literal) throws Exception {
