@@ -4,8 +4,14 @@ from scripts.release_version import build_version
 
 
 class CiReleaseVersionTest(unittest.TestCase):
-    def test_local_and_private_candidates_keep_source_identity(self):
+    def test_local_and_ordinary_private_candidates_keep_source_identity(self):
         self.assertEqual((20, "0.6.4"), build_version(20, "0.6.4"))
+
+    def test_private_replacement_candidate_can_update_installed_dev_in_place(self):
+        installed, _ = build_version(21, "0.6.5", 126, True)
+        candidate, name = build_version(21, "0.6.5", 128, False)
+        self.assertGreater(candidate, installed)
+        self.assertEqual((2_100_128, "0.6.5"), (candidate, name))
 
     def test_development_identity_is_unique_and_in_source_bucket(self):
         self.assertEqual((2_000_123, "0.6.4-dev.123"), build_version(20, "0.6.4", 123, True))

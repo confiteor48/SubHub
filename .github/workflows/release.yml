@@ -83,6 +83,11 @@ jobs:
               --tag "${RELEASE_TAG}" \
               --ci-run-number "$CI_RUN_NUMBER" \
               --github-output "${GITHUB_OUTPUT}"
+          elif [[ "$REPLACEMENT_LAB_CANDIDATE" == "true" ]]; then
+            # Manual private candidates share the release sequence for in-place Android updates.
+            python3 scripts/release_version.py \
+              --ci-run-number "$CI_RUN_NUMBER" \
+              --github-output "${GITHUB_OUTPUT}"
           else
             python3 scripts/release_version.py --github-output "${GITHUB_OUTPUT}"
           fi
@@ -112,7 +117,7 @@ jobs:
           test -n "$SUBHUB_SIGNING_KEY_ALIAS"
           test -n "$SUBHUB_SIGNING_KEY_PASSWORD"
           build_args=("-PimmediateQualityExperiment=${IMMEDIATE_QUALITY_EXPERIMENT}" "-PreplacementLabCandidate=${REPLACEMENT_LAB_CANDIDATE}" "-PdevBuild=$DEV_BUILD")
-          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
+          if [[ "$PUBLISH_RELEASE" == "true" || "$REPLACEMENT_LAB_CANDIDATE" == "true" ]]; then
             build_args+=("-PciRunNumber=$CI_RUN_NUMBER")
           fi
           ./gradlew --max-workers=2 --stacktrace testDebugUnitTest lintRelease assembleRelease "${build_args[@]}"
@@ -278,6 +283,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && env.PUBLISH_RELEASE != 'true'
         env:
           VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
           python3 - <<'PY'
@@ -292,6 +298,9 @@ jobs:
               "immediateQualityExperiment": os.environ["IMMEDIATE_QUALITY_EXPERIMENT"] == "true",
               "replacementLabCandidate": os.environ["REPLACEMENT_LAB_CANDIDATE"] == "true",
               "versionName": os.environ["VERSION_NAME"],
+              "versionCode": int(os.environ["VERSION_CODE"]),
+              "ciRunNumber": int(os.environ["CI_RUN_NUMBER"]),
+              "sharedCiVersion": os.environ["REPLACEMENT_LAB_CANDIDATE"] == "true",
               "publishedRelease": False,
           }
           Path("dist/SubHub-build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")

@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.UUID;
 
 /** Owned-guest UI/selection proof, not a physical-device or detector-performance verdict. */
 @RunWith(AndroidJUnit4.class)
@@ -128,7 +129,10 @@ public final class ReplacementCandidateActivityTest {
             scenario.recreate();
             scenario.onActivity(activity -> assertTrue(((StateToggle) activity.findViewById(R.id.switch_replacement_candidate)).isChecked()));
             assertTrue(ProductCensorQualification.candidateSelected(context));
-            savePixels("replacement-candidate-selected.png");
+            if ("true".equals(InstrumentationRegistry.getArguments().getString("tap_fixture_capture"))) {
+                String run = InstrumentationRegistry.getArguments().getString("candidate_evidence_run");
+                savePixels(run == null ? UUID.randomUUID().toString().replace("-", "") : run);
+            }
             onView(withId(R.id.switch_replacement_candidate)).perform(scrollTo(), click());
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
             assertFalse(ProductCensorQualification.candidateSelected(context));
@@ -160,13 +164,35 @@ public final class ReplacementCandidateActivityTest {
         assertFalse(ProductCensorQualification.enabled(context));
     }
 
-    private void savePixels(String name) throws Exception {
+    @Test public void captureNamespacesRejectInvalidAndExistingRuns() {
+        String run = UUID.randomUUID().toString().replace("-", "");
+        File directory = freshEvidenceDirectory(run);
+        assertTrue(directory.isDirectory());
+        assertThrows(AssertionError.class, () -> freshEvidenceDirectory(run));
+        assertThrows(IllegalArgumentException.class, () -> freshEvidenceDirectory("../retained"));
+    }
+
+    private File freshEvidenceDirectory(String run) {
+        if (run == null || !run.matches("[a-f0-9]{32}")) {
+            throw new IllegalArgumentException("A bounded capture run identity is required");
+        }
+        File parent = context.getExternalFilesDir(null);
+        assertNotNull(parent);
+        File directory = new File(parent, "replacement-candidate-" + run);
+        assertTrue("Refuse a retained capture namespace", directory.mkdir());
+        return directory;
+    }
+
+    private void savePixels(String run) throws Exception {
+        File directory = freshEvidenceDirectory(run); // Reject retained evidence before acquiring pixels.
         Bitmap pixels = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
         assertNotNull(pixels);
-        File file = new File(context.getExternalFilesDir(null), name);
-        assertFalse("Retain previous evidence", file.exists());
-        try (FileOutputStream output = new FileOutputStream(file)) {
-            assertTrue(pixels.compress(Bitmap.CompressFormat.PNG, 100, output));
+        try {
+            File file = new File(directory, "selected.png");
+            assertFalse("Retain previous evidence", file.exists());
+            try (FileOutputStream output = new FileOutputStream(file)) {
+                assertTrue(pixels.compress(Bitmap.CompressFormat.PNG, 100, output));
+            }
         } finally { pixels.recycle(); }
     }
 }

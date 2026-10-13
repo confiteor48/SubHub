@@ -18,8 +18,10 @@ These repository rules apply to every automated or human-assisted change.
 - `VERSION_CODE` is a positive Android integer and must increase for every released APK.
 - Public CI builds derive their Android code as `VERSION_CODE * 100000 + release workflow run_number`.
   Stable and development releases share that sequence; a later stable build can replace a dev build
-  of the same source version. Local/private candidates retain the unexpanded source code. Keep the
-  same `release.yml` workflow sequence; fail closed before run 100000 or Android code overflow.
+  of the same source version. Manual private replacement-engine candidates use that same sequence
+  for in-place signed updates, without publishing a release or adding a dev suffix. Local builds
+  and other private candidates retain the unexpanded source code. Keep the same `release.yml`
+  workflow sequence; fail closed before run 100000 or Android code overflow.
 - Any stable release-bound change must update both source values in the same commit. Automatic dev
   builds keep the source version and derive a unique name/code from the shared CI sequence.
   The helper performs the safe increment:
