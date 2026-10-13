@@ -259,28 +259,54 @@ public final class AccessibilityCensorHostAndroidTest {
         }
     }
 
-    @Test public void onlyTheActualCpuNnapiSplitAllowsFastDuringQualityWork() throws Exception {
-        for (String provider : new String[]{"CPU", "NNAPI"}) {
+    @Test public void providerLabelsCannotGrantVisualOverlapOrCancelAdmittedQualityOnRefresh() throws Exception {
+        for (String provider : new String[]{"CPU", "NNAPI", "UNKNOWN"}) {
             try (Harness h = new Harness()) {
                 h.qualityEnabled = true; h.blockQuality = true; h.qualityProvider = provider;
                 h.start(10, config(2, .3f)); h.next().deliver(); h.awaitView(10);
                 assertTrue(h.qualityReady.await(5, TimeUnit.SECONDS));
-                h.next().deliver();
+                Call qualitySource = h.next(); qualitySource.deliver();
                 assertTrue(h.qualityEntered.await(5, TimeUnit.SECONDS));
                 // Drain provider admission posts before the next physical capture.
                 main(() -> { });
-                h.next().deliver();
+                Call superseded = h.next(); superseded.deliver();
+                Call latest = h.next(); latest.deliver(); h.next(); // Actual capture lane processed both refreshes.
                 Model fast = h.models.stream().filter(model -> model.lane == SceneEngine.Lane.FAST)
                         .findFirst().orElseThrow(AssertionError::new);
-                if ("NNAPI".equals(provider)) {
-                    long deadline = SystemClock.uptimeMillis() + 5000;
-                    while (fast.runs.get() < 3 && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
-                    assertEquals(3, fast.runs.get());
-                } else {
-                    Thread.sleep(80); assertEquals("shared CPU work overlapped", 2, fast.runs.get());
-                }
+                assertEquals("provider label permitted visual overlap", 2, fast.runs.get());
+                assertFalse(h.visualOverlap.get());
                 h.qualityRelease.countDown();
+                assertTrue(h.completedQualityBatch.await(5, TimeUnit.SECONDS));
+                long deadline = SystemClock.uptimeMillis() + 5000;
+                while (h.acceptedFast.get() < 3 && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
+                assertEquals(3, fast.runs.get());
+                assertEquals(3, h.acceptedFast.get());
+                assertTrue("latest pending FAST request did not complete",
+                        h.acceptedFastSources.contains(latest.request.identity));
+                assertFalse("superseded pending FAST request ran",
+                        h.acceptedFastSources.contains(superseded.request.identity));
+                assertTrue("capture refresh discarded the admitted QUALITY source",
+                        h.acceptedQualitySources.contains(qualitySource.request.identity));
+                assertFalse(h.firstQualityWasCancelled.get()); assertFalse(h.visualOverlap.get());
             }
+        }
+    }
+
+    @Test public void stoppingHeldSerializedQualityKeepsPixelsUntilActualTerminalAndRejectsItsResult() throws Exception {
+        try (Harness h = new Harness()) {
+            h.qualityEnabled = true; h.blockQuality = true; h.qualityProvider = "NNAPI";
+            h.start(10, config(2, .3f)); h.next().deliver(); h.awaitView(10);
+            assertTrue(h.qualityReady.await(5, TimeUnit.SECONDS));
+            Bitmap source = h.next().deliver(); assertTrue(h.qualityEntered.await(5, TimeUnit.SECONDS));
+            main(h.host::stop); main(h.host::close); h.failUndelivered();
+            assertFalse(source.isRecycled()); assertFalse(h.terminated.await(80, TimeUnit.MILLISECONDS));
+            Model quality = h.models.stream().filter(model -> model.lane == SceneEngine.Lane.QUALITY)
+                    .findFirst().orElseThrow(AssertionError::new);
+            assertEquals(0, quality.closes.get()); h.qualityRelease.countDown();
+            assertTrue(h.terminated.await(5, TimeUnit.SECONDS)); assertTrue(h.disposed.get());
+            assertTrue(source.isRecycled()); assertEquals(1, quality.closes.get());
+            assertTrue(h.firstQualityWasCancelled.get()); assertEquals(0, h.acceptedQualityPositives.get());
+            assertFalse(h.visualOverlap.get());
         }
     }
 
@@ -649,6 +675,7 @@ public final class AccessibilityCensorHostAndroidTest {
                 int tensorWidth, int tensorHeight, BooleanSupplier cancelled,
                 Consumer<DetectionEngine.RunCancellation> binding) throws Exception {
             assertFalse(bitmap.isRecycled()); int run = runs.incrementAndGet();
+            if (lane == SceneEngine.Lane.FAST && harness.qualityExecuting.get()) harness.visualOverlap.set(true);
             harness.inferenceEntered.countDown();
             if (harness.blockInference) assertTrue(harness.inferenceRelease.await(5, TimeUnit.SECONDS));
             if (lane == SceneEngine.Lane.FAST && run == 2 && harness.holdSecondInference) {
@@ -658,8 +685,12 @@ public final class AccessibilityCensorHostAndroidTest {
                 if (harness.failSecondInference) throw new IllegalStateException("controlled second inference failure");
             }
             if (lane == SceneEngine.Lane.QUALITY) {
+                harness.qualityExecuting.set(true);
                 harness.qualityEntered.countDown();
-                if (harness.blockQuality) assertTrue(harness.qualityRelease.await(5, TimeUnit.SECONDS));
+                try {
+                    if (harness.blockQuality) assertTrue(harness.qualityRelease.await(5, TimeUnit.SECONDS));
+                    if (run == 1) harness.firstQualityWasCancelled.set(cancelled.getAsBoolean());
+                } finally { harness.qualityExecuting.set(false); }
             }
             assertFalse(bitmap.isRecycled());
             if (lane == SceneEngine.Lane.FAST && harness.emptyFast) {
@@ -686,6 +717,8 @@ public final class AccessibilityCensorHostAndroidTest {
         final List<Call> calls = new CopyOnWriteArrayList<>();
         final List<Model> models = new CopyOnWriteArrayList<>();
         final List<Long> presentedTokens = new CopyOnWriteArrayList<>();
+        final List<Long> acceptedQualitySources = new CopyOnWriteArrayList<>();
+        final List<Long> acceptedFastSources = new CopyOnWriteArrayList<>();
         final CountDownLatch terminated = new CountDownLatch(1);
         final CountDownLatch inferenceEntered = new CountDownLatch(1);
         final CountDownLatch inferenceRelease = new CountDownLatch(1);
@@ -715,6 +748,8 @@ public final class AccessibilityCensorHostAndroidTest {
         final AtomicBoolean initializedOnMain = new AtomicBoolean();
         final AtomicBoolean disposed = new AtomicBoolean();
         final AtomicBoolean secondWasCancelled = new AtomicBoolean();
+        final AtomicBoolean qualityExecuting = new AtomicBoolean(), visualOverlap = new AtomicBoolean();
+        final AtomicBoolean firstQualityWasCancelled = new AtomicBoolean();
         volatile boolean blockInference;
         volatile boolean blockInitialization;
         volatile boolean qualityEnabled;
@@ -772,8 +807,12 @@ public final class AccessibilityCensorHostAndroidTest {
                             if (lane == SceneEngine.Lane.FAST) { fastUnavailableNotifications.incrementAndGet(); fastUnavailable.countDown(); }
                         }
                         @Override public void batchAccepted(SceneEngine.Batch batch) {
-                            if (batch.lane == SceneEngine.Lane.FAST) acceptedFast.incrementAndGet();
+                            if (batch.lane == SceneEngine.Lane.FAST) {
+                                acceptedFastSources.add(batch.source.imageRequestIdentity);
+                                acceptedFast.incrementAndGet();
+                            }
                             if (batch.lane == SceneEngine.Lane.QUALITY && !batch.observations.isEmpty()) {
+                                acceptedQualitySources.add(batch.source.imageRequestIdentity);
                                 acceptedQualityPositives.incrementAndGet(); completedQualityBatch.countDown();
                             }
                         }

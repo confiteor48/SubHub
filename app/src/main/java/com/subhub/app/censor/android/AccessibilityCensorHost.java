@@ -287,9 +287,8 @@ public final class AccessibilityCensorHost implements AutoCloseable {
             if (fastInitializationFailed != value) enabled.add(SceneEngine.Lane.FAST);
             if (value.quality && quality.sessionMatches(value.detector)) enabled.add(SceneEngine.Lane.QUALITY);
         }
-        boolean parallel = fast.sessionMatches(value.detector) && quality.sessionMatches(value.detector)
-                && "CPU".equals(fast.provider) && "NNAPI".equals(quality.provider);
-        engine.executionControls(Math.max(0, value.detector.getDetectionIntervalMs()), parallel, enabled);
+        // Provider labels do not qualify independent resources: NNAPI can run ORT CPU kernels.
+        engine.executionControls(Math.max(0, value.detector.getDetectionIntervalMs()), false, enabled);
     }
 
     private void requireTextSource(DetectorConfig detector, TextSmutConfig text) {

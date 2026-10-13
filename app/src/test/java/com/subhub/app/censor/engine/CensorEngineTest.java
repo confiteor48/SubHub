@@ -812,19 +812,75 @@ public class CensorEngineTest {
         assertEquals(1, first.closes); assertEquals(1, second.closes);
     }
 
-    @Test public void serializedQualityYieldsToFastWithoutPretendingNativeCancellationFinished() {
+    @Test public void serializedQualityFinishesBeforeLatestFastAndNextQuality() {
         Harness h = new Harness(true, false, false, 8, 2, 16); h.start(); h.fire(0); Pixel first = h.deliver(0, 1);
         h.fastExecutor.runOne(); assertEquals(0, h.qualityExecutor.size());
         h.fast.succeed(0, face(500)); h.ui.runAll(); h.qualityExecutor.runOne();
         WorkCall quality = h.quality.calls.get(0);
         h.fire(334); Pixel second = h.deliver(1, 2);
-        assertTrue(quality.input.cancelled()); assertEquals(1, h.quality.cancellations);
+        h.fire(668); Pixel third = h.deliver(2, 3);
+        assertFalse(quality.input.cancelled()); assertEquals(0, h.quality.cancellations);
         assertEquals(0, h.engine.activeCount(FAST)); assertEquals(1, h.engine.pendingCount(FAST));
+        assertEquals(1, h.engine.pendingCount(QUALITY)); assertEquals(1, second.closes);
         assertFalse(first.closed); assertEquals(1, h.engine.activeCount(QUALITY));
         h.quality.succeed(0, face(500)); h.fastExecutor.runOne();
-        assertEquals(2, h.fast.calls.get(1).input.source.sequence);
-        h.engine.close(); assertFalse(second.closed); h.fast.calls.get(1).completion.cancelled();
-        assertEquals(1, first.closes); assertEquals(1, second.closes);
+        assertEquals(1, h.accepted.stream().filter(batch -> batch.lane == QUALITY
+                && batch.source == quality.input.source).count());
+        assertEquals(3, h.fast.calls.get(1).input.source.sequence);
+        assertEquals(0, h.qualityExecutor.size()); assertEquals(1, h.quality.calls.size());
+        h.fast.succeed(1, face(100)); h.qualityExecutor.runOne();
+        assertEquals(3, h.quality.calls.get(1).input.source.sequence);
+        h.engine.close(); assertFalse(third.closed); h.quality.calls.get(1).completion.cancelled();
+        assertEquals(1, first.closes); assertEquals(1, second.closes); assertEquals(1, third.closes);
+        assertEquals(1, h.drained);
+    }
+
+    @Test public void serializedQualityStillCancelsOnScopeDisableAndStopWithoutEarlyRelease() {
+        for (int control = 0; control < 3; control++) {
+            Harness h = new Harness(true, false, false, 8, 2, 16); h.start(); h.fire(0);
+            Pixel first = h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+            h.ui.runAll(); h.qualityExecutor.runOne(); WorkCall quality = h.quality.calls.get(0);
+            h.fire(334); Pixel second = h.deliver(1, 2);
+            if (control == 0) h.engine.changeScope(43);
+            else if (control == 1) {
+                h.engine.executionControls(334, false, Collections.singleton(FAST));
+                h.engine.executionControls(334, false, java.util.EnumSet.of(FAST, QUALITY));
+            } else h.engine.stop();
+            assertTrue(quality.input.cancelled()); assertEquals(1, quality.cancellationSignals);
+            assertFalse(first.closed); assertEquals(1, h.engine.activeCount(QUALITY));
+            assertEquals(0, h.fastExecutor.size());
+            h.quality.succeed(0, face(100));
+            assertEquals(0, h.accepted.stream().filter(batch -> batch.lane == QUALITY).count());
+            h.engine.close(); h.fastExecutor.runAll();
+            assertEquals(1, first.closes); assertEquals(1, second.closes); assertEquals(1, h.drained);
+        }
+    }
+
+    @Test public void serializedQueuedQualityKeepsAdmissionButStopPreventsReadingReleasedPixels() {
+        Harness h = new Harness(true, false, false, 8, 0, 16); h.start(); h.fire(0);
+        Pixel first = h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
+        assertEquals(1, h.qualityExecutor.size());
+        h.fire(334); Pixel second = h.deliver(1, 2);
+        assertEquals(0, h.fastExecutor.size()); assertEquals(1, h.engine.pendingCount(FAST));
+        assertFalse(first.closed);
+        h.engine.stop(); h.qualityExecutor.runAll(); h.fastExecutor.runAll(); h.engine.close();
+        assertTrue(h.quality.calls.isEmpty()); assertEquals(1, first.closes); assertEquals(1, second.closes);
+        assertEquals(1, h.drained);
+    }
+
+    @Test public void switchingParallelAdmissionToSerialWaitsForBothActualVisualTerminals() {
+        Harness h = new Harness(true, false, true, 8, 0, 16); h.start(); h.fire(0); h.deliver(0, 1);
+        h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.qualityExecutor.runOne();
+        h.fire(334); h.deliver(1, 2); h.fastExecutor.runOne();
+        h.engine.executionControls(334, false, java.util.EnumSet.of(FAST, QUALITY));
+        h.fire(668); h.deliver(2, 3);
+        assertFalse(h.quality.calls.get(0).input.cancelled()); assertFalse(h.fast.calls.get(1).input.cancelled());
+        h.quality.succeed(0, face(500));
+        assertEquals(0, h.fastExecutor.size()); assertEquals(0, h.qualityExecutor.size());
+        h.fast.succeed(1, face(500)); assertEquals(1, h.fastExecutor.size());
+        assertEquals(0, h.qualityExecutor.size()); h.fastExecutor.runOne();
+        assertEquals(3, h.fast.calls.get(2).input.source.sequence);
+        h.engine.close(); h.fast.calls.get(2).completion.cancelled(); assertEquals(1, h.drained);
     }
 
     @Test public void qualifiedParallelPolicyKeepsRunningQualityWhileFastStarts() {
@@ -915,7 +971,7 @@ public class CensorEngineTest {
         assertThrows(IllegalStateException.class, () -> h.engine.start(42));
     }
 
-    @Test public void deferredOldCancellationCannotTargetNewQualityOperation() {
+    @Test public void refreshTraceReentryCannotCancelNextQualityOperation() {
         Harness h = new Harness(true, false, false, 8, 2, 16); h.start(); h.fire(0); h.deliver(0, 1);
         h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.qualityExecutor.runOne();
         h.traceHook = trace -> {

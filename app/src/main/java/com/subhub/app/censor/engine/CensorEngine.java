@@ -1406,8 +1406,9 @@ public final class CensorEngine<P> implements AutoCloseable {
             lane.pendingAt = clock.getAsLong();
             trace(Stage.JOB_QUEUED, frame.source, lane.specification.lane, 0, null, actions);
         }
-        LaneState quality = lanes.get(SceneEngine.Lane.QUALITY);
-        if (!parallelQuality && quality != null) cancelJob(quality.active, actions);
+        // Refresh only pending work. Cancelling admitted QUALITY on every new capture can starve
+        // its coverage; shared visual admission waits for its real terminal before latest FAST.
+        // Scope, lane-disable and stop still cancel exact jobs without releasing their pixels early.
         pump(actions);
     }
 
