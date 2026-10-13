@@ -94,7 +94,7 @@ jobs:
             echo "RELEASE_TAG=$EFFECTIVE_TAG" >> "$GITHUB_ENV"
           fi
       - name: Test release-note generation
-        run: python3 -m unittest scripts.test_generate_release_notes scripts.test_release_version scripts.test_release_candidate_policy
+        run: python3 -m unittest scripts.test_generate_release_notes scripts.test_release_version scripts.test_release_candidate_policy scripts.test_analyze_replacement_trace
       - name: Restore release signing key
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SUBHUB_SIGNING_KEYSTORE_BASE64 }}

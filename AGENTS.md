@@ -55,6 +55,19 @@ a new hardware-frame commit where supported; UI idle and a fixed sleep alone do 
 prove composition. Keep independent screenshot and hit-map assertions, and retain failed
 pixels before assertions discard their evidence. A frame commit is not a physical pixel clock.
 
+Every fixture registering or reconfiguring `UiAutomation` must save both
+`enabled_accessibility_services` and `accessibility_enabled` before registration. In teardown,
+switch to `FLAG_DONT_USE_ACCESSIBILITY` before restoring both exact values, then assert restoration.
+UI-only automation can enable an inactive remembered service and contaminate the next bound-service
+fixture. Keep rejecting enabled capture intent; use a separately owned fresh-data guest instead of
+clearing an existing guest's settings or app data.
+
+Recover debug-app internal Censor Lab files with the authorized `run-as com.subhub.app` path.
+Copies in external app storage may not be shell-readable; do not change permissions or repeat
+passed workloads to repair export evidence. Verify the structured payload as well as the command
+status: Android `exec-out` can return diagnostic text with a zero host exit code. Preserve failed
+exports and shutdown observers, and reconcile actual closure separately.
+
 For keyboard regressions, check initial launch, activity recreation, and tap-to-edit
 separately. Android can restore an EditText's focus after `onCreate`, so a launch-only
 focus check does not verify recreated screens.
