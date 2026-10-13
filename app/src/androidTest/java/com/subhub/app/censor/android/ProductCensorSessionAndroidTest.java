@@ -539,6 +539,79 @@ public final class ProductCensorSessionAndroidTest {
         assertTrue(posts.stream().anyMatch(p -> p.acceptedPaint != null && !p.mainThread));
         assertSpacing(); assertTrue(faults.isEmpty());
     }
+    @Test public void candidateSelectionNeverHotSwapsTheConnectedOwner() throws Exception {
+        Assume.assumeTrue(com.subhub.app.BuildConfig.REPLACEMENT_LAB_CANDIDATE);
+        assertTrue(qualification.edit().putBoolean("enabled", false)
+                .putBoolean(ProductCensorQualification.CANDIDATE_SELECTION, true).commit());
+        connect();
+        CensorProductSession connected = ProductCensorQualification.current();
+        ScreenshotAccessibilityService bound = (ScreenshotAccessibilityService) connected.service();
+        int pid = bound.qualificationBoundPid();
+        assertTrue(bound.legacyCensorRuntimeAbsentForQualification());
+        assertTrue(ProductCensorQualification.enabled(context));
+        main(() -> assertSame(connected, ProductCensorQualification.current()));
+        assertEquals(pid, bound.qualificationBoundPid());
+        assertTrue(bound.legacyCensorRuntimeAbsentForQualification());
+        assertTrue(qualification.edit().putBoolean(ProductCensorQualification.CANDIDATE_SELECTION, false).commit());
+        assertFalse("The next connection no longer selects replacement", ProductCensorQualification.enabled(context));
+        main(() -> assertSame("Current startup-selected owner is not swapped", connected, ProductCensorQualification.current()));
+        assertEquals(pid, bound.qualificationBoundPid());
+        assertTrue(bound.legacyCensorRuntimeAbsentForQualification());
+        disconnectCandidate(connected);
+        assertTrue(qualification.edit().putBoolean(ProductCensorQualification.CANDIDATE_SELECTION, true).commit());
+        assertFalse(qualification.getBoolean("enabled", true));
+        ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        connect(); awaitPaint();
+        assertNotSame("Actual reconnection creates a new single owner", connected, session);
+        assertNotSame("Actual framework service instance was replaced", bound, session.service());
+        assertTrue(connected.managedResourcesDrained()); assertBinding();
+        assertFalse(earlyClose.get());
+    }
+
+    @Test public void unselectedCandidateConnectionCannotCreateReplacementOwner() throws Exception {
+        assertTrue(qualification.edit().putBoolean("enabled", false)
+                .putBoolean(ProductCensorQualification.CANDIDATE_SELECTION, false).commit());
+        assertTrue(preferences.edit().putBoolean(AppModeManager.KEY_ARMED, false).commit());
+        ComponentName component = new ComponentName(context, ScreenshotAccessibilityService.class);
+        secure(previousServices == null || previousServices.isEmpty() ? component.flattenToString()
+                : previousServices + ":" + component.flattenToString(), 1);
+        try { await("Actual non-candidate service binding", ScreenshotAccessibilityService::isRunning); }
+        catch (AssertionError failure) { retainBindingFailure(); throw failure; }
+        main(() -> assertNull("Neither candidate nor fixture selected", ProductCensorQualification.current()));
+        assertEquals(0, models.get()); assertFalse(ProductCensorQualification.enabled(context));
+    }
+
+    @Test public void replacementTraceReachesTheExplicitLabBufferWithoutCompositorClaims() throws Exception {
+        assertFalse(com.subhub.app.diagnostics.CensorLabRecorder.isActive());
+        com.subhub.app.diagnostics.CensorLabRecorder.start(context);
+        com.subhub.app.diagnostics.CensorLabRecorder.CompletedSession completed;
+        try { connect(); awaitPaint(); assertBinding(); }
+        finally { completed = com.subhub.app.diagnostics.CensorLabRecorder.stop(context); }
+        assertNotNull(completed);
+        String raw = new String(java.nio.file.Files.readAllBytes(completed.trace.toPath()), StandardCharsets.UTF_8);
+        int rows = 0, engineRows = 0, postRows = 0;
+        for (String line : raw.split("\n")) {
+            if (line.trim().isEmpty()) continue;
+            rows++; JSONObject event = new JSONObject(line);String message = event.getString("message");
+            if (message.startsWith("REPLACEMENT_TRACE ")) {
+                engineRows++;JSONObject value = new JSONObject(message.substring("REPLACEMENT_TRACE ".length()));
+                assertEquals(1,value.getInt("schemaVersion"));assertTrue(value.getLong("connection")>0);
+                assertEquals("UPTIME_MILLIS",value.getString("clockDomain"));
+                assertTrue(value.getLong("atMillis")<=event.getLong("observedUptimeMillis"));
+            } else if (message.startsWith("REPLACEMENT_POST ")) {
+                postRows++;JSONObject value = new JSONObject(message.substring("REPLACEMENT_POST ".length()));
+                assertEquals(-1,value.getLong("compositorAtMillis"));assertFalse(value.getBoolean("mainThread"));
+                assertEquals(1,value.getInt("schemaVersion"));assertTrue(value.getLong("connection")>0);
+            }
+        }
+        assertEquals(completed.eventCount,rows);assertEquals(0,completed.droppedEvents);
+        assertTrue("Actual engine callbacks reached recorder",engineRows>0);
+        assertTrue("Actual Surface receipts reached recorder",postRows>0);
+        File directory = new File(context.getExternalFilesDir(null),"replacement-lab-proof");assertTrue(directory.mkdirs());
+        java.nio.file.Files.copy(completed.trace.toPath(),new File(directory,"trace.ndjson").toPath());
+        java.nio.file.Files.copy(completed.manifest.toPath(),new File(directory,"manifest.json").toPath());
+    }
+
     @Test public void appearanceAndArtworkRevisionPreserveScopeGeometryAndNativeModel() throws Exception {
         connect(); awaitPaint(); CensorEngine.ActiveScope original = session.controller().activeScope(); int initialized = models.get();
         long beforePost = session.controller().surface().postCount();
@@ -1157,6 +1230,28 @@ public final class ProductCensorSessionAndroidTest {
         secure(previousServices == null || previousServices.isEmpty() ? component.flattenToString() : previousServices + ":" + component.flattenToString(), 1);
         await("Actual production service connected", () -> ProductCensorQualification.current() != null && ScreenshotAccessibilityService.isRunning());
         session = ProductCensorQualification.current(); assertBinding();
+    }
+    private void disconnectCandidate(CensorProductSession connected) throws Exception {
+        ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
+        secure(previousServices, previousEnabled);
+        await("Actual candidate service unbinding", () -> !ScreenshotAccessibilityService.isRunning());
+        await("Disconnected owner fully releases resources", connected::managedResourcesDrained);
+        main(() -> ProductCensorQualification.disconnected(connected));
+        assertNull(ProductCensorQualification.current());
+        assertEquals(models.get(), closes.get()); assertFalse(earlyClose.get());
+    }
+    private void retainBindingFailure() throws Exception {
+        File target = new File(context.getExternalFilesDir(null), "candidate-binding-failure.txt");
+        assertFalse("Retain previous binding diagnostics", target.exists());
+        try (android.os.ParcelFileDescriptor descriptor = ui.executeShellCommand("dumpsys accessibility");
+                java.io.InputStream input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+                FileOutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[8192]; int total = 0, length;
+            while ((length = input.read(buffer)) != -1) {
+                total += length; if (total > 262144) throw new IllegalStateException("Bounded owned binding diagnostic");
+                output.write(buffer, 0, length);
+            }
+        }
     }
     private void assertBinding() {
         ScreenshotAccessibilityService actual = (ScreenshotAccessibilityService) session.service();

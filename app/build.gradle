@@ -22,6 +22,11 @@ if (ciRunNumber != null) {
     throw new GradleException('Development release identity requires ciRunNumber')
 }
 
+def replacementLabCandidate = project.findProperty('replacementLabCandidate') ?: 'false'
+if (!(replacementLabCandidate in ['true', 'false'])) {
+    throw new GradleException('replacementLabCandidate must be true or false')
+}
+
 def signingStorePath = System.getenv('SUBHUB_SIGNING_STORE_FILE')
 def signingStorePassword = System.getenv('SUBHUB_SIGNING_STORE_PASSWORD')
 def signingKeyAlias = System.getenv('SUBHUB_SIGNING_KEY_ALIAS')
@@ -52,6 +57,7 @@ android {
                 '"' + java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString() + '"'
         buildConfigField 'boolean', 'IMMEDIATE_QUALITY_EXPERIMENT',
                 (project.findProperty('immediateQualityExperiment') == 'true' ? 'true' : 'false')
+        buildConfigField 'boolean', 'REPLACEMENT_LAB_CANDIDATE', replacementLabCandidate
 
         testInstrumentationRunner 'com.subhub.app.SubHubTestRunner'
     }

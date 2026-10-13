@@ -37,6 +37,28 @@
                 style="@style/Widget.SubHub.DiagnosticsText"
                 android:layout_marginTop="@dimen/ui_gap_control" />
 
+            <LinearLayout
+                android:id="@+id/replacement_candidate_controls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/ui_gap_control"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <com.subhub.app.util.StateToggle
+                    android:id="@+id/switch_replacement_candidate"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/diagnostics_replacement_candidate" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/diagnostics_replacement_candidate_desc"
+                    android:textColor="@color/text_muted"
+                    android:textSize="@dimen/ui_text_caption" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/censor_lab_sync_marker"
                 android:layout_width="match_parent"

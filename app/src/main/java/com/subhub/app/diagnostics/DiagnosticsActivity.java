@@ -133,12 +133,26 @@ public final class DiagnosticsActivity extends AppCompatActivity {
         binding.switchDiagnosticsOverlay.setOnCheckedChangeListener((button, checked) ->
                 settings.preferences().edit().putBoolean(
                         DiagnosticsRepository.PREF_OVERLAY, checked).apply());
+        boolean candidateAvailable = com.subhub.app.censor.android.ProductCensorQualification.candidateSupported();
+        binding.replacementCandidateControls.setVisibility(candidateAvailable ? View.VISIBLE : View.GONE);
+        binding.switchReplacementCandidate.setChecked(
+                com.subhub.app.censor.android.ProductCensorQualification.candidateSelected(this));
+        binding.switchReplacementCandidate.setOnCheckedChangeListener((button, checked) -> {
+            if (!candidateAvailable || !ControllerPinManager.isDomModeActive()) {
+                button.setChecked(com.subhub.app.censor.android.ProductCensorQualification.candidateSelected(this));
+                return;
+            }
+            com.subhub.app.censor.android.ProductCensorQualification.selectCandidate(this, checked);
+        });
         if (ControllerPinManager.isDomModeActive()) {
-            editMode = ControllerEditMode.bind(this, PrimaryHeader.editLockButton(binding.getRoot()), editing ->
-                    binding.switchDiagnosticsOverlay.setEnabled(editing));
+            editMode = ControllerEditMode.bind(this, PrimaryHeader.editLockButton(binding.getRoot()), editing -> {
+                binding.switchDiagnosticsOverlay.setEnabled(editing);
+                binding.switchReplacementCandidate.setEnabled(editing && candidateAvailable);
+            });
         } else {
             PrimaryHeader.editLockButton(binding.getRoot()).setVisibility(android.view.View.GONE);
             binding.switchDiagnosticsOverlay.setEnabled(false);
+            binding.switchReplacementCandidate.setEnabled(false);
         }
         render();
     }

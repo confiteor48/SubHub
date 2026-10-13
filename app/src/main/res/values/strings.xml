@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="diagnostics_replacement_candidate">Replacement engine</string>
+    <string name="diagnostics_replacement_candidate_desc">Reconnect Accessibility to apply. Scroll tracking is not qualified.</string>
     <string name="tour_wallet_rules">Wallet rules</string>
     <string name="tour_wallet_graphic">Wallet with tribute coins</string>
     <string name="tour_wallet_amount_invalid">Use an amount from %1$s to %2$s.</string>

@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      replacement_lab_candidate:
+        description: "Allow explicit replacement-engine selection in a private signed candidate only"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -43,6 +48,7 @@ jobs:
       BUILD_REF: ${{ inputs.build_ref || inputs.release_tag || github.sha }}
       PUBLISH_RELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
       IMMEDIATE_QUALITY_EXPERIMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.immediate_quality_experiment || false }}
+      REPLACEMENT_LAB_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' && inputs.replacement_lab_candidate || false }}
       DEV_BUILD: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
       CI_RUN_NUMBER: ${{ github.run_number }}
       PUSH_BEFORE: ${{ github.event.before }}
@@ -60,10 +66,11 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [[ "$IMMEDIATE_QUALITY_EXPERIMENT" == "true" && "$PUBLISH_RELEASE" == "true" ]]; then
-            echo "Experimental quality refresh is restricted to private signed artifacts."
-            exit 1
-          fi
+          python3 scripts/release_candidate_policy.py \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --publish-release "$PUBLISH_RELEASE" \
+            --immediate-quality-experiment "$IMMEDIATE_QUALITY_EXPERIMENT" \
+            --replacement-lab-candidate "$REPLACEMENT_LAB_CANDIDATE"
           if [[ "$DEV_BUILD" == "true" ]]; then
             python3 scripts/release_version.py \
               --ci-run-number "$CI_RUN_NUMBER" --dev-build \
@@ -87,7 +94,7 @@ jobs:
             echo "RELEASE_TAG=$EFFECTIVE_TAG" >> "$GITHUB_ENV"
           fi
       - name: Test release-note generation
-        run: python3 -m unittest scripts.test_generate_release_notes scripts.test_release_version
+        run: python3 -m unittest scripts.test_generate_release_notes scripts.test_release_version scripts.test_release_candidate_policy
       - name: Restore release signing key
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SUBHUB_SIGNING_KEYSTORE_BASE64 }}
@@ -104,12 +111,14 @@ jobs:
           test -n "$SUBHUB_SIGNING_STORE_PASSWORD"
           test -n "$SUBHUB_SIGNING_KEY_ALIAS"
           test -n "$SUBHUB_SIGNING_KEY_PASSWORD"
-          build_args=("-PimmediateQualityExperiment=${IMMEDIATE_QUALITY_EXPERIMENT}" "-PdevBuild=$DEV_BUILD")
+          build_args=("-PimmediateQualityExperiment=${IMMEDIATE_QUALITY_EXPERIMENT}" "-PreplacementLabCandidate=${REPLACEMENT_LAB_CANDIDATE}" "-PdevBuild=$DEV_BUILD")
           if [[ "$PUBLISH_RELEASE" == "true" ]]; then
             build_args+=("-PciRunNumber=$CI_RUN_NUMBER")
           fi
           ./gradlew --max-workers=2 --stacktrace testDebugUnitTest lintRelease assembleRelease "${build_args[@]}"
           grep -F "IMMEDIATE_QUALITY_EXPERIMENT = ${IMMEDIATE_QUALITY_EXPERIMENT};" \
+            app/build/generated/source/buildConfig/release/com/subhub/app/BuildConfig.java
+          grep -F "REPLACEMENT_LAB_CANDIDATE = ${REPLACEMENT_LAB_CANDIDATE};" \
             app/build/generated/source/buildConfig/release/com/subhub/app/BuildConfig.java
           grep -F "VERSION_CODE = ${{ steps.version.outputs.version_code }};" \
             app/build/generated/source/buildConfig/release/com/subhub/app/BuildConfig.java
@@ -281,6 +290,7 @@ jobs:
               "sourceCommit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
               "workflowCommit": os.environ["WORKFLOW_SHA"],
               "immediateQualityExperiment": os.environ["IMMEDIATE_QUALITY_EXPERIMENT"] == "true",
+              "replacementLabCandidate": os.environ["REPLACEMENT_LAB_CANDIDATE"] == "true",
               "versionName": os.environ["VERSION_NAME"],
               "publishedRelease": False,
           }
@@ -291,7 +301,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && env.PUBLISH_RELEASE != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: SubHub-${{ steps.version.outputs.version_name }}-signed-immediate-${{ inputs.immediate_quality_experiment && 'on' || 'off' }}-${{ github.run_id }}
+          name: SubHub-${{ steps.version.outputs.version_name }}-signed-immediate-${{ inputs.immediate_quality_experiment && 'on' || 'off' }}-replacement-${{ inputs.replacement_lab_candidate && 'on' || 'off' }}-${{ github.run_id }}
           path: |
             dist/*.apk
             dist/*-SHA256SUMS.txt
@@ -307,7 +317,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && env.PUBLISH_RELEASE != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: SubHub-${{ steps.version.outputs.version_name }}-pixel-immediate-${{ inputs.immediate_quality_experiment && 'on' || 'off' }}-${{ github.run_id }}
+          name: SubHub-${{ steps.version.outputs.version_name }}-pixel-immediate-${{ inputs.immediate_quality_experiment && 'on' || 'off' }}-replacement-${{ inputs.replacement_lab_candidate && 'on' || 'off' }}-${{ github.run_id }}
           path: |
             dist/*-arm64-v8a.apk
             dist/SubHub-pixel-SHA256SUMS.txt

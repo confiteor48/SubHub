@@ -8,7 +8,8 @@ public final class CensorLabLog {
             "CALIBRATION_SCENE", "CALIBRATION_TOUCH", "CAPTURE_PHASE", "CAPTURE_ADMISSION", "FAST_DROP",
             "FRAME_MOTION", "INFERENCE_GATE",
             "OVERLAY_PUBLISH", "QUALITY_", "SCROLL_", "SETTLED_",
-            "SCENE_", "SOURCE_FRAME_", "STARTUP", "TEXT_", "WORLD_CACHE_"
+            "SCENE_", "SOURCE_FRAME_", "STARTUP", "TEXT_", "WORLD_CACHE_",
+            "REPLACEMENT_TRACE ", "REPLACEMENT_POST "
     };
 
     private CensorLabLog() {}

@@ -266,6 +266,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
             };
     private CensorLabCensorSession.Subscription labCensorSubscription;
     private int qualificationBoundPid = -1;
+    private static final java.util.concurrent.atomic.AtomicLong PRODUCT_CONNECTIONS = new java.util.concurrent.atomic.AtomicLong();
     private CensorProductSession productSession;
     private ScheduledExecutorService worker;
     private final RowMotionObserver rowMotionObserver = new RowMotionObserver();
@@ -514,7 +515,17 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
 
     @RequiresApi(34)
     private void connectProductQualification() {
+        final long connection = PRODUCT_CONNECTIONS.incrementAndGet();
+        if (connection <= 0) throw new IllegalStateException("Replacement connection capacity");
         productSession = ProductCensorQualification.connect(this, tapTracker, new CensorProductSession.Observer() {
+            @Override public void trace(com.subhub.app.censor.engine.CensorEngine.Trace value) {
+                if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
+                        com.subhub.app.diagnostics.ReplacementEngineTelemetry.trace(connection, value));
+            }
+            @Override public void posted(com.subhub.app.censor.android.SnapshotCensorSurface.Post value) {
+                if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
+                        com.subhub.app.diagnostics.ReplacementEngineTelemetry.post(connection, value));
+            }
             @Override public void foreground(AccessibilityWindowReader.Window window) {
                 String packageName = window == null ? "" : window.packageName;
                 acceptForegroundPackage(packageName, System.currentTimeMillis());

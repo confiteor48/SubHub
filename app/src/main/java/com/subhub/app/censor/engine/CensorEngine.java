@@ -1751,7 +1751,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     private void resourceFailed(SceneEngine.Source source) {
-        resourceFailed(source.epoch, source.sequence);
+        resourceFailed(source.epoch, source.imageRequestIdentity);
     }
 
     private void resourceFailed(long failedEpoch, long failedSource) {

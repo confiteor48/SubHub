@@ -10,6 +10,19 @@ import java.util.concurrent.Executor;
 import org.junit.Test;
 
 public class NativeTextEngineTest {
+    @Test public void imageResourceFailureKeepsRequestIdentityAfterIndependentNativeSource() {
+        Harness h = new Harness(); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        h.finishNative(0, 10, 20, 1000); h.deliverImage(0, 30, 1000, 2400); h.imageExecutor.runAll();
+        SceneEngine.Source source = h.images.get(0).source;
+        assertEquals(2, source.sequence); assertEquals(1, source.imageRequestIdentity);
+        h.imageCompletions.get(0).resourceFailure();
+        CensorEngine.Trace failure = h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.RESOURCE_FAILED)
+                .findFirst().orElseThrow(AssertionError::new);
+        assertEquals(source.epoch, failure.epoch); assertEquals(1, failure.source);
+        assertEquals(-1, failure.pixelAgeMillis); assertNull(failure.work);
+        h.close(); assertEquals(0, h.drained);
+    }
+
     @Test public void nativeScrollObservationBarrierDoesNotWithdrawValidGeometryOrCountEvidence() {
         Harness h = new Harness(); h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
         h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.finishNative(0, 10, 20, 1000);

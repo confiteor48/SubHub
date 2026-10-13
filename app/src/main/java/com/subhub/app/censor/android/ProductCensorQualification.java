@@ -8,15 +8,17 @@ import com.subhub.app.BuildConfig;
 import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.NativeTextFrame;
+import com.subhub.app.censor.engine.CensorCandidateGate;
 import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.penance.PenanceManager;
 import android.accessibilityservice.AccessibilityService;
 import com.subhub.app.stats.StatsRepository;
 import java.util.function.Function;
 
-/** Private emulator qualification only; never a product mode, release flag or hot-swap boundary. */
+/** One startup-selected replacement owner; fixture injection remains emulator-only. */
 public final class ProductCensorQualification {
     public static final String PREFERENCES = "censor_product_qualification";
+    public static final String CANDIDATE_SELECTION = "candidate_selected";
     private static volatile AccessibilityCensorHost.WorkerFactory fixtureModels;
     private static volatile Runnable fixtureSelectionObserved = () -> { };
     private static volatile CensorProductSession.Observer fixtureObserver;
@@ -29,8 +31,25 @@ public final class ProductCensorQualification {
         return BuildConfig.DEBUG && Build.VERSION.SDK_INT >= 34
                 && (Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish"));
     }
+    @ChecksSdkIntAtLeast(api = 34)
+    public static boolean candidateSupported() {
+        return CensorCandidateGate.supported(BuildConfig.REPLACEMENT_LAB_CANDIDATE, Build.VERSION.SDK_INT);
+    }
+    public static boolean candidateSelected(Context context) {
+        return CensorCandidateGate.selected(BuildConfig.REPLACEMENT_LAB_CANDIDATE, Build.VERSION.SDK_INT,
+                context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getAll().get(CANDIDATE_SELECTION));
+    }
+    /** A selection request only. It never changes a currently connected service owner. */
+    public static void selectCandidate(Context context, boolean selected) {
+        if (!candidateSupported() || !com.subhub.app.security.ControllerPinManager.isDomModeActive()) {
+            throw new IllegalStateException("Editable private supported candidate required");
+        }
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit()
+                .putBoolean(CANDIDATE_SELECTION, selected).apply();
+    }
     public static boolean enabled(Context context) {
-        return supported() && context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean("enabled", false);
+        return candidateSelected(context) || (supported() && Boolean.TRUE.equals(
+                context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getAll().get("enabled")));
     }
     /** Only instrumentation in the same owned guest can replace the model boundary. */
     public static void fixtureModels(AccessibilityCensorHost.WorkerFactory models) {

@@ -1127,6 +1127,8 @@ public class CensorEngineTest {
     @Test public void nativeContextCleanupFaultCannotPretendSuccessfulDrainOrAdmitMoreWork() {
         Harness h = new Harness(); h.start(); h.fire(0); Pixel pixels = h.deliver(0, 1); h.fastExecutor.runOne();
         h.engine.nativeResourceFailure(); assertEquals(1, h.engine.resourceFailures());
+        assertTrue(h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.RESOURCE_FAILED)
+                .allMatch(t -> t.source == 0 && t.pixelAgeMillis == -1));
         assertFalse(pixels.closed); assertTrue(h.fast.calls.get(0).input.cancelled());
         h.fast.calls.get(0).completion.cancelled(); assertEquals(1, pixels.closes);
         h.engine.requestCaptureAt(0); assertEquals(Long.MAX_VALUE, h.timer.nextAt());
