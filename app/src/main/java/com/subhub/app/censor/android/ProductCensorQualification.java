@@ -33,16 +33,19 @@ public final class ProductCensorQualification {
     }
     @ChecksSdkIntAtLeast(api = 34)
     public static boolean candidateSupported() {
-        return CensorCandidateGate.supported(BuildConfig.REPLACEMENT_LAB_CANDIDATE, Build.VERSION.SDK_INT);
+        return CensorCandidateGate.supported(candidateBuildAllowed(), Build.VERSION.SDK_INT);
     }
     public static boolean candidateSelected(Context context) {
-        return CensorCandidateGate.selected(BuildConfig.REPLACEMENT_LAB_CANDIDATE, Build.VERSION.SDK_INT,
+        return CensorCandidateGate.selected(candidateBuildAllowed(), Build.VERSION.SDK_INT,
                 context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getAll().get(CANDIDATE_SELECTION));
+    }
+    private static boolean candidateBuildAllowed() {
+        return CensorCandidateGate.buildAllowed(BuildConfig.REPLACEMENT_LAB_CANDIDATE, BuildConfig.VERSION_NAME);
     }
     /** A selection request only. It never changes a currently connected service owner. */
     public static void selectCandidate(Context context, boolean selected) {
         if (!candidateSupported() || !com.subhub.app.security.ControllerPinManager.isDomModeActive()) {
-            throw new IllegalStateException("Editable private supported candidate required");
+            throw new IllegalStateException("Editable supported candidate required");
         }
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit()
                 .putBoolean(CANDIDATE_SELECTION, selected).apply();

@@ -17,7 +17,6 @@ import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.filters.SdkSuppress;
 import androidx.test.platform.app.InstrumentationRegistry;
-import com.subhub.app.BuildConfig;
 import com.subhub.app.R;
 import com.subhub.app.censor.android.ProductCensorQualification;
 import com.subhub.app.security.ControllerPinManager;
@@ -94,7 +93,7 @@ public final class ReplacementCandidateActivityTest {
     }
 
     @Test public void ordinaryBuildHidesControlAndIgnoresStaleSelection() {
-        Assume.assumeFalse(BuildConfig.REPLACEMENT_LAB_CANDIDATE);
+        Assume.assumeFalse(ProductCensorQualification.candidateSupported());
         assertTrue(preferences.edit().putBoolean(ProductCensorQualification.CANDIDATE_SELECTION, true).commit());
         assertFalse(ProductCensorQualification.candidateSelected(context));
         assertFalse(ProductCensorQualification.enabled(context));
@@ -108,8 +107,8 @@ public final class ReplacementCandidateActivityTest {
         assertFalse(ScreenshotAccessibilityService.isRunning());
     }
 
-    @Test public void privateBuildDefaultsOffAndNativeTapPersistsSelection() throws Exception {
-        Assume.assumeTrue(BuildConfig.REPLACEMENT_LAB_CANDIDATE);
+    @Test public void supportedTestBuildDefaultsOffAndNativeTapPersistsSelection() throws Exception {
+        Assume.assumeTrue(ProductCensorQualification.candidateSupported());
         assertFalse(ProductCensorQualification.candidateSelected(context));
         assertFalse(ProductCensorQualification.enabled(context));
         try (ActivityScenario<DiagnosticsActivity> scenario = ActivityScenario.launch(DiagnosticsActivity.class)) {
@@ -140,8 +139,8 @@ public final class ReplacementCandidateActivityTest {
         }
     }
 
-    @Test public void privateSubCannotPersistSelection() {
-        Assume.assumeTrue(BuildConfig.REPLACEMENT_LAB_CANDIDATE);
+    @Test public void supportedTestSubCannotPersistSelection() {
+        Assume.assumeTrue(ProductCensorQualification.candidateSupported());
         ControllerPinManager.enterSubMode();
         try (ActivityScenario<DiagnosticsActivity> scenario = ActivityScenario.launch(DiagnosticsActivity.class)) {
             scenario.onActivity(activity -> {
@@ -157,8 +156,8 @@ public final class ReplacementCandidateActivityTest {
         assertFalse(preferences.contains(ProductCensorQualification.CANDIDATE_SELECTION));
     }
 
-    @Test public void privateMalformedSelectionCannotEnableOwner() {
-        Assume.assumeTrue(BuildConfig.REPLACEMENT_LAB_CANDIDATE);
+    @Test public void supportedTestMalformedSelectionCannotEnableOwner() {
+        Assume.assumeTrue(ProductCensorQualification.candidateSupported());
         assertTrue(preferences.edit().putString(ProductCensorQualification.CANDIDATE_SELECTION, "true").commit());
         assertFalse(ProductCensorQualification.candidateSelected(context));
         assertFalse(ProductCensorQualification.enabled(context));
