@@ -111,6 +111,12 @@ public final class ProductCensorSessionAndroidTest {
     private boolean productScrollPassed, ownedLabStarted;
     private boolean sustainedNativeGate, sustainedAddedVisible;
     private boolean windowCostGate;
+    private boolean nativeCutoffGate;
+    private long nativeCutoffEpoch = -1, nativeCutoffRequest = -1, nativeCutoffTicket = -1;
+    private final JSONArray nativeCutoffEvents = new JSONArray();
+    private final CountDownLatch nativeCutoffTerminal = new CountDownLatch(1);
+    private Object nativeCutoffHost;
+    private boolean nativeCutoffReaderRetiredAtTerminal;
     private AccessibilityWindowReader windowCostReader;
     private final List<WindowReadCost.Call> windowCostStarts = new CopyOnWriteArrayList<>();
     private final List<WindowReadCost.Sample> windowCostSamples = new CopyOnWriteArrayList<>();
@@ -190,6 +196,7 @@ public final class ProductCensorSessionAndroidTest {
             assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); nativeProviderEntries.incrementAndGet();
             Hold held = nativeReadHold.getAndSet(null); if (held != null) held.run();
         });
+        ProductCensorQualification.fixtureNativeConfirmationPending(this::cancelSampledNativeBeforeConfirmation);
         ProductCensorQualification.fixtureInputObserver((type, contentTypes, windowId, sourceAt, receivedAt, route, completed) -> {
             if (productScrollEvidence == null || session == null || !productInputCaptureEnabled) return;
             try {
@@ -294,7 +301,8 @@ public final class ProductCensorSessionAndroidTest {
             new StatsRepository(context).sessionStamp();
             restore(preferences, savedPreferences); restore(qualification, savedQualification);
             ProductCensorQualification.fixtureModels(null); ProductCensorQualification.fixtureSelectionObserved(() -> { });
-            ProductCensorQualification.fixtureNativeReadSelected(() -> { }); ProductCensorQualification.fixtureInputObserver(null);
+            ProductCensorQualification.fixtureNativeReadSelected(() -> { }); ProductCensorQualification.fixtureNativeConfirmationPending(null);
+            ProductCensorQualification.fixtureInputObserver(null);
             ProductCensorQualification.fixtureObserver(null);
             ProductCensorQualification.fixtureStatistics(StatsRepository::new);
             ProductCensorQualification.fixturePenance(PenanceManager::new);
@@ -498,6 +506,67 @@ public final class ProductCensorSessionAndroidTest {
         assertTrue(original.same(session.controller().activeScope())); assertBinding(); productScrollPassed = true;
     }
 
+    /** Lifecycle-only adversary: no throughput, continuous-pixel or root-substitution qualification. */
+    @Test public void actualServiceSampledCancellationSurvivesCutoffAndReaderRetirement() throws Exception {
+        requireProductScrollGate(); nativeCutoffGate = true;
+        assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
+                .putBoolean(SettingsRepository.KEY_TEXT_SMUT_ENABLED, true).commit());
+        context.startActivity(targetIntent().putExtra("nativeScrollFixture", true).putExtra("label", "porn"));
+        Hold firstProvider = hold(); nativeReadHold.set(firstProvider);
+        startOwnedScrollLab(); connect();
+        assertTrue("Initial actual provider entry precedes observer attachment", firstProvider.entered.await(8, TimeUnit.SECONDS));
+        sustainedResourceObserver.enable(SystemClock.uptimeMillis()); firstProvider.release.countDown();
+        assertTrue("Future sampled parent has a real cancelled terminal after retirement", nativeCutoffTerminal.await(12, TimeUnit.SECONDS));
+        await("Actual closed owner and all executors drain independently of diagnostic pending", session::managedResourcesDrained);
+        assertTrue(nativeCutoffEpoch > 0); assertTrue(nativeCutoffRequest > 0); assertTrue(nativeCutoffTicket > 0);
+        assertTrue(nativeCutoffReaderRetiredAtTerminal);
+        ParentBoundResourceObserver.State state = sustainedResourceObserver.state();
+        assertTrue(state.admissionsClosed); assertTrue(state.sampledParents > 0);
+        assertEquals(state.sampledParents, state.terminalParents); assertEquals(0, state.pendingParents);
+        assertEquals(5, nativeCutoffEvents.length());
+        assertTrue(sustainedResourceFailures.isEmpty()); assertTrue(faults.isEmpty());
+        assertEquals(1, nativeCosts.stream().filter(cost -> cost.epoch == nativeCutoffEpoch && cost.request == nativeCutoffRequest
+                && cost.terminal == com.subhub.app.censor.engine.NativeReadCost.Terminal.CANCELLED).count());
+        assertFalse(nativeFrames.stream().anyMatch(frame -> frame.source.epoch == nativeCutoffEpoch && frame.requestIdentity == nativeCutoffRequest));
+        assertFalse(explicitNativeDemand); assertTrue(batches.isEmpty()); productScrollPassed = true;
+    }
+
+    private void nativeCutoffEvent(String phase) throws Exception {
+        ParentBoundResourceObserver.State state = sustainedResourceObserver.state();
+        nativeCutoffEvents.put(new JSONObject().put("sequence", nativeCutoffEvents.length() + 1).put("phase", phase)
+                .put("atMillis", SystemClock.uptimeMillis()).put("epoch", nativeCutoffEpoch)
+                .put("request", nativeCutoffRequest).put("observerParent", nativeCutoffTicket)
+                .put("pendingParents", state.pendingParents).put("sampledParents", state.sampledParents)
+                .put("terminalParents", state.terminalParents).put("admissionsClosed", state.admissionsClosed)
+                .put("hostReaderRetired", reflected(nativeCutoffHost, "textReader") == null)
+                .put("nativeOwnerThread", Thread.currentThread().getName().equals("Censor-native-text")));
+    }
+
+    /** Actual SCAN_END has completed; the unchanged delayed confirmation has not been scheduled yet. */
+    private void cancelSampledNativeBeforeConfirmation(CensorEngine.NativeTextInput input) {
+        if (!nativeCutoffGate || nativeCutoffRequest >= 0) return;
+        try {
+            JSONObject start = null;
+            for (JSONObject row : sustainedResources)
+                if (row.getString("phase").equals("START") && row.getLong("epoch") == input.epoch
+                        && row.getLong("request") == input.identity) {
+                    assertNull("One actual resource START per selected parent", start); start = row;
+                }
+            if (start == null) return; // The initially held parent began before observer admission.
+            assertEquals("Censor-native-text", Thread.currentThread().getName());
+            nativeCutoffEpoch = input.epoch; nativeCutoffRequest = input.identity;
+            nativeCutoffTicket = start.getLong("observerParent");
+            nativeCutoffHost = reflected(session.controller(), "host");
+            assertNotNull(reflected(nativeCutoffHost, "textReader")); nativeCutoffEvent("SELECTED");
+            sustainedResourceObserver.cutoff(SystemClock.uptimeMillis());
+            assertEquals(1, sustainedResourceObserver.state().pendingParents); nativeCutoffEvent("CUTOFF");
+            main(session::close); // Queues real serial retirement before the existing confirm future is created.
+            assertTrue("Real close cancels this exact active input", input.cancelled());
+            assertNotNull("Retirement cannot run concurrently with this native callback", reflected(nativeCutoffHost, "textReader"));
+            nativeCutoffEvent("CLOSE_RETURN");
+        } catch (Exception | Error failure) { faults.add(failure); throw new AssertionError("Native cutoff control failed", failure); }
+    }
+
     @Test public void actualServiceNativeSustainabilityDiscoversAndWithdrawsNewNodeThroughThirtySeconds() throws Exception {
         requireProductScrollGate(); sustainedNativeGate = true;
         assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
@@ -670,11 +739,21 @@ public final class ProductCensorSessionAndroidTest {
                     .put("scrollCopiedLimit", AccessibilityScrollReader.MAXIMUM_OUTSTANDING)
                     .put("scrollIdentityCount", reflected(owner.scroll, "identityCount")).put("scrollIdentityLimit", AccessibilityScrollReader.MAXIMUM_IDENTITIES);
             sustainedResources.add(row);
+            if (nativeCutoffGate && phase.equals("TERMINAL") && epoch == nativeCutoffEpoch && request == nativeCutoffRequest) {
+                nativeCutoffReaderRetiredAtTerminal = reflected(nativeCutoffHost, "textReader") == null;
+                assertTrue("Terminal observes actual reader-field retirement, not merely a close request", nativeCutoffReaderRetiredAtTerminal);
+                nativeCutoffEvent("TERMINAL");
+            }
         } catch (Exception | Error failure) { sustainedResourceFailures.add(failure.getClass().getSimpleName()); }
         finally {
             if (phase.equals("TERMINAL") && ticket != null) {
                 try { sustainedResourceObserver.finish(ticket, SystemClock.uptimeMillis()); }
                 catch (Exception | Error failure) { sustainedResourceFailures.add(failure.getClass().getSimpleName()); }
+                if (nativeCutoffGate && epoch == nativeCutoffEpoch && request == nativeCutoffRequest) {
+                    try { nativeCutoffEvent("TICKET_FINISHED"); }
+                    catch (Exception | Error failure) { sustainedResourceFailures.add(failure.getClass().getSimpleName()); }
+                    nativeCutoffTerminal.countDown();
+                }
             }
         }
     }
@@ -1171,7 +1250,7 @@ public final class ProductCensorSessionAndroidTest {
         }
         assertEquals(scrollReceipts.size(), receipts.length()); assertEquals(nativeFrames.size(), frames.length());
         if (productScrollPassed && !nativeFrames.isEmpty()) {
-            if (sustainedNativeGate || windowCostGate || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
+            if (sustainedNativeGate || windowCostGate || nativeCutoffGate || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
                 assertTrue("A soft fence may omit a complete evidence callback, never invent one", evidence.size() <= nativeFrames.size());
                 java.util.Set<SceneEngine.Source> seen = new java.util.HashSet<>();
                 for (CensorEngine.EvidenceReceipt receipt : evidence) {
@@ -1212,7 +1291,7 @@ public final class ProductCensorSessionAndroidTest {
         File target = new File(productScrollEvidence, "gate-result.json"); assertFalse(target.exists());
         try (FileOutputStream stream = new FileOutputStream(target)) { stream.write(result.toString(2).getBytes(StandardCharsets.UTF_8)); }
         if (windowCostGate) finishWindowCostEvidence();
-        if (sustainedNativeGate || windowCostGate) {
+        if (sustainedNativeGate || windowCostGate || nativeCutoffGate) {
             ParentBoundResourceObserver.State resourceState = sustainedResourceObserver.state();
             JSONObject resourceObserver = new JSONObject().put("enabledAtMillis", resourceState.enabledAtMillis)
                     .put("cutoffAtMillis", resourceState.cutoffAtMillis).put("sampledParents", resourceState.sampledParents)
@@ -1235,7 +1314,12 @@ public final class ProductCensorSessionAndroidTest {
                     .put("nativeFrameParents", parents)
                     .put("resourcesExportedAtMillis", SystemClock.uptimeMillis())
                     .put("continuousPhysicalMotionQualified", false);
-            File extra = new File(productScrollEvidence, windowCostGate ? "native-resource-samples.json" : "native-sustainability.json"); assertFalse(extra.exists());
+            if (nativeCutoffGate) sustained.put("controlEpoch", nativeCutoffEpoch).put("controlRequest", nativeCutoffRequest)
+                    .put("controlObserverParent", nativeCutoffTicket).put("readerRetiredAtTerminal", nativeCutoffReaderRetiredAtTerminal)
+                    .put("rawControlEventCount", nativeCutoffEvents.length()).put("controlEvents", nativeCutoffEvents)
+                    .put("runtimeRemedyQualified", false).put("rootSubstitutionQualified", false);
+            File extra = new File(productScrollEvidence, nativeCutoffGate ? "native-cutoff-control.json"
+                    : windowCostGate ? "native-resource-samples.json" : "native-sustainability.json"); assertFalse(extra.exists());
             try (FileOutputStream stream = new FileOutputStream(extra)) { stream.write(sustained.toString(2).getBytes(StandardCharsets.UTF_8)); }
         }
     }

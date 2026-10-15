@@ -447,6 +447,9 @@ public final class AccessibilityCensorController implements AutoCloseable {
 
     private final class NativeProvider implements NativeTextReader.Provider {
         @Override public boolean addressRefreshSupported() { return true; }
+        @Override public void beforeConfirmationScheduled(CensorEngine.NativeTextInput input, NativeTextReader.Scope scope) {
+            ProductCensorQualification.nativeConfirmationPending(input);
+        }
         @Override public NativeTextReader.Scope openScope(CensorEngine.NativeTextInput input) {
             Transition selected = transition;
             Configuration value = selected == null ? null : selected.configuration;

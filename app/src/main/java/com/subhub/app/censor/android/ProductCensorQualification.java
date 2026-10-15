@@ -22,6 +22,7 @@ public final class ProductCensorQualification {
     private static volatile AccessibilityCensorHost.WorkerFactory fixtureModels;
     private static volatile Runnable fixtureSelectionObserved = () -> { };
     private static volatile Runnable fixtureNativeReadSelected = () -> { };
+    private static volatile java.util.function.Consumer<CensorEngine.NativeTextInput> fixtureNativeConfirmationPending;
     public interface FixtureInputObserver {
         void boundary(int type, int contentTypes, int windowId, long sourceAt, long receivedAt, String route, boolean completed);
     }
@@ -66,6 +67,14 @@ public final class ProductCensorQualification {
     }
     static void fixtureSelectionObserved(Runnable action) { requireInactive(); fixtureSelectionObserved = java.util.Objects.requireNonNull(action); }
     static void fixtureNativeReadSelected(Runnable action) { requireInactive(); fixtureNativeReadSelected = java.util.Objects.requireNonNull(action); }
+    static void fixtureNativeConfirmationPending(java.util.function.Consumer<CensorEngine.NativeTextInput> action) {
+        requireInactive(); fixtureNativeConfirmationPending = action;
+    }
+    /** No callback outside a supported, same-process owned-emulator qualification session. */
+    static void nativeConfirmationPending(CensorEngine.NativeTextInput input) {
+        java.util.function.Consumer<CensorEngine.NativeTextInput> action = fixtureNativeConfirmationPending;
+        if (action != null && supported() && current != null) action.accept(input);
+    }
     static void fixtureInputObserver(FixtureInputObserver observer) { requireInactive(); fixtureInputObserver = observer; }
     /** Primitive, synchronous diagnostic boundary available only to installed owned-emulator fixtures. */
     public static void observeFixtureInput(CensorProductSession selected, int type, int contentTypes, int windowId,

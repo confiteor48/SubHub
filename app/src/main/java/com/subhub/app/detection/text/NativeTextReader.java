@@ -45,6 +45,8 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
         default boolean locallyCurrent(CensorEngine.NativeTextInput input, Scope scope) {
             return scope instanceof Tree && locallyCurrent(input, (Tree) scope);
         }
+        /** Optional controlled lifecycle boundary; never substitutes for a scope/evidence check. */
+        default void beforeConfirmationScheduled(CensorEngine.NativeTextInput input, Scope scope) { }
     }
     public enum Boundary { OPENED, TRAVERSAL, SCAN_END, CONFIRMATION_ENTRY, BEFORE_FINAL_NODE_REFRESH, RESULT_END }
 
@@ -307,7 +309,10 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
             valid(Boundary.SCAN_END);
             classificationCompletedAt = input.nowMillis(); confirmationGeneration = input.treeGeneration();
             if (probes.isEmpty()) finish(Collections.emptyList(), 0);
-            else executor.schedule(this::confirm, confirmationMillis, TimeUnit.MILLISECONDS);
+            else {
+                provider.beforeConfirmationScheduled(input, scope);
+                executor.schedule(this::confirm, confirmationMillis, TimeUnit.MILLISECONDS);
+            }
         }
         void confirm() {
             try {
