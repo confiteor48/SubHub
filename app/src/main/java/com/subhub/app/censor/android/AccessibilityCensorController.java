@@ -453,7 +453,8 @@ public final class AccessibilityCensorController implements AutoCloseable {
             if (!eligible(input, selected)) return null;
             nativeReadSelected.run();
             boolean actual;
-            try { actual = eligible(input, selected) && windows.current(value.window); }
+            try { actual = eligible(input, selected) && windows.current(value.window, input.epoch, input.identity,
+                    WindowReadCost.Operation.OPEN_SCOPE, "PROVIDER_OPEN"); }
             catch (RuntimeException | Error failure) { invalidate(selected); throw failure; }
             if (!actual) { invalidate(selected); return null; }
             if (!eligible(input, selected)) return null;
@@ -467,7 +468,8 @@ public final class AccessibilityCensorController implements AutoCloseable {
             if (!eligible(input, selected)) return null;
             nativeReadSelected.run(); // Exact adverse-control boundary after immutable entry selection.
             NativeTextReader.Tree tree;
-            try { tree = windows.open(value.window, generation); }
+            try { tree = windows.open(value.window, generation, input.epoch, input.identity,
+                    WindowReadCost.Operation.OPEN_TREE, "PROVIDER_OPEN"); }
             catch (RuntimeException | Error failure) { invalidate(selected); throw failure; }
             if (tree == null) { invalidate(selected); return null; }
             boolean transferred = false;
@@ -490,7 +492,8 @@ public final class AccessibilityCensorController implements AutoCloseable {
             if (!eligible(input, selected)) return false;
             if (!matches(tree, value)) return false;
             boolean actual;
-            try { actual = windows.current(value.window); }
+            try { actual = windows.current(value.window, input.epoch, input.identity,
+                    WindowReadCost.Operation.CURRENT, boundary.name()); }
             catch (RuntimeException | Error failure) { invalidate(selected); throw failure; }
             if (!actual) invalidate(selected);
             return actual && eligible(input, selected);

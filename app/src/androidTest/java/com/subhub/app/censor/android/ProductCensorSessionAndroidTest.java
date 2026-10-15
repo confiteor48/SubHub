@@ -110,6 +110,13 @@ public final class ProductCensorSessionAndroidTest {
     private File productScrollEvidence;
     private boolean productScrollPassed, ownedLabStarted;
     private boolean sustainedNativeGate, sustainedAddedVisible;
+    private boolean windowCostGate;
+    private AccessibilityWindowReader windowCostReader;
+    private final List<WindowReadCost.Call> windowCostStarts = new CopyOnWriteArrayList<>();
+    private final List<WindowReadCost.Sample> windowCostSamples = new CopyOnWriteArrayList<>();
+    private final JSONArray windowCostCommands = new JSONArray();
+    private com.subhub.app.censor.engine.NativeReadCost windowCostSelectedDirect;
+    private long windowCostAttachedAt = -1, windowCostDemandStartedAt = -1, windowCostDemandEndedAt = -1;
     private final ParentBoundResourceObserver<SustainedResourceOwner> sustainedResourceObserver = new ParentBoundResourceObserver<>();
     private final List<JSONObject> sustainedResources = new CopyOnWriteArrayList<>();
     private final List<String> sustainedResourceFailures = new CopyOnWriteArrayList<>();
@@ -432,6 +439,63 @@ public final class ProductCensorSessionAndroidTest {
         assertTrue(evidence.stream().allMatch(row -> row.source.kind == SceneEngine.SourceKind.NATIVE_TEXT));
         assertTrue(original.same(session.controller().activeScope())); assertTrue(faults.isEmpty()); assertBinding();
         productScrollPassed = true;
+    }
+
+    /** Fixed short acquisition diagnostic, not a retry or replacement for the failed sustainability gate. */
+    @Test public void actualServiceWindowCostsKeepFullAndDirectParentBoundaries() throws Exception {
+        requireProductScrollGate(); windowCostGate = true;
+        assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
+                .putBoolean(SettingsRepository.KEY_TEXT_SMUT_ENABLED, true).commit());
+        context.startActivity(targetIntent().putExtra("nativeScrollFixture", true).putExtra("label", "porn"));
+        Hold firstProvider = hold(); nativeReadHold.set(firstProvider);
+        startOwnedScrollLab(); connect();
+        assertTrue("Attach diagnostic before first actual WindowReader call", firstProvider.entered.await(8, TimeUnit.SECONDS));
+        windowCostReader = (AccessibilityWindowReader) reflected(session.controller(), "windows");
+        windowCostAttachedAt = SystemClock.uptimeMillis();
+        windowCostReader.costDiagnostics().observer(new WindowReadCost.Observer() {
+            @Override public void started(WindowReadCost.Call call) {
+                assertEquals("Censor-native-text", Thread.currentThread().getName());
+                if (windowCostStarts.size() >= 512) throw new IllegalStateException("Bounded diagnostic call inventory");
+                windowCostStarts.add(call);
+            }
+            @Override public void completed(WindowReadCost.Sample sample) {
+                if (windowCostSamples.size() >= 512) throw new IllegalStateException("Bounded diagnostic terminal inventory");
+                windowCostSamples.add(sample);
+            }
+        });
+        // The already-started first parent is intentionally outside resource-sample admission.
+        // Future parent terminals remain observed through real close/cancellation and retirement.
+        sustainedResourceObserver.enable(SystemClock.uptimeMillis());
+        main(() -> productInputCaptureEnabled = true); firstProvider.release.countDown();
+        await("Ordinary acquired FULL result before short scroll sequence", () -> nativeFrames.stream().anyMatch(frame ->
+                frame.read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY && !frame.read.candidates.isEmpty()));
+        CensorEngine.ActiveScope original = session.controller().activeScope();
+        windowCostDemandStartedAt = SystemClock.uptimeMillis();
+        int previous = 0; long finalReceiptAt = -1;
+        for (int position : new int[]{160, 80}) {
+            long requestedAt = SystemClock.uptimeMillis();
+            ScrollMotionLedger.Receipt receipt = actualProductScroll(position, position - previous, original);
+            windowCostCommands.put(new JSONObject().put("position", position).put("delta", position - previous)
+                    .put("requestedAtMillis", requestedAt).put("sourceAtMillis", receipt.sample.sourceAtMillis)
+                    .put("receivedAtMillis", receipt.sample.receivedAtMillis).put("admittedAtMillis", receipt.admittedAtMillis));
+            previous = position; finalReceiptAt = receipt.admittedAtMillis;
+        }
+        final long afterFinalReceipt = finalReceiptAt;
+        await("Actual DIRECT read begins after final observed scroll, no manufactured demand", () -> {
+            for (com.subhub.app.censor.engine.NativeReadCost cost : nativeCosts)
+                if (cost.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY
+                        && cost.readStartedAtMillis >= afterFinalReceipt
+                        && cost.terminal == com.subhub.app.censor.engine.NativeReadCost.Terminal.SUCCESS) {
+                    windowCostSelectedDirect = cost; return true;
+                }
+            return false;
+        });
+        windowCostDemandEndedAt = SystemClock.uptimeMillis();
+        assertTrue(windowCostSamples.stream().anyMatch(sample -> sample.call.operation == WindowReadCost.Operation.OPEN_TREE));
+        assertTrue(windowCostSamples.stream().anyMatch(sample -> sample.call.operation == WindowReadCost.Operation.OPEN_SCOPE));
+        assertTrue(windowCostSamples.stream().anyMatch(sample -> sample.call.operation == WindowReadCost.Operation.CURRENT));
+        assertFalse(explicitNativeDemand); assertTrue(batches.isEmpty()); assertTrue(faults.isEmpty());
+        assertTrue(original.same(session.controller().activeScope())); assertBinding(); productScrollPassed = true;
     }
 
     @Test public void actualServiceNativeSustainabilityDiscoversAndWithdrawsNewNodeThroughThirtySeconds() throws Exception {
@@ -1107,7 +1171,7 @@ public final class ProductCensorSessionAndroidTest {
         }
         assertEquals(scrollReceipts.size(), receipts.length()); assertEquals(nativeFrames.size(), frames.length());
         if (productScrollPassed && !nativeFrames.isEmpty()) {
-            if (sustainedNativeGate || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
+            if (sustainedNativeGate || windowCostGate || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
                 assertTrue("A soft fence may omit a complete evidence callback, never invent one", evidence.size() <= nativeFrames.size());
                 java.util.Set<SceneEngine.Source> seen = new java.util.HashSet<>();
                 for (CensorEngine.EvidenceReceipt receipt : evidence) {
@@ -1147,7 +1211,8 @@ public final class ProductCensorSessionAndroidTest {
                 .put("physicalMotionQualified", false).put("imageMemberApplicabilityQualified", false).put("pixelPerformanceAcceptance", false);
         File target = new File(productScrollEvidence, "gate-result.json"); assertFalse(target.exists());
         try (FileOutputStream stream = new FileOutputStream(target)) { stream.write(result.toString(2).getBytes(StandardCharsets.UTF_8)); }
-        if (sustainedNativeGate) {
+        if (windowCostGate) finishWindowCostEvidence();
+        if (sustainedNativeGate || windowCostGate) {
             ParentBoundResourceObserver.State resourceState = sustainedResourceObserver.state();
             JSONObject resourceObserver = new JSONObject().put("enabledAtMillis", resourceState.enabledAtMillis)
                     .put("cutoffAtMillis", resourceState.cutoffAtMillis).put("sampledParents", resourceState.sampledParents)
@@ -1170,9 +1235,56 @@ public final class ProductCensorSessionAndroidTest {
                     .put("nativeFrameParents", parents)
                     .put("resourcesExportedAtMillis", SystemClock.uptimeMillis())
                     .put("continuousPhysicalMotionQualified", false);
-            File extra = new File(productScrollEvidence, "native-sustainability.json"); assertFalse(extra.exists());
+            File extra = new File(productScrollEvidence, windowCostGate ? "native-resource-samples.json" : "native-sustainability.json"); assertFalse(extra.exists());
             try (FileOutputStream stream = new FileOutputStream(extra)) { stream.write(sustained.toString(2).getBytes(StandardCharsets.UTF_8)); }
         }
+    }
+
+    private JSONObject windowCostCall(WindowReadCost.Call call) throws Exception {
+        int parentMatches = 0, ordinal = 0; String mode = null;
+        for (com.subhub.app.censor.engine.NativeReadCost.Start parent : nativeCostStarts)
+            if (parent.epoch == call.epoch && parent.request == call.request) { parentMatches++; mode = parent.readMode.name(); }
+        for (WindowReadCost.Call start : windowCostStarts)
+            if (start.epoch == call.epoch && start.request == call.request && start.sequence <= call.sequence) ordinal++;
+        return new JSONObject().put("epoch", call.epoch).put("request", call.request).put("callSequence", call.sequence)
+                .put("parentCallOrdinal", ordinal).put("parentStartMatches", parentMatches).put("readMode", mode == null ? JSONObject.NULL : mode)
+                .put("operation", call.operation.name()).put("boundary", call.boundary).put("threadId", call.threadId)
+                .put("threadName", call.threadName).put("startedAtMillis", call.startedAtMillis);
+    }
+    private void finishWindowCostEvidence() throws Exception {
+        JSONArray starts = new JSONArray(), samples = new JSONArray();
+        for (WindowReadCost.Call call : windowCostStarts) starts.put(windowCostCall(call));
+        for (WindowReadCost.Sample sample : windowCostSamples) {
+            JSONArray stages = new JSONArray();
+            for (WindowReadCost.Cost cost : sample.result.costs) stages.put(new JSONObject().put("stage", cost.stage.name())
+                    .put("calls", cost.calls).put("exclusiveNanos", cost.exclusiveNanos)
+                    .put("maximumExclusiveNanos", cost.maximumExclusiveNanos).put("thrownCalls", cost.thrownCalls));
+            samples.put(new JSONObject().put("call", windowCostCall(sample.call)).put("finishedAtMillis", sample.finishedAtMillis)
+                    .put("returnedNormally", sample.returnedNormally).put("rootTransferred", sample.rootTransferred)
+                    .put("startedNanos", sample.result.startedNanos).put("finishedNanos", sample.result.finishedNanos)
+                    .put("elapsedNanos", sample.result.elapsedNanos).put("residualNanos", sample.result.residualNanos)
+                    .put("rawStageCount", sample.result.costs.size()).put("stages", stages));
+        }
+        WindowReadCost.Diagnostics diagnostic = windowCostReader == null ? null : windowCostReader.costDiagnostics();
+        JSONObject summary = diagnostic == null ? null : new JSONObject().put("entries", diagnostic.entries())
+                .put("refusedEntries", diagnostic.refusedEntries()).put("throwingEntries", diagnostic.throwingEntries())
+                .put("attempts", diagnostic.attempts()).put("failures", diagnostic.failures())
+                .put("startCallbacks", diagnostic.startCallbacks()).put("endCallbacks", diagnostic.endCallbacks())
+                .put("startCallbackNanos", diagnostic.startCallbackNanos()).put("endCallbackNanos", diagnostic.endCallbackNanos());
+        JSONObject result = new JSONObject().put("schemaVersion", 1).put("method", testName.getMethodName())
+                .put("attachedAtMillis", windowCostAttachedAt).put("demandStartedAtMillis", windowCostDemandStartedAt)
+                .put("demandEndedAtMillis", windowCostDemandEndedAt).put("exportedAtMillis", SystemClock.uptimeMillis())
+                .put("uptimeClockDomain", "UPTIME_MILLIS").put("durationClockDomain", "SYSTEM_NANO_TIME")
+                .put("rawWindowStartCount", windowCostStarts.size()).put("starts", starts)
+                .put("rawWindowSampleCount", windowCostSamples.size()).put("samples", samples)
+                .put("rawCommandCount", windowCostCommands.length()).put("commands", windowCostCommands)
+                .put("selectedDirectParent", windowCostSelectedDirect == null ? JSONObject.NULL : new JSONObject()
+                        .put("epoch", windowCostSelectedDirect.epoch).put("request", windowCostSelectedDirect.request))
+                .put("diagnostics", summary == null ? JSONObject.NULL : summary)
+                .put("nativeAssertionPassed", productScrollPassed).put("managedDrain", session != null && session.managedResourcesDrained())
+                .put("physicalMotionQualified", false).put("visualAlignmentQualified", false).put("pixelPerformanceAcceptance", false);
+        File target = new File(productScrollEvidence, "window-cost.json"); assertFalse(target.exists());
+        try (FileOutputStream stream = new FileOutputStream(target)) { stream.write(result.toString(2).getBytes(StandardCharsets.UTF_8)); }
     }
 
     @Test public void currentNativeObservationsChargeOneViewportEpisodeWithoutDetectionBatching() throws Exception {
