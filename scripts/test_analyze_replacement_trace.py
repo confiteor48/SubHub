@@ -5,6 +5,51 @@ from scripts import analyze_replacement_trace as reader
 
 
 class ReplacementTraceReaderTest(unittest.TestCase):
+    def cohort_records(self, terminal='SUCCESS', final=True):
+        rows = self.streaming_records(terminal, final)
+        for event in rows:
+            prefix, _, payload = event['message'].partition(' '); body = reader.decode(payload)
+            body.update(schemaVersion=4, readMode=reader.COHORT_MODE)
+            if prefix == 'REPLACEMENT_NATIVE':
+                body.update(coverage='POSITIVE_NODES_ONLY', visitedNodes=2, classifiedNodes=2)
+            event['message'] = prefix + ' ' + json.dumps(body)
+        return rows
+
+    def test_cohort_two_nodes_and_early_group_are_one_actual_partial_acquisition(self):
+        rows = self.cohort_records(); report = reader.analyze(rows, len(rows), 0)
+        self.assertEqual((2, 1, 1), (report['nativeRows'], report['nativeObservationRows'], report['nativeTerminalAdmissionRows']))
+        self.assertEqual((1, 1), (report['actualNativeAcquisitionStarts'], report['successfulNativeAcquisitionTerminals']))
+        self.assertEqual((0, 2), (report['completeNativeRows'], report['positiveNodeOnlyRows']))
+        self.assertEqual({reader.COHORT_MODE: 2}, report['nativeReadModes'])
+        self.assertTrue(report['nativeReadModeProvenanceComplete']); self.assertTrue(report['nativeObservationProvenanceComplete'])
+        self.assertEqual(report['rawSelectedPublications'], report['parsedSelectedPublications'])
+        self.assertFalse(report['pixelPerformanceAcceptance'])
+
+    def test_cohort_failed_second_member_keeps_only_finite_original_observation(self):
+        for terminal in ('FAILURE', 'CANCELLED', 'RESOURCE_FAILURE'):
+            rows = self.cohort_records(terminal, False); report = reader.analyze(rows, len(rows), 0)
+            self.assertEqual((1, 0, 0), (report['nativeObservationRows'], report['nativeTerminalAdmissionRows'],
+                                       report['successfulNativeAcquisitionTerminals']))
+            self.assertEqual({terminal: 1}, report['nativeCostTerminals'])
+
+    def test_cohort_cannot_omit_second_terminal_member_or_fabricate_tree_or_ordinal(self):
+        for index, field, value in ((3, 'candidateCount', 1), (3, 'confirmationReads', 1),
+                (3, 'visitedNodes', 1), (3, 'classifiedNodes', 3), (3, 'coverage', 'COMPLETE_TREE'),
+                (1, 'observationOrdinal', 2), (1, 'observationOrdinal', True), (1, 'candidateCount', 2),
+                (1, 'confirmationReads', 2), (1, 'visitedNodes', True), (1, 'newField', 0)):
+            rows = self.cohort_records(); prefix, _, payload = rows[index]['message'].partition(' ')
+            body = reader.decode(payload); body[field] = value; rows[index]['message'] = prefix + ' ' + json.dumps(body)
+            with self.subTest(index=index, field=field), self.assertRaises(ValueError): reader.analyze(rows, len(rows), 0)
+
+    def test_cohort_requires_its_new_schema_at_every_parent_and_source_boundary(self):
+        for index in range(4):
+            for field, value in (('schemaVersion', 3), ('schemaVersion', 5), ('readMode', 'FULL_DISCOVERY'),
+                                 ('readMode', 'ADMITTED_NODE_RECLASSIFY')):
+                rows = self.cohort_records(); prefix, _, payload = rows[index]['message'].partition(' ')
+                body = reader.decode(payload); body[field] = value; rows[index]['message'] = prefix + ' ' + json.dumps(body)
+                with self.subTest(index=index, field=field, value=value), self.assertRaises(ValueError):
+                    reader.analyze(rows, len(rows), 0)
+
     def streaming_records(self, terminal='SUCCESS', final=True):
         start, end, last = self.mode_records(False)
         body = reader.decode(last['message'].partition(' ')[2])

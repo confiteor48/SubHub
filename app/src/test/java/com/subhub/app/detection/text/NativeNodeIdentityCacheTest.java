@@ -68,6 +68,38 @@ public final class NativeNodeIdentityCacheTest {
         cache.end(); cache.close(); assertTrue(cache.drained());
     }
 
+    @Test public void cohortPinsTwoDistinctBorrowedAddressesWithoutLendingNewEvidence() {
+        Handles h = new Handles(); NativeNodeIdentityCache<Node> cache = new NativeNodeIdentityCache<>(2, h);
+        long[] tokens = admitPair(cache); cache.begin("scope", 1100, 1);
+        List<NativeNodeIdentityCache.Address<Node>> selected = cache.nextAddresses(2);
+        assertEquals(2, selected.size()); assertEquals(tokens[0], selected.get(0).token); assertEquals(tokens[1], selected.get(1).token);
+        assertSame(h.copies.get(0), selected.get(0).node); assertSame(h.copies.get(1), selected.get(1).node);
+        for (NativeNodeIdentityCache.Address<Node> address : selected) {
+            assertEquals(1060, address.basis.originalValidUntilMillis); assertEquals(1, address.basis.source.sequence);
+            assertEquals(address.token, cache.known(node(address.node.exactIdentity))); assertFalse(address.node.released);
+        }
+        assertThrows(UnsupportedOperationException.class, () -> selected.clear());
+        refused(() -> cache.resolve(node(3))); cache.end(); cache.close(); assertTrue(cache.drained());
+    }
+
+    @Test public void failedCohortMemberRetiresOnlyItsOwnRefreshAuthority() {
+        Handles h = new Handles(); NativeNodeIdentityCache<Node> cache = new NativeNodeIdentityCache<>(2, h);
+        long[] tokens = admitPair(cache); cache.begin("scope", 100, 1); cache.nextAddresses(2);
+        cache.retireAddress(tokens[1]); cache.end(); cache.begin("scope", 200, 1);
+        assertEquals(tokens[0], cache.nextAddress().token); assertEquals(1060, cache.nextAddress().basis.originalValidUntilMillis);
+        refused(() -> cache.nextAddresses(2)); assertEquals(tokens[0], cache.nextAddress().token);
+        cache.end(); cache.close(); assertTrue(cache.drained());
+    }
+
+    @Test public void insufficientOrHardFencedInventoryCannotWrapOneAddressIntoAPair() {
+        Handles h = new Handles(); NativeNodeIdentityCache<Node> cache = new NativeNodeIdentityCache<>(2, h);
+        long[] tokens = admitPair(cache); cache.begin("scope", 100, 1); cache.retireAddress(tokens[1]);
+        refused(() -> cache.nextAddresses(2)); assertEquals(tokens[0], cache.nextAddress().token);
+        for (int invalid : new int[]{0, -1, 3, 64}) assertThrows(IllegalArgumentException.class, () -> cache.nextAddresses(invalid));
+        cache.end(); cache.begin("scope", 200, 2); refused(() -> cache.nextAddresses(2));
+        cache.end(); cache.close(); assertTrue(cache.drained());
+    }
+
     @Test public void acceptedPartialUpdatesOnlySelectedAddressAndDoesNotRenewTheUnseenSibling() {
         Handles h = new Handles(); NativeNodeIdentityCache<Node> cache = new NativeNodeIdentityCache<>(2, h);
         long[] tokens = admitPair(cache); cache.begin("scope", 300, 1); cache.resolve(node(1)); long read = cache.readIdentity(); cache.end();

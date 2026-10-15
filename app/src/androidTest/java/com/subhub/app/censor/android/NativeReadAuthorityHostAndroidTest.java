@@ -49,7 +49,7 @@ public final class NativeReadAuthorityHostAndroidTest {
         Harness h = new Harness(); boolean passed = false; Throwable primary = null;
         long firstImage = -1, partialImage = -1, finalImage = -1;
         try (Harness owned = h) {
-            h.start(); assertTrue("First stable direct read held", h.firstDirect.await(5, TimeUnit.SECONDS));
+            h.start(); assertTrue("First stable cohort read held", h.firstDirect.await(5, TimeUnit.SECONDS));
             NativeTextFrame initial = h.terminalFrames.get(0); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, initial.read.coverage);
             firstImage = h.deliverNext(); final long first = firstImage;
             await("Complete authority cancels actual host OCR slot", () -> h.terminal(first, CensorEngine.Stage.JOB_CANCELLED));
@@ -57,19 +57,22 @@ public final class NativeReadAuthorityHostAndroidTest {
             assertTrue(h.trace(first, CensorEngine.Stage.JOB_CANCELLED).atMillis <= deadline(initial));
 
             h.firstDirectRelease.countDown(); assertTrue("Next bounded FULL held", h.nextFull.await(5, TimeUnit.SECONDS));
-            assertEquals(3, h.terminalFrames.size()); assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, h.terminalFrames.get(2).read.coverage);
+            assertEquals(2, h.terminalFrames.size());
+            assertEquals(NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY, h.terminalFrames.get(1).read.readMode);
+            assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, h.terminalFrames.get(1).read.coverage);
+            assertEquals(2, h.terminalFrames.get(1).read.candidates.size());
             partialImage = h.deliverNext(); assertTrue("Partial authority permits real OCR worker invocation", h.recognizer.entered.await(5, TimeUnit.SECONDS));
             assertEquals(1, h.ocrInitializations.get()); assertEquals(1, h.recognizer.processes.get());
             assertFalse(h.recognizer.task.getTask().isComplete());
 
-            h.nextFullRelease.countDown(); await("Fresh COMPLETE admitted", () -> h.terminalFrames.size() >= 4);
-            NativeTextFrame fresh = h.terminalFrames.get(3); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, fresh.read.coverage);
+            h.nextFullRelease.countDown(); await("Fresh COMPLETE admitted", () -> h.terminalFrames.size() >= 3);
+            NativeTextFrame fresh = h.terminalFrames.get(2); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, fresh.read.coverage);
             h.recognizer.task.setResult(Collections.singletonList(Collections.singletonList(
                     new ImageTextLayout.Line("porn", new SceneEngine.Region(10, 20, 100, 50)))));
             final long partial = partialImage;
             await("In-flight fallback cannot publish after complete authority returns", () -> h.terminal(partial, CensorEngine.Stage.RESULT_REJECTED));
             assertTrue(h.batches.isEmpty());
-            assertTrue("Successor DIRECT held before it can revoke COMPLETE", h.finalDirect.await(5, TimeUnit.SECONDS));
+            assertTrue("Successor cohort held before it can revoke COMPLETE", h.finalDirect.await(5, TimeUnit.SECONDS));
             finalImage = h.deliverNext(); final long last = finalImage;
             await("Fresh complete authority again cancels host OCR slot", () -> h.terminal(last, CensorEngine.Stage.JOB_CANCELLED));
             assertEquals(1, h.ocrInitializations.get()); assertEquals(1, h.recognizer.processes.get());
@@ -183,7 +186,7 @@ public final class NativeReadAuthorityHostAndroidTest {
                             if (boundary == NativeTextReader.Boundary.OPENED) {
                                 if (input.readMode() == NativeTextResult.ReadMode.FULL_DISCOVERY && fulls.incrementAndGet() == 2) {
                                     nextFull.countDown(); hold(nextFullRelease);
-                                } else if (input.readMode() == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY) {
+                                } else if (input.readMode() == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY) {
                                     if (directs.incrementAndGet() == 1) { firstDirect.countDown(); hold(firstDirectRelease); }
                                     else if (fulls.get() >= 2) { finalDirect.countDown(); hold(finalDirectRelease); }
                                 }
@@ -231,14 +234,17 @@ public final class NativeReadAuthorityHostAndroidTest {
                     .substring("REPLACEMENT_NATIVE ".length())));
             for (CensorEngine.Trace trace : traces) events.put(new JSONObject().put("source", trace.source).put("epoch", trace.epoch)
                     .put("stage", trace.stage.name()).put("lane", trace.lane == null ? JSONObject.NULL : trace.lane.name()).put("atMillis", trace.atMillis));
-            JSONObject receipt = new JSONObject().put("schemaVersion", 1).put("label", "native-authority-host")
+            JSONObject receipt = new JSONObject().put("schemaVersion", 2).put("label", "native-authority-host")
                     .put("pid", android.os.Process.myPid())
                     .put("controlledProviderCaptureRecognizer", true).put("actualHost", true).put("actualBoundService", false)
                     .put("bodyPassed", passed).put("managedDrain", disposed).put("firstImageSource", firstImage)
                     .put("partialImageSource", partialImage).put("finalImageSource", finalImage).put("ocrInitializations", ocrInitializations.get())
                     .put("ocrProcesses", recognizer.processes.get()).put("ocrCloses", recognizer.closes.get()).put("ocrProcessAtMillis", recognizer.processAt)
                     .put("visualInitializations", visualInitializations.get()).put("imageBatchAdmissions", batches.size())
-                    .put("rawFrameCount", nativeFrames.length()).put("frames", nativeFrames).put("rawTraceCount", events.length()).put("traces", events)
+                    .put("rawFrameCount", nativeFrames.length()).put("frames", nativeFrames)
+                    .put("rawTerminalFrameCount", terminalFrames.size())
+                    .put("rawObservationCount", frames.size() - terminalFrames.size())
+                    .put("rawTraceCount", events.length()).put("traces", events)
                     .put("pixelPerformanceAcceptance", false);
             File directory = activity.getExternalFilesDir("censor-tap-fixtures-20261011"); assertNotNull(directory);
             assertTrue(directory.isDirectory() || directory.mkdirs());

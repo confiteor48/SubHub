@@ -1102,13 +1102,21 @@ public final class SceneEngine {
         }
         NativeTextFrame previous = nativeFrames.get(frame.partition);
         if (previous != null && !nativeFollows(frame, previous)) return false;
+        if (previous != null && frame.read.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY
+                && frame.observationOrdinal == 0 && frame.followsObservation(previous)) {
+            // Parent inventory survives track expiry. Partial authority is not permission to
+            // replace the already-observed selected node with two different addresses.
+            for (NativeTextResult.Candidate observed : previous.read.candidates)
+                if (!selectedNodes.contains(observed.nodeKey)) return false;
+        }
         int retained = 0;
         List<Track> old = new ArrayList<>();
         for (Track track : tracks) {
             if (track.nativeCandidate != null && track.partition == frame.partition) {
                 if (!nativeFollows(frame, track.nativeFrame)) return false;
                 if (frame.followsObservation(track.nativeFrame)) {
-                    if (!partial && !selectedNodes.contains(track.nativeCandidate.nodeKey)) return false;
+                    if ((!partial || (frame.read.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY
+                            && frame.observationOrdinal == 0)) && !selectedNodes.contains(track.nativeCandidate.nodeKey)) return false;
                     for (NativeTextResult.Candidate candidate : frame.read.candidates) {
                         if (!Objects.equals(candidate.nodeKey, track.nativeCandidate.nodeKey)) continue;
                         if (candidate.validatedAtMillis < track.nativeCandidate.validatedAtMillis

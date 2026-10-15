@@ -10,6 +10,24 @@ import java.util.concurrent.Executor;
 import org.junit.Test;
 
 public class NativeTextEngineTest {
+    @Test public void nativeAdmissionObserverDoesNotProveAsynchronousPresentationIsInstalled() {
+        Harness h = new Harness();
+        h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        h.afterNativeAccepted = () -> assertNull("Presentation executor is deliberately still queued", h.engine.acquireRenderView());
+        h.finishNative(0, 10, 20, 1000);
+        assertEquals(1, h.nativeFrames.size()); assertNull(h.engine.acquireRenderView());
+        NativeTextFrame admitted = h.nativeFrames.get(0); long originalDeadline = admitted.validUntilMillis;
+        h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertNotNull(view); assertSame(admitted.source, view.snapshot.destination);
+            assertEquals(1, masks(view).size()); assertSame(admitted.source, masks(view).get(0).evidenceSource);
+        }
+        assertEquals(originalDeadline, admitted.validUntilMillis);
+        assertEquals(1, h.nativeInputs.size()); assertTrue(h.captures.isEmpty());
+        h.close(); assertEquals(1, h.drained);
+    }
+
     @Test public void sameParentCompleteCannotOmitObservedGroupAndBorrowGlobalNegativeAuthority() {
         for (boolean expired : new boolean[]{false, true}) {
             Harness h = observingHarness(); CensorEngine.NativeTextInput input = h.nativeInputs.get(0);
@@ -361,6 +379,89 @@ public class NativeTextEngineTest {
         else if (fence.equals("close")) h.engine.close();
         else if (fence.equals("disable")) h.engine.nativeTextControls(false);
         else h.engine.changeScope(42, ProtectionScope.normal(99));
+    }
+
+    @Test public void cohortObservationAndTerminalAreOnePartialParentWithIndependentNodeDeadlines() {
+        Harness h = cohortHarness(); CensorEngine.NativeTextInput input = h.nativeInputs.get(0);
+        NativeTextResult.Candidate a = observed(input, 0, 70, NODE, 1000, 65).candidates.get(0);
+        NativeTextResult.Candidate b = observed(input, 0, 100, OTHER_NODE, 1200, 95).candidates.get(0);
+        NativeTextResult early = cohort(input, 70, a), terminal = cohort(input, 100, a, b);
+        h.now = 80; assertTrue(h.nativeCompletions.get(0).observe(1, early)); assertTrue(h.engine.nativeTextInFlight());
+        h.ui.runAll(); assertTrue(h.engine.claimEvidence(latestEvidence(h)).subjects.isEmpty());
+        h.now = 110; CensorEngine.NativeTextAdmission admission = h.nativeCompletions.get(0).admit(terminal);
+        assertNotNull(admission); assertTrue(admission.matches(input, terminal)); h.ui.runAll();
+        assertEquals(1, h.nativeInputs.size()); assertEquals(2, h.nativeFrames.size()); assertFalse(h.engine.nativeTextInFlight());
+        assertEquals(1065, admission.frame.candidateValidUntilMillis(a)); assertEquals(1095, admission.frame.candidateValidUntilMillis(b));
+        assertFalse(h.engine.imageTextSuppressed()); assertTrue(h.engine.claimEvidence(latestEvidence(h)).subjects.isEmpty());
+        assertEquals(CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS, h.engine.viewportCoverage().state);
+        h.fire(1066); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(1, masks(view).size()); assertEquals(1200, masks(view).get(0).displayRegion.top, 0);
+        }
+        h.close(); assertEquals(1, h.drained);
+    }
+
+    @Test public void cohortCannotCompleteByOmittingItsUnobservedSecondMember() {
+        Harness h = cohortHarness(); CensorEngine.NativeTextInput input = h.nativeInputs.get(0);
+        NativeTextResult early = cohort(input, 70, observed(input, 0, 70, NODE, 1000, 65).candidates.get(0));
+        h.now = 80; assertTrue(h.nativeCompletions.get(0).observe(1, early));
+        h.now = 90; assertNull(h.nativeCompletions.get(0).admit(early)); assertFalse(h.engine.nativeTextInFlight());
+        assertEquals(1, h.nativeFrames.size()); assertEquals(1, h.nativeFrames.get(0).observationOrdinal);
+        h.fire(1066); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertTrue(masks(view).isEmpty()); }
+        h.close(); assertEquals(1, h.drained);
+    }
+
+    @Test public void cohortTerminalCannotReplaceItsObservedMemberWithTwoOtherNodes() {
+        Harness h = cohortHarness(); CensorEngine.NativeTextInput input = h.nativeInputs.get(0);
+        NativeTextResult early = cohort(input, 70, observed(input, 0, 70, NODE, 1000, 65).candidates.get(0));
+        h.now = 80; assertTrue(h.nativeCompletions.get(0).observe(1, early));
+        NativeTextResult substituted = cohort(input, 1100,
+                observed(input, 0, 1100, OTHER_NODE, 1200, 1095).candidates.get(0),
+                observed(input, 0, 1100, THIRD_NODE, 1400, 1095).candidates.get(0));
+        // Parent inventory must survive even after the original observed A has expired/pruned.
+        h.now = 1110; h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertTrue(masks(view).isEmpty()); }
+        assertNull(h.nativeCompletions.get(0).admit(substituted)); assertEquals(1, h.nativeFrames.size());
+        h.close(); assertEquals(1, h.drained);
+    }
+
+    @Test public void failedOrCancelledCohortCannotRedateItsAlreadyObservedFirstMember() {
+        for (boolean cancelled : new boolean[]{false, true}) {
+            Harness h = cohortHarness(); CensorEngine.NativeTextInput input = h.nativeInputs.get(0);
+            NativeTextResult early = cohort(input, 70, observed(input, 0, 70, NODE, 1000, 65).candidates.get(0));
+            h.now = 80; assertTrue(h.nativeCompletions.get(0).observe(1, early));
+            h.now = 900; if (cancelled) h.nativeCompletions.get(0).cancelled(); else h.nativeCompletions.get(0).failure();
+            assertEquals(1, h.nativeFrames.size()); assertEquals(1065, h.nativeFrames.get(0).candidateValidUntilMillis(early.candidates.get(0)));
+            assertFalse(h.nativeCompletions.get(0).observe(1, early)); h.fire(1066); h.ui.runAll();
+            try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) { assertTrue(masks(view).isEmpty()); }
+            h.close(); assertEquals(1, h.drained);
+        }
+    }
+
+    @Test public void cohortOrdinalShapeAndReentrantFenceCannotManufactureSecondGroupAuthority() {
+        for (String action : new String[]{"stop", "close", "hard", "scope", "disable", "protection"}) {
+            Harness h = cohortHarness(); CensorEngine.NativeTextInput input = h.nativeInputs.get(0);
+            NativeTextResult.Candidate a = observed(input, 0, 70, NODE, 1000, 65).candidates.get(0);
+            NativeTextResult.Candidate b = observed(input, 0, 100, OTHER_NODE, 1200, 95).candidates.get(0);
+            NativeTextResult early = cohort(input, 70, a), terminal = cohort(input, 100, a, b);
+            h.now = 80; assertFalse(h.nativeCompletions.get(0).observe(2, early));
+            h.afterNativeAccepted = () -> fence(h, action);
+            assertFalse(h.nativeCompletions.get(0).observe(1, early)); assertTrue(input.cancelled());
+            h.now = 110; assertNull(h.nativeCompletions.get(0).admit(terminal)); assertEquals(1, h.nativeFrames.size());
+            h.afterNativeAccepted = () -> { }; h.close(); assertEquals(1, h.drained);
+        }
+    }
+
+    private static Harness cohortHarness() {
+        Harness h = new Harness(); h.nativeBeginMode = NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY;
+        h.engine.executionControls(334, false, EnumSet.noneOf(SceneEngine.Lane.class));
+        h.engine.start(42, ProtectionScope.normal(9)); h.fire(0); h.nativeExecutor.runAll(); return h;
+    }
+    private static NativeTextResult cohort(CensorEngine.NativeTextInput input, long end, NativeTextResult.Candidate... candidates) {
+        return new NativeTextResult(1000, 2400, 7, 0, end, java.util.Arrays.asList(candidates), 2, 2, candidates.length,
+                NativeTextResult.Coverage.POSITIVE_NODES_ONLY, input.scanGeneration(), input.scanGeneration(), input.hardGeneration,
+                10, 58, input.readMode());
     }
 
     @Test public void selectedAcquisitionModeCannotBeRetaggedByASecondBeginOrAResult() {
@@ -1430,6 +1531,13 @@ public class NativeTextEngineTest {
     private static NativeTextResult pacingRead(CensorEngine.NativeTextInput input, long start, long end) {
         NativeTextResult a = observed(input, start, end, NODE, 1000, end - 5);
         if (input.readMode() == NativeTextResult.ReadMode.FULL_DISCOVERY) return completed(input, a, end);
+        if (input.readMode() == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY) {
+            NativeTextResult b = observed(input, start, end, OTHER_NODE, 1200, end - 5);
+            return new NativeTextResult(a.width, a.height, a.windowId, start, end,
+                    java.util.Arrays.asList(a.candidates.get(0), b.candidates.get(0)), 2, 2, 2,
+                    a.coverage, a.scanGeneration, a.confirmationGeneration, a.hardGeneration,
+                    a.classificationCompletedAtMillis, a.confirmationStartedAtMillis, input.readMode());
+        }
         return new NativeTextResult(a.width, a.height, a.windowId, start, end, a.candidates, 1, 1, 1,
                 a.coverage, a.scanGeneration, a.confirmationGeneration, a.hardGeneration,
                 a.classificationCompletedAtMillis, a.confirmationStartedAtMillis, input.readMode());

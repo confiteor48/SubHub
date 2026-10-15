@@ -1358,8 +1358,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                     || !active || closed || !nativeEnabled || job.epoch != epoch || job.generation != nativeGeneration
                     || resourceFailures != 0 || job.readStartedAt < 0 || read == null
                     || ordinal <= job.lastObservationOrdinal || ordinal > NativeTextResult.MAXIMUM_CANDIDATES
-                    || read.coverage != NativeTextResult.Coverage.POSITIVE_NODES_ONLY || read.candidates.size() != 1
-                    || read.readMode != NativeTextResult.ReadMode.FULL_DISCOVERY
+                    || !read.observationInventoryValid(ordinal)
                     || read.readStartedAtMillis != job.readStartedAt || read.readFinishedAtMillis > now
                     || !nativeReadCurrent(job, read) || now > plus(read.readFinishedAtMillis, nativeText.maximumAgeMillis)
                     || job.observedNodes.contains(read.candidates.get(0).nodeKey)) return false;
@@ -1397,7 +1396,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             } else if (read != null && active && !closed && nativeEnabled && !job.cancellation
                     && job.epoch == epoch && job.generation == nativeGeneration && job.readStartedAt >= 0
                     && read.readStartedAtMillis == job.readStartedAt && read.readFinishedAtMillis <= now
-                    && nativeReadCurrent(job, read)
+                    && nativeReadCurrent(job, read) && read.terminalInventoryValid()
                     && nativeObservationInventoryConsistent(job, read)
                     && now <= plus(read.readFinishedAtMillis, nativeText.maximumAgeMillis)) {
                 admitted = admitNativeFrame(job, read, 0, now, actions);
@@ -1470,7 +1469,8 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     private boolean nativeObservationInventoryConsistent(NativeJob job, NativeTextResult read) {
-        if (read.coverage != NativeTextResult.Coverage.COMPLETE_TREE || job.observedNodes.isEmpty()) return true;
+        if (job.observedNodes.isEmpty() || (read.coverage != NativeTextResult.Coverage.COMPLETE_TREE
+                && read.readMode != NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY)) return true;
         Set<String> finalNodes = new java.util.HashSet<>();
         for (NativeTextResult.Candidate candidate : read.candidates) finalNodes.add(candidate.nodeKey);
         // This contract has positive observations, not an independent later negative-node proof.

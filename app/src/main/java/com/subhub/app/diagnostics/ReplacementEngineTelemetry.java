@@ -13,7 +13,7 @@ public final class ReplacementEngineTelemetry {
 
     public static String nativeCostStart(long connection, com.subhub.app.censor.engine.NativeReadCost.Start value) {
         if (connection <= 0) throw new IllegalArgumentException("Replacement connection identity");
-        return "REPLACEMENT_NATIVE_COST_START {\"schemaVersion\":3,\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
+        return "REPLACEMENT_NATIVE_COST_START {\"schemaVersion\":" + nativeSchema(value.readMode) + ",\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
                 + ",\"request\":" + value.request + ",\"epoch\":" + value.epoch + ",\"geometry\":" + value.geometry
                 + ",\"hardGeneration\":" + value.hardGeneration + ",\"invokedAtMillis\":" + value.invokedAtMillis
                 + ",\"readMode\":\"" + value.readMode.name() + "\"}";
@@ -29,7 +29,7 @@ public final class ReplacementEngineTelemetry {
                     .append(",\"failedCalls\":").append(cost.failedCalls).append('}');
         }
         costs.append(']');
-        return "REPLACEMENT_NATIVE_COST {\"schemaVersion\":3,\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
+        return "REPLACEMENT_NATIVE_COST {\"schemaVersion\":" + nativeSchema(value.readMode) + ",\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
                 + ",\"request\":" + value.request + ",\"epoch\":" + value.epoch + ",\"geometry\":" + value.geometry
                 + ",\"hardGeneration\":" + value.hardGeneration + ",\"readMode\":\"" + value.readMode.name() + "\",\"scanGeneration\":" + value.scanGeneration
                 + ",\"invokedAtMillis\":" + value.invokedAtMillis
@@ -55,7 +55,7 @@ public final class ReplacementEngineTelemetry {
                     .append(",\"exactGeometry\":").append(candidate.exactGeometry).append('}');
         }
         nodes.append(']');
-        return "REPLACEMENT_NATIVE {\"schemaVersion\":3,\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
+        return "REPLACEMENT_NATIVE {\"schemaVersion\":" + nativeSchema(read.readMode) + ",\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
                 + ",\"epoch\":" + source.epoch + ",\"sequence\":" + source.sequence + ",\"request\":" + frame.requestIdentity
                 + ",\"observationOrdinal\":" + frame.observationOrdinal
                 + ",\"queuedAtMillis\":" + frame.queuedAtMillis + ",\"startedAtMillis\":" + frame.startedAtMillis
@@ -68,6 +68,10 @@ public final class ReplacementEngineTelemetry {
                 + ",\"visitedNodes\":" + read.visitedNodes + ",\"classifiedNodes\":" + read.classifiedNodes
                 + ",\"confirmationReads\":" + read.confirmationReads + ",\"candidateCount\":" + read.candidates.size()
                 + ",\"regionCount\":" + read.regionCount() + ",\"nodes\":" + nodes + "}";
+    }
+
+    private static int nativeSchema(NativeTextResult.ReadMode mode) {
+        return mode == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY ? 4 : 3;
     }
 
     public static String trace(long connection, CensorEngine.Trace value) {

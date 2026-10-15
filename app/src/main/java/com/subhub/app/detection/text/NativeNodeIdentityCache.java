@@ -1,6 +1,7 @@
 package com.subhub.app.detection.text;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import com.subhub.app.censor.engine.NativeTextFrame;
@@ -137,6 +138,25 @@ final class NativeNodeIdentityCache<N> implements AutoCloseable {
         Entry<N> selected = following == null ? first : following;
         if (selected == null) return null;
         roundRobinAfter = selected.token; touch(selected); return new Address<>(selected);
+    }
+
+    /** Pin a finite, distinct pass before any selected node's refresh can block or fail. */
+    List<Address<N>> nextAddresses(int count) {
+        requireRead();
+        if (count < 1 || count > NativeTextResult.COHORT_CANDIDATES) throw new IllegalArgumentException("native cohort size");
+        int available = 0;
+        for (Entry<N> entry : entries)
+            if (entry.basis != null && entry.refreshable && entry.basis.hardGeneration == hardGeneration) available++;
+        if (available < count) throw new IllegalStateException("native cohort addresses unavailable");
+        List<Address<N>> selected = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            Address<N> address = Objects.requireNonNull(nextAddress());
+            for (Address<N> previous : selected)
+                if (previous.token == address.token || handles.same(previous.node, address.node))
+                    throw new IllegalStateException("native cohort duplicated address");
+            selected.add(address);
+        }
+        return Collections.unmodifiableList(selected);
     }
 
     void retireAddress(long token) {

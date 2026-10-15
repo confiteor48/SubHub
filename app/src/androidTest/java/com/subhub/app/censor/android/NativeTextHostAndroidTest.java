@@ -138,8 +138,10 @@ public final class NativeTextHostAndroidTest {
             h.start(false); NativeTextFrame frame = h.awaitFrame(1);
             assertEquals(1, frame.read.candidates.size()); assertFalse(frame.read.candidates.get(0).exactGeometry);
             assertEquals(2, frame.read.candidates.get(0).regions.size());
-            try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
+            try (CensorEngine<PixelFrame>.RenderView view = h.awaitPresented(frame)) {
+                assertTrue(SystemClock.uptimeMillis() < frame.candidateValidUntilMillis(frame.read.candidates.get(0)));
                 assertEquals(2, masks(view).size());
+                for (SceneEngine.Mask mask : masks(view)) assertSame(frame.source, mask.evidenceSource);
                 assertTrue(masks(view).get(0).displayRegion.bottom < masks(view).get(1).displayRegion.top);
             }
         }
@@ -307,6 +309,23 @@ public final class NativeTextHostAndroidTest {
             while (terminalFrames.size() < count && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
             assertEquals("Expected terminal actual native frame, not early groups", count, terminalFrames.size());
             return terminalFrames.get(count - 1);
+        }
+        CensorEngine<PixelFrame>.RenderView awaitPresented(NativeTextFrame frame) throws InterruptedException {
+            long deadline = frame.validUntilMillis;
+            for (com.subhub.app.censor.engine.NativeTextResult.Candidate candidate : frame.read.candidates)
+                deadline = Math.min(deadline, frame.candidateValidUntilMillis(candidate));
+            // Admission observers run before the asynchronous presentation executor installs a view.
+            // Wait for this exact destination without demanding another read or renewing its age.
+            while (SystemClock.uptimeMillis() < deadline) {
+                CensorEngine<PixelFrame>.RenderView view = host.acquireRenderView();
+                if (view != null) {
+                    if (view.snapshot.destination == frame.source) return view;
+                    view.close();
+                }
+                Thread.sleep(10);
+            }
+            fail("Admitted native source was not presented within its original evidence age");
+            return null;
         }
         @Override public void close() throws Exception {
             rootRelease.countDown(); main(host::close);

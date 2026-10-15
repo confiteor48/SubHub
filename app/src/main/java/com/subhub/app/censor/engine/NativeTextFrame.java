@@ -36,9 +36,8 @@ public final class NativeTextFrame {
             throw new IllegalArgumentException("native frame provenance");
         }
         if (observationOrdinal < 0 || observationOrdinal > NativeTextResult.MAXIMUM_CANDIDATES
-                || (observationOrdinal > 0 && (requestIdentity <= 0
-                    || read.coverage != NativeTextResult.Coverage.POSITIVE_NODES_ONLY
-                    || read.readMode != NativeTextResult.ReadMode.FULL_DISCOVERY || read.candidates.size() != 1)))
+                || (observationOrdinal == 0 && !read.terminalInventoryValid())
+                || (observationOrdinal > 0 && (requestIdentity <= 0 || !read.observationInventoryValid(observationOrdinal))))
             throw new IllegalArgumentException("native observation provenance");
         this.partition = partition;
         this.maximumAgeMillis = maximumAgeMillis;
@@ -61,7 +60,9 @@ public final class NativeTextFrame {
                 && source.readStartedAtMillis == previous.source.readStartedAtMillis
                 && source.readFinishedAtMillis >= previous.source.readFinishedAtMillis
                 && read.hardGeneration == previous.read.hardGeneration && read.scanGeneration == previous.read.scanGeneration
-                && read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY && read.readMode == previous.read.readMode;
+                && read.readMode == previous.read.readMode
+                && (read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY
+                    || read.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY);
     }
 
     /** A sibling finishing later cannot renew this independently validated partial node. */

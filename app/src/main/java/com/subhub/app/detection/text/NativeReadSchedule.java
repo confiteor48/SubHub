@@ -10,6 +10,10 @@ final class NativeReadSchedule {
     NativeTextResult.ReadMode next(boolean addressRefreshSupported, int admittedAddresses) {
         bounded(admittedAddresses);
         if (addressRefreshSupported && admittedAddresses > 0 && directRemaining > 0) {
+            if (admittedAddresses >= NativeTextResult.COHORT_CANDIDATES && directRemaining >= NativeTextResult.COHORT_CANDIDATES) {
+                directRemaining -= NativeTextResult.COHORT_CANDIDATES;
+                return NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY;
+            }
             directRemaining--;
             return NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY;
         }

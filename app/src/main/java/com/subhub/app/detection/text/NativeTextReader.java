@@ -247,6 +247,11 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
                         + "\n" + input.protectionScope.tapScope + "\n" + scope.packageName + "\n" + scope.windowId
                         + "\n" + scope.width + "\n" + scope.height), input.nowMillis(), input.hardGeneration);
                 identityRead = true; identityReadId = identities.readIdentity();
+                if (mode == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY) {
+                    List<NativeNodeIdentityCache.Address<AccessibilityNodeInfo>> addresses = identities.nextAddresses(NativeTextResult.COHORT_CANDIDATES);
+                    for (NativeNodeIdentityCache.Address<AccessibilityNodeInfo> address : addresses) scanAddress(address);
+                    scanFinished(); return;
+                }
                 if (mode == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY) {
                     scanAddress(); scanFinished(); return;
                 }
@@ -294,20 +299,27 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
         void scanAddress() {
             NativeNodeIdentityCache.Address<AccessibilityNodeInfo> address = identities.nextAddress();
             if (address == null) throw new Incomplete(); selectedAddress = address.token;
+            scanAddress(address);
+        }
+        void scanAddress(NativeNodeIdentityCache.Address<AccessibilityNodeInfo> address) {
             valid(Boundary.TRAVERSAL);
-            AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain(address.node); owned.add(node);
-            if (!node.equals(address.node) || !refresh(node) || !node.isVisibleToUser()
-                    || !sameWindow(node)) throw new Incomplete();
-            TextValue value = textValue(node); visited = 1; classified = 1;
-            SmutTextClassifier.Match match = classify(value.text);
-            NativeNodeIdentityCache.Basis basis = address.basis;
-            String key = identityKey(node, false);
-            if (!match.isMatched() || !key.equals(basis.nodeKey) || value.source != basis.textSource
-                    || !digest(value.text).equals(basis.contentKey)
-                    || !category(match).equals(basis.category) || match.getStartIndex() != basis.matchStart
-                    || match.getEndIndex() != basis.matchEnd || match.getNormalizedLength() != basis.normalizedLength)
-                throw new Incomplete();
-            probes.add(new Probe(node, value, key, address.token));
+            try {
+                AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain(address.node); owned.add(node);
+                if (!node.equals(address.node) || !refresh(node) || !node.isVisibleToUser()
+                        || !sameWindow(node)) throw new Incomplete();
+                TextValue value = textValue(node); visited++; classified++;
+                SmutTextClassifier.Match match = classify(value.text);
+                NativeNodeIdentityCache.Basis basis = address.basis;
+                String key = identityKey(node, false);
+                if (!match.isMatched() || !key.equals(basis.nodeKey) || value.source != basis.textSource
+                        || !digest(value.text).equals(basis.contentKey)
+                        || !category(match).equals(basis.category) || match.getStartIndex() != basis.matchStart
+                        || match.getEndIndex() != basis.matchEnd || match.getNormalizedLength() != basis.normalizedLength)
+                    throw new Incomplete();
+                probes.add(new Probe(node, value, key, address.token));
+            } catch (Exception | Error failure) {
+                retireFailedCohortAddress(address.token); throw failure;
+            }
         }
         void scanFinished() {
             valid(Boundary.SCAN_END);
@@ -326,7 +338,7 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
                     valid(Boundary.TRAVERSAL);
                     SmutTextClassifier.Match match = classify(probe.text);
                     if (!match.isMatched()) throw new Incomplete();
-                    boolean previousGroup = mode == NativeTextResult.ReadMode.FULL_DISCOVERY && !confirmed.isEmpty();
+                    boolean previousGroup = mode != NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY && !confirmed.isEmpty();
                     valid(previousGroup ? Boundary.GROUP_END_BEFORE_FINAL_NODE_REFRESH : Boundary.BEFORE_FINAL_NODE_REFRESH);
                     if (previousGroup) {
                         // The actual post-group scope witness just succeeded. Do not borrow the
@@ -338,8 +350,9 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
                     }
                     // A supported glyph query refreshes the complete exact node itself. Otherwise
                     // the fallback performs a real refresh, never projection from cached bounds.
-                    Geometry geometry = regions(probe, match);
-                    requireMatchingNode(probe);
+                    Geometry geometry;
+                    try { geometry = regions(probe, match); if (geometry == null) throw new Incomplete(); requireMatchingNode(probe); }
+                    catch (Exception | Error failure) { retireFailedCohortAddress(probe.token); throw failure; }
                     if (geometry.parts.size() > NativeTextResult.MAXIMUM_REGIONS - regionCount) throw new Incomplete();
                     regionCount += geometry.parts.size();
                     List<SceneEngine.Region> regions = new ArrayList<>(geometry.parts.size());
@@ -361,6 +374,10 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
             // Optional publication refusal is not a parent failure. Actual cancellation/scope is
             // rechecked by the caller; only the genuine terminal can release roots/cache/lane.
             completion.observe(ordinal, group);
+        }
+        void retireFailedCohortAddress(long token) {
+            if (mode == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY && !cancelled && !input.cancelled())
+                identities.retireAddress(token);
         }
         boolean sameWindow(AccessibilityNodeInfo node) {
             CharSequence name = node.getPackageName();

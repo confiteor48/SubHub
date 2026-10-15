@@ -25,6 +25,7 @@ NATIVE_NODE = {'validatedAtMillis', 'validUntilMillis', 'textSource', 'matchStar
 NATIVE_V2 = NATIVE | {'readMode'}
 NATIVE_V3 = NATIVE_V2 | {'observationOrdinal'}
 READ_MODES = ('FULL_DISCOVERY','ADMITTED_NODE_RECLASSIFY')
+COHORT_MODE = 'ADMITTED_NODE_COHORT_RECLASSIFY'
 COST_START = {'schemaVersion', 'clockDomain', 'connection', 'request', 'epoch', 'geometry', 'hardGeneration', 'invokedAtMillis'}
 COST = COST_START | {'scanGeneration', 'readStartedAtMillis', 'readFinishedAtMillis', 'terminalAtMillis', 'terminal',
                      'durationClock', 'elapsedNanos', 'unattributedNanos', 'rawCostCount', 'costs'}
@@ -34,15 +35,20 @@ COST_STAGES = ('PROVIDER_OPEN', 'PROVIDER_CURRENT', 'NODE_REFRESH', 'CHILD_FETCH
 COST_STAGES_V2 = COST_STAGES[:2] + ('TRAVERSAL_CURRENT',) + COST_STAGES[2:]
 
 
+def native_mode(row):
+    allowed = (COHORT_MODE,) if row['schemaVersion'] == 4 else READ_MODES
+    if row['readMode'] not in allowed: raise ValueError('Unknown/version-mismatched native acquisition mode')
+
+
 def native_cost_start(row, observed_at):
     if type(row) is not dict: raise ValueError('Unknown reader invocation type')
-    expected=COST_START_V3 if row.get('schemaVersion')==3 else COST_START
+    expected=COST_START_V3 if row.get('schemaVersion') in (3,4) else COST_START
     if type(row) is not dict or set(row) != expected: raise ValueError('Unknown/incomplete reader invocation')
     for key in COST_START - {'clockDomain'}:
         integer(row[key])
         if row[key] > 9223372036854775807: raise ValueError('Reader invocation integer overflow')
-    if row['schemaVersion'] not in (1,2,3) or row['clockDomain']!='UPTIME_MILLIS': raise ValueError('Reader invocation schema/clock differs')
-    if row['schemaVersion']==3 and row['readMode'] not in READ_MODES: raise ValueError('Unknown reader invocation mode')
+    if row['schemaVersion'] not in (1,2,3,4) or row['clockDomain']!='UPTIME_MILLIS': raise ValueError('Reader invocation schema/clock differs')
+    if row['schemaVersion'] in (3,4): native_mode(row)
     for key in ('connection', 'request'): integer(row[key], 1)
     if row['invokedAtMillis'] > observed_at: raise ValueError('Reader invocation is later than its observation')
     return row
@@ -50,9 +56,9 @@ def native_cost_start(row, observed_at):
 
 def native_cost_row(row, observed_at):
     if type(row) is not dict: raise ValueError('Unknown reader terminal type')
-    expected=COST_V3 if row.get('schemaVersion')==3 else COST
+    expected=COST_V3 if row.get('schemaVersion') in (3,4) else COST
     if type(row) is not dict or set(row) != expected: raise ValueError('Unknown/incomplete reader terminal costs')
-    start_fields=COST_START_V3 if row['schemaVersion']==3 else COST_START
+    start_fields=COST_START_V3 if row['schemaVersion'] in (3,4) else COST_START
     native_cost_start({k: row[k] for k in start_fields}, observed_at)
     for key in ('scanGeneration','readStartedAtMillis','readFinishedAtMillis'):
         integer(row[key], -1)
@@ -69,7 +75,7 @@ def native_cost_row(row, observed_at):
     elif not row['invokedAtMillis'] <= row['readStartedAtMillis'] <= row['readFinishedAtMillis'] <= row['terminalAtMillis'] or row['scanGeneration'] < 0:
         raise ValueError('Actual read/cleanup clocks reversed')
     costs = row['costs']
-    stages=COST_STAGES_V2 if row['schemaVersion'] in (2,3) else COST_STAGES
+    stages=COST_STAGES_V2 if row['schemaVersion'] in (2,3,4) else COST_STAGES
     if type(costs) is not list or len(costs) != len(stages) or row['rawCostCount'] != len(costs):
         raise ValueError('Raw reader cost inventory differs')
     total = 0
@@ -111,7 +117,7 @@ def reconcile_native_costs(starts, costs, natives):
             elif (cost['terminal']!='SUCCESS' or cost['readFinishedAtMillis']!=native['readFinishedAtMillis']
                     or cost['terminalAtMillis'] > native['receivedAtMillis']):
                 raise ValueError('Admitted native Source lacks its unique successful actual Reader terminal')
-            if cost['schemaVersion']==3 and (native['schemaVersion'] not in (2,3) or native['readMode']!=cost['readMode']):
+            if cost['schemaVersion'] in (3,4) and (native['schemaVersion'] not in (2,3,4) or native['readMode']!=cost['readMode']):
                 raise ValueError('Admitted native mode differs from its actual selected operation')
 
 
@@ -123,7 +129,7 @@ def native_publication(prior_rows, row):
             raise ValueError('Duplicate native Source publication')
         if row['request'] <= 0 or prior['request'] != row['request']:
             continue
-        if prior['schemaVersion'] != 3 or row['schemaVersion'] != 3:
+        if prior['schemaVersion'] not in (3,4) or row['schemaVersion'] not in (3,4):
             raise ValueError('Legacy native rows cannot establish same-parent observations')
         if prior['observationOrdinal'] == 0:
             raise ValueError('Native parent already terminally admitted')
@@ -215,20 +221,26 @@ def scroll_row(row, observed_at):
 
 def native_row(row, observed_at):
     if type(row) is not dict: raise ValueError('Unknown native read type')
-    expected=NATIVE_V3 if row.get('schemaVersion')==3 else NATIVE_V2 if row.get('schemaVersion')==2 else NATIVE
-    if type(row) is not dict or set(row) != expected or type(row['schemaVersion']) is not int or row['schemaVersion'] not in (1,2,3) or row['coverage'] not in ('COMPLETE_TREE', 'POSITIVE_NODES_ONLY'):
+    expected=NATIVE_V3 if row.get('schemaVersion') in (3,4) else NATIVE_V2 if row.get('schemaVersion')==2 else NATIVE
+    if type(row) is not dict or set(row) != expected or type(row['schemaVersion']) is not int or row['schemaVersion'] not in (1,2,3,4) or row['coverage'] not in ('COMPLETE_TREE', 'POSITIVE_NODES_ONLY'):
         raise ValueError('Unknown/incomplete native read coverage')
-    if row['schemaVersion'] in (2,3):
-        if row['readMode'] not in READ_MODES: raise ValueError('Unknown native acquisition mode')
+    if row['schemaVersion'] in (2,3,4):
+        native_mode(row)
         if row['readMode']=='ADMITTED_NODE_RECLASSIFY' and (row['coverage']!='POSITIVE_NODES_ONLY' or
                 any(row[key]!=1 or type(row[key]) is not int for key in ('visitedNodes','classifiedNodes','confirmationReads','candidateCount'))):
             raise ValueError('Direct native operation fabricated tree or selected-node coverage')
-    if row['schemaVersion']==3:
+    if row['schemaVersion'] in (3,4):
         integer(row['observationOrdinal'])
         if row['observationOrdinal'] > 64 or (row['observationOrdinal'] > 0 and
-                (row['request'] <= 0 or row['readMode'] != 'FULL_DISCOVERY' or row['coverage'] != 'POSITIVE_NODES_ONLY'
+                (row['request'] <= 0 or row['readMode'] not in ('FULL_DISCOVERY',COHORT_MODE) or row['coverage'] != 'POSITIVE_NODES_ONLY'
                  or row['candidateCount'] != 1 or row['confirmationReads'] != row['observationOrdinal'])):
             raise ValueError('Native group ordinal invented terminal/tree/direct authority')
+    if row['schemaVersion'] == 4:
+        expected_count = 1 if row['observationOrdinal'] == 1 else 2
+        if (row['observationOrdinal'] not in (0,1) or row['coverage'] != 'POSITIVE_NODES_ONLY'
+                or any(type(row[key]) is not int or row[key] != 2 for key in ('visitedNodes','classifiedNodes'))
+                or any(type(row[key]) is not int or row[key] != expected_count for key in ('confirmationReads','candidateCount'))):
+            raise ValueError('Cohort invented selected inventory or completed by omission')
     for key in NATIVE - {'schemaVersion', 'clockDomain', 'coverage', 'nodes'}:
         integer(row[key], -1 if key in {'request', 'queuedAtMillis', 'startedAtMillis', 'scanGeneration', 'confirmationGeneration',
                                       'hardGeneration', 'classificationCompletedAtMillis', 'confirmationStartedAtMillis'} else 0)
@@ -312,7 +324,7 @@ def analyze(records, expected_events=None, dropped_events=None):
         if not separator or prefix not in ('REPLACEMENT_TRACE', 'REPLACEMENT_POST', 'REPLACEMENT_SCROLL', 'REPLACEMENT_NATIVE', 'REPLACEMENT_NATIVE_COST_START', 'REPLACEMENT_NATIVE_COST'):
             raise ValueError('Unknown selected replacement record')
         row = decode(payload)
-        versions=(1,2,3) if prefix in ('REPLACEMENT_NATIVE_COST_START','REPLACEMENT_NATIVE_COST','REPLACEMENT_NATIVE') else (1,)
+        versions=(1,2,3,4) if prefix in ('REPLACEMENT_NATIVE_COST_START','REPLACEMENT_NATIVE_COST','REPLACEMENT_NATIVE') else (1,)
         if type(row) is not dict or row.get('schemaVersion') not in versions or type(row['schemaVersion']) is not int or row.get('clockDomain') != 'UPTIME_MILLIS':
             raise ValueError('Unsupported replacement schema/clock')
         integer(row.get('connection'), 1)
@@ -382,12 +394,12 @@ def analyze(records, expected_events=None, dropped_events=None):
         completeNativeRows=sum(row['coverage'] == 'COMPLETE_TREE' for row in natives),
         positiveNodeOnlyRows=sum(row['coverage'] == 'POSITIVE_NODES_ONLY' for row in natives),
         nativeReadModes=dict(Counter(row.get('readMode','UNKNOWN') for row in natives)),
-        nativeReadModeProvenanceComplete=bool(natives) and all(row['schemaVersion'] in (2,3) for row in natives)
-            and bool(costs) and all(row['schemaVersion']==3 for row in costs),
+        nativeReadModeProvenanceComplete=bool(natives) and all(row['schemaVersion'] in (2,3,4) for row in natives)
+            and bool(costs) and all(row['schemaVersion'] in (3,4) for row in costs),
         nativeObservationRows=sum(row.get('observationOrdinal',0)>0 for row in natives),
-        nativeTerminalAdmissionRows=sum(row['schemaVersion']==3 and row['observationOrdinal']==0 for row in natives),
+        nativeTerminalAdmissionRows=sum(row['schemaVersion'] in (3,4) and row['observationOrdinal']==0 for row in natives),
         nativeLegacyAdmissionRows=sum(row['schemaVersion']<3 for row in natives),
-        nativeObservationProvenanceComplete=bool(natives) and all(row['schemaVersion']==3 for row in natives),
+        nativeObservationProvenanceComplete=bool(natives) and all(row['schemaVersion'] in (3,4) for row in natives),
         actualNativeAcquisitionStarts=sum(row['readStartedAtMillis']>=0 for row in costs),
         successfulNativeAcquisitionTerminals=sum(row['terminal']=='SUCCESS' for row in costs),
         nativeCandidates=sum(row['candidateCount'] for row in natives),

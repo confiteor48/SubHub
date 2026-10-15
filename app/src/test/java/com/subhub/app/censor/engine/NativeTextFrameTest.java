@@ -8,6 +8,56 @@ import java.util.Collections;
 import org.junit.Test;
 
 public class NativeTextFrameTest {
+    @Test public void cohortOneMemberIsOnlyObservationAndTwoMembersAreOnlyTerminal() {
+        NativeTextResult early = cohort(proved(C, 190)), terminal = cohort(proved(C, 190), proved(D, 290));
+        SceneEngine.Source source = SceneEngine.Source.nativeText(1, 2, 42, 1000, 2400, 7, 100, 300, 300);
+        assertFalse(early.terminalInventoryValid()); assertTrue(early.observationInventoryValid(1));
+        assertFalse(early.observationInventoryValid(2)); assertFalse(terminal.observationInventoryValid(1));
+        assertThrows(IllegalArgumentException.class, () -> new NativeTextFrame(source, 2, early, 1000, 1, 90, 95));
+        assertThrows(IllegalArgumentException.class, () -> new NativeTextFrame(source, 2, early, 1000, 1, 90, 95, 2));
+        assertThrows(IllegalArgumentException.class, () -> new NativeTextFrame(source, 2, terminal, 1000, 1, 90, 95, 1));
+        NativeTextFrame observed = new NativeTextFrame(source, 2, early, 1000, 1, 90, 95, 1);
+        NativeTextFrame completed = new NativeTextFrame(SceneEngine.Source.nativeText(1, 3, 42, 1000, 2400, 7, 100, 300, 300),
+                2, terminal, 1000, 1, 90, 95);
+        assertTrue(completed.followsObservation(observed)); assertFalse(observed.followsObservation(completed));
+        assertEquals(1190, completed.candidateValidUntilMillis(terminal.candidates.get(0)));
+        assertEquals(1290, completed.candidateValidUntilMillis(terminal.candidates.get(1)));
+    }
+
+    @Test public void cohortTerminalCannotOmitItsObservedNodeEvenAfterTrackExpiry() {
+        for (boolean prune : new boolean[]{false, true}) {
+            SceneEngine scene = scene(16, 100); scene.register(image(1));
+            NativeTextFrame first = new NativeTextFrame(SceneEngine.Source.nativeText(1, 2, 42, 1000, 2400, 7, 100, 300, 300),
+                    2, cohort(proved(C, 190)), 1000, 1, 90, 95, 1);
+            assertTrue(scene.admitNativeFrame(first));
+            if (prune) assertTrue(scene.snapshot(1, 1300, false).groups.isEmpty());
+            NativeTextResult foreign = new NativeTextResult(1000, 2400, 7, 100, 1400,
+                    Arrays.asList(proved(D, 1350), proved(B, 1360)), 2, 2, 2, NativeTextResult.Coverage.POSITIVE_NODES_ONLY,
+                    1, 1, 1, 120, 168, NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY);
+            NativeTextFrame terminal = new NativeTextFrame(SceneEngine.Source.nativeText(1, 3, 42, 1000, 2400, 7, 100, 1400, 1400),
+                    2, foreign, 1000, 1, 90, 95);
+            assertFalse(scene.admitNativeFrame(terminal)); assertNull(scene.source(3));
+        }
+    }
+
+    @Test public void cohortCannotInventCompleteTreeDuplicateNodesOrDifferentSelectedInventory() {
+        for (int[] counts : new int[][]{{1, 1, 1}, {2, 1, 1}, {3, 2, 1}, {2, 2, 0}, {2, 2, 2}}) {
+            assertThrows(IllegalArgumentException.class, () -> new NativeTextResult(1000, 2400, 7, 100, 300,
+                    Collections.singletonList(proved(C, 190)), counts[0], counts[1], counts[2], NativeTextResult.Coverage.POSITIVE_NODES_ONLY,
+                    1, 1, 1, 120, 168, NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY));
+        }
+        assertThrows(IllegalArgumentException.class, () -> cohort(proved(C, 190), proved(C, 290)));
+        assertThrows(IllegalArgumentException.class, () -> new NativeTextResult(1000, 2400, 7, 100, 300,
+                Arrays.asList(proved(C, 190), proved(D, 290)), 2, 2, 2, NativeTextResult.Coverage.COMPLETE_TREE,
+                1, 1, 1, 120, 168, NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY));
+    }
+
+    private static NativeTextResult cohort(NativeTextResult.Candidate... candidates) {
+        return new NativeTextResult(1000, 2400, 7, 100, 300, Arrays.asList(candidates), 2, 2, candidates.length,
+                NativeTextResult.Coverage.POSITIVE_NODES_ONLY, 1, 1, 1, 120, 168,
+                NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY);
+    }
+
     @Test public void overlappingSameParentCompleteCannotWithdrawAnObservedUnexpiredSibling() {
         SceneEngine scene = scene(16, 100); scene.register(image(1));
         assertTrue(scene.admitNativeFrame(observationFrame(2, 1, 300, 190, C, 1000)));

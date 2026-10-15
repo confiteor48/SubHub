@@ -9,6 +9,33 @@ import java.lang.reflect.Constructor;
 import org.junit.Test;
 
 public final class ReplacementEngineTelemetryTest {
+    @Test public void cohortSchemaSeparatesTwoNodeParentFromItsNonterminalObservation() {
+        com.subhub.app.censor.engine.NativeTextResult.ReadMode mode = com.subhub.app.censor.engine.NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY;
+        String content = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        java.util.List<com.subhub.app.censor.engine.NativeTextResult.Candidate> candidates = new java.util.ArrayList<>();
+        for (String node : new String[]{content, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
+            candidates.add(new com.subhub.app.censor.engine.NativeTextResult.Candidate("TEXT_SMUT", content, node, .9f, true,
+                    java.util.Collections.singletonList(new SceneEngine.Region(1, 2, 10, 20)),
+                    com.subhub.app.censor.engine.NativeTextResult.TextSource.TEXT, 0, 4, 4, 170));
+        for (int ordinal : new int[]{1, 0}) {
+            com.subhub.app.censor.engine.NativeTextResult read = new com.subhub.app.censor.engine.NativeTextResult(100, 200, 7, 100, 200,
+                    ordinal == 1 ? candidates.subList(0, 1) : candidates, 2, 2, ordinal == 1 ? 1 : 2,
+                    com.subhub.app.censor.engine.NativeTextResult.Coverage.POSITIVE_NODES_ONLY, 1, 1, 1, 120, 168, mode);
+            String value = ReplacementEngineTelemetry.nativeRead(5, new com.subhub.app.censor.engine.NativeTextFrame(
+                    SceneEngine.Source.nativeText(1, 2, 3, 100, 200, 7, 100, 200, 220), 9, read, 1000, 7, 90, 95, ordinal));
+            assertTrue(value.contains("\"schemaVersion\":4")); assertTrue(value.contains("\"readMode\":\"" + mode.name() + "\""));
+            assertTrue(value.contains("\"observationOrdinal\":" + ordinal));
+            assertTrue(value.contains("\"candidateCount\":" + (ordinal == 1 ? 1 : 2))); assertFalse(value.contains(content));
+        }
+        assertTrue(ReplacementEngineTelemetry.nativeCostStart(5, new com.subhub.app.censor.engine.NativeReadCost.Start(
+                7, 1, 3, 1, 90, mode)).contains("\"schemaVersion\":4"));
+        java.util.List<com.subhub.app.censor.engine.NativeReadCost.Cost> costs = new java.util.ArrayList<>();
+        for (com.subhub.app.censor.engine.NativeReadCost.Stage stage : com.subhub.app.censor.engine.NativeReadCost.Stage.values())
+            costs.add(new com.subhub.app.censor.engine.NativeReadCost.Cost(stage, 0, 0, 0, 0));
+        assertTrue(ReplacementEngineTelemetry.nativeCost(5, new com.subhub.app.censor.engine.NativeReadCost(7, 1, 3, 1, 1,
+                90, 100, 200, 210, 100, com.subhub.app.censor.engine.NativeReadCost.Terminal.SUCCESS, costs, mode)).contains("\"schemaVersion\":4"));
+    }
+
     @Test public void nativeCostKeepsIndependentElapsedAndOriginalUptimeWithoutPrivateNodeData() {
         java.util.List<com.subhub.app.censor.engine.NativeReadCost.Cost> costs = new java.util.ArrayList<>();
         for (com.subhub.app.censor.engine.NativeReadCost.Stage stage : com.subhub.app.censor.engine.NativeReadCost.Stage.values())

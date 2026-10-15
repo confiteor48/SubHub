@@ -8,9 +8,11 @@ import java.util.Objects;
 /** Typed provider-revalidated facts. Partial positives do not claim an observed whole tree. */
 public final class NativeTextResult {
     public enum Coverage { COMPLETE_TREE, POSITIVE_NODES_ONLY }
-    public enum ReadMode { FULL_DISCOVERY, ADMITTED_NODE_RECLASSIFY }
+    public enum ReadMode { FULL_DISCOVERY, ADMITTED_NODE_RECLASSIFY, ADMITTED_NODE_COHORT_RECLASSIFY }
     public enum TextSource { UNKNOWN, TEXT, CONTENT_DESCRIPTION }
     public static final int MAXIMUM_CANDIDATES = 64;
+    /** Smallest multi-address pass; larger cohorts need separate renewal and discovery qualification. */
+    public static final int COHORT_CANDIDATES = 2;
     public static final int MAXIMUM_REGIONS = 256;
     public static final int MAXIMUM_LINES = 12;
     public final int width, height, windowId;
@@ -118,6 +120,10 @@ public final class NativeTextResult {
         if (readMode == ReadMode.ADMITTED_NODE_RECLASSIFY && (coverage != Coverage.POSITIVE_NODES_ONLY
                 || candidates.size() != 1 || visitedNodes != 1 || classifiedNodes != 1 || confirmationReads != 1))
             throw new IllegalArgumentException("direct native read cannot claim a tree or an unknown selected node");
+        if (readMode == ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY && (coverage != Coverage.POSITIVE_NODES_ONLY
+                || visitedNodes != COHORT_CANDIDATES || classifiedNodes != COHORT_CANDIDATES
+                || confirmationReads < 1 || confirmationReads > COHORT_CANDIDATES || candidates.size() != confirmationReads))
+            throw new IllegalArgumentException("native cohort selected/confirmed inventory");
         boolean unknownRevision = scanGeneration == -1 && confirmationGeneration == -1 && hardGeneration == -1;
         boolean unknownClocks = classificationCompletedAtMillis == -1 && confirmationStartedAtMillis == -1;
         if (unknownRevision != unknownClocks
@@ -162,6 +168,17 @@ public final class NativeTextResult {
                 }
             }
         }
+    }
+
+    /** A one-member cohort is a nonterminal observation, never successful completion by omission. */
+    public boolean terminalInventoryValid() {
+        return readMode != ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY || candidates.size() == COHORT_CANDIDATES;
+    }
+
+    public boolean observationInventoryValid(int ordinal) {
+        return coverage == Coverage.POSITIVE_NODES_ONLY && candidates.size() == 1 && ordinal > 0
+                && ordinal <= MAXIMUM_CANDIDATES && (readMode == ReadMode.FULL_DISCOVERY
+                    || (readMode == ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY && ordinal == 1 && confirmationReads == 1));
     }
 
     public int regionCount() {
