@@ -126,6 +126,11 @@ public final class CensorProductSession implements AutoCloseable {
     CensorProductSession(AccessibilityService service, SceneEngine.Policy policy, CensorTapTracker taps, Observer observer,
             AccessibilityCensorHost.WorkerFactory models, Runnable selectionObserved, Function<Context, StatsRepository> statistics,
             Function<Context, PenanceManager> ledgers) {
+        this(service, policy, taps, observer, models, selectionObserved, statistics, ledgers, () -> { });
+    }
+    CensorProductSession(AccessibilityService service, SceneEngine.Policy policy, CensorTapTracker taps, Observer observer,
+            AccessibilityCensorHost.WorkerFactory models, Runnable selectionObserved, Function<Context, StatsRepository> statistics,
+            Function<Context, PenanceManager> ledgers, Runnable nativeReadSelected) {
         onMain(); this.service = Objects.requireNonNull(service); this.taps = Objects.requireNonNull(taps);
         this.selectionObserved = Objects.requireNonNull(selectionObserved);
         this.statistics = Objects.requireNonNull(statistics);
@@ -156,11 +161,16 @@ public final class CensorProductSession implements AutoCloseable {
                         }
                         observer.trace(trace);
                     }
+                    @Override public void scrollReceived(com.subhub.app.censor.engine.ScrollMotionLedger.Receipt receipt) {
+                        observer.scrollReceived(receipt);
+                    }
                     @Override public void prepared(long request, PixelFrame.Kind kind, long nanos, int bytes) { observer.prepared(request, kind, nanos, bytes); }
                     @Override public void failed(long request, int code) { observer.failed(request, code); }
                     @Override public void presentationChanged() { observer.presentationChanged(); }
                     @Override public void batchAccepted(SceneEngine.Batch batch) { observer.batchAccepted(batch); }
                     @Override public void nativeTextAccepted(com.subhub.app.censor.engine.NativeTextFrame frame) { observer.nativeTextAccepted(frame); }
+                    @Override public void nativeReadCost(com.subhub.app.censor.engine.NativeReadCost value) { observer.nativeReadCost(value); }
+                    @Override public void nativeReadCostStarted(com.subhub.app.censor.engine.NativeReadCost.Start value) { observer.nativeReadCostStarted(value); }
                     @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) {
                         evidenceAdmission.offer(receipt);
                         observer.evidenceAccepted(receipt);
@@ -175,7 +185,7 @@ public final class CensorProductSession implements AutoCloseable {
                     }
                     @Override public void drained() { observer.drained(); }
                     @Override public void executorsTerminated(boolean disposed) { observer.executorsTerminated(disposed); }
-                }, models);
+                }, models, () -> { }, nativeReadSelected);
         reconciliation = new LatestReconciliation<>(lookup, main::post, this::read, this::commit, this::fail);
     }
     public void request() { onMain(); if (!closed && !failed) reconciliation.request(); }
@@ -206,10 +216,26 @@ public final class CensorProductSession implements AutoCloseable {
     }
     public void ownershipChanged() { onMain(); stop(); request(); }
     public void contentChanged(int windowId) { onMain(); if (active && !closed) { controller.contentChanged(windowId); controller.requestCapture(); } }
+    public void contentChanged(int windowId, int contentChangeTypes) {
+        onMain();
+        if (active && !closed) {
+            // SUBTREE and undefined signals make the whole tree unknown, not every classified
+            // same-node literal false. All other explicit content-change kinds retain a hard fence.
+            boolean hard = (contentChangeTypes & ~android.view.accessibility.AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE) != 0;
+            controller.contentChanged(windowId, hard); controller.requestCapture();
+        }
+    }
     public void scrolled(int windowId) {
         onMain(); Desired value = selected;
         if (active && !closed && value != null && value.window.id == windowId) {
             controller.scrolled(windowId);
+            dwellEpisode.reset(); dwellAccounting.invalidate();
+        }
+    }
+    public void scrolled(android.view.accessibility.AccessibilityEvent event) {
+        onMain(); Desired value = selected;
+        if (active && !closed && value != null && value.window.id == event.getWindowId()) {
+            controller.scrolled(event);
             dwellEpisode.reset(); dwellAccounting.invalidate();
         }
     }

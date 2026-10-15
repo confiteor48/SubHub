@@ -10,10 +10,16 @@ import android.view.accessibility.AccessibilityEvent;
 /** Disabled-by-default actual service; never included or activated by the release source set. */
 public final class BoundCensorFixtureService extends AccessibilityService {
     public static volatile BoundCensorFixtureService current;
+    static final FixtureServiceConnection<BoundCensorFixtureService> CONNECTIONS =
+            new FixtureServiceConnection<>(service -> current = service);
+    FixtureServiceConnection.Lease<BoundCensorFixtureService> connection;
     public int boundPid;
     public AccessibilityCensorController controller;
     @Override protected void onServiceConnected() {
-        super.onServiceConnected(); boundPid = Process.myPid(); current = this;
+        // Framework lifecycle callbacks identify this object, not a protocol generation.
+        if (connection != null) throw new IllegalStateException("Fixture service instance reconnection is unsupported");
+        super.onServiceConnected(); boundPid = Process.myPid();
+        synchronized (CONNECTIONS) { connection = CONNECTIONS.connected(this); }
         Log.i("BoundCensorFixture", "BOUND pid=" + Process.myPid() + " sdk=" + Build.VERSION.SDK_INT);
     }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
@@ -26,11 +32,14 @@ public final class BoundCensorFixtureService extends AccessibilityService {
         if (Build.VERSION.SDK_INT >= 30 && controller != null) controller.stop();
     }
     @Override public boolean onUnbind(Intent intent) {
-        if (Build.VERSION.SDK_INT >= 30 && controller != null) controller.close();
-        current = null; return super.onUnbind(intent);
+        if (connection == null) return super.onUnbind(intent);
+        boolean[] result = {false};
+        CONNECTIONS.retire(connection, this::closeController, () -> result[0] = super.onUnbind(intent));
+        return result[0];
     }
     @Override public void onDestroy() {
-        if (Build.VERSION.SDK_INT >= 30 && controller != null) controller.close();
-        current = null; super.onDestroy();
+        if (connection == null) { super.onDestroy(); return; }
+        CONNECTIONS.retire(connection, this::closeController, () -> super.onDestroy());
     }
+    private void closeController() { if (Build.VERSION.SDK_INT >= 30 && controller != null) controller.close(); }
 }

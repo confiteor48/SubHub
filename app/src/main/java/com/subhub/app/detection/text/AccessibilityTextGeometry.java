@@ -36,6 +36,12 @@ final class AccessibilityTextGeometry {
     static List<Rect> resolveLines(
             AccessibilityNodeInfo node, String classifiedText, SmutTextClassifier.Match match,
             int screenWidth, int screenHeight) {
+        return resolveLines(node, classifiedText, match, screenWidth, screenHeight, (nanos, successful) -> { });
+    }
+    interface QueryObserver { void measured(long nanos, boolean successful); }
+    static List<Rect> resolveLines(
+            AccessibilityNodeInfo node, String classifiedText, SmutTextClassifier.Match match,
+            int screenWidth, int screenHeight, QueryObserver observer) {
         if (node == null || match == null || !match.isMatched() || classifiedText == null
                 || classifiedText.isEmpty()) return null;
         CharSequence nodeText = node.getText();
@@ -59,8 +65,10 @@ final class AccessibilityTextGeometry {
         Bundle arguments = new Bundle();
         arguments.putInt(AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_START_INDEX, 0);
         arguments.putInt(AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_LENGTH, length);
-        if (!node.refreshWithExtraData(
-                AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY, arguments)) {
+        long queryAt = System.nanoTime(); boolean refreshedQuery = false;
+        try { refreshedQuery = node.refreshWithExtraData(AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY, arguments); }
+        finally { observer.measured(System.nanoTime() - queryAt, refreshedQuery); }
+        if (!refreshedQuery) {
             throw new IncompleteGeometry();
         }
         CharSequence refreshed = node.getText();

@@ -99,6 +99,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private final ScheduledExecutorService nativeReads;
     private NativeTextReader textReader; // Its serial executor owns access, including confirmation.
     private Configuration textReaderConfiguration;
+    private long textReaderEpoch;
     private final AtomicBoolean disposing = new AtomicBoolean();
     private final AtomicBoolean disposalFailed = new AtomicBoolean();
     private volatile Configuration configuration;
@@ -152,6 +153,9 @@ public final class AccessibilityCensorHost implements AutoCloseable {
                         new CensorEngine.LaneWorker<>(SceneEngine.Lane.TEXT, imageText.executor, imageText)),
                 presentation, new CensorEngine.Observer() {
                     @Override public void trace(CensorEngine.Trace trace) { observer.trace(trace); }
+                    @Override public void scrollReceived(com.subhub.app.censor.engine.ScrollMotionLedger.Receipt receipt) {
+                        observer.scrollReceived(receipt);
+                    }
                     @Override public void presentationChanged() { observer.presentationChanged(); }
                     @Override public void batchAccepted(SceneEngine.Batch batch) {
                         if (batch.lane == SceneEngine.Lane.FAST) {
@@ -165,6 +169,8 @@ public final class AccessibilityCensorHost implements AutoCloseable {
                         observer.batchAccepted(batch);
                     }
                     @Override public void nativeTextAccepted(NativeTextFrame frame) { observer.nativeTextAccepted(frame); }
+                    @Override public void nativeReadCost(com.subhub.app.censor.engine.NativeReadCost value) { observer.nativeReadCost(value); }
+                    @Override public void nativeReadCostStarted(com.subhub.app.censor.engine.NativeReadCost.Start value) { observer.nativeReadCostStarted(value); }
                     @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { observer.evidenceAccepted(receipt); }
                     @Override public void painted(CensorEngine.PaintReceipt receipt) { observer.painted(receipt); }
                     @Override public void drained() {
@@ -187,18 +193,25 @@ public final class AccessibilityCensorHost implements AutoCloseable {
 
     public void start(long token, DetectorConfig detector, boolean qualityEnabled,
             TextSmutConfig text, boolean semanticText, boolean exactText, ProtectionScope protectionScope) {
+        start(token, detector, qualityEnabled, text, semanticText, exactText, protectionScope, -1);
+    }
+
+    public void start(long token, DetectorConfig detector, boolean qualityEnabled,
+            TextSmutConfig text, boolean semanticText, boolean exactText, ProtectionScope protectionScope, int windowId) {
         onMain();
         if (closed || active) throw new IllegalStateException("host cannot start");
         requireTextSource(detector, text);
         this.protectionScope = Objects.requireNonNull(protectionScope);
         Configuration selected = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
+        Configuration previous = configuration; long previousEpoch = engine.currentEpoch();
         configuration = selected;
+        retireNativeReader(previous, previousEpoch);
         controls();
         if (closed || configuration != selected) return;
         active = true;
         initializeFast(selected);
         if (closed || !active || configuration != selected) return;
-        engine.start(token, protectionScope);
+        engine.start(token, protectionScope, windowId);
     }
 
     /** Same owner survives reconfiguration and waits for old callbacks/running native jobs. */
@@ -214,19 +227,26 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     /** One owner transition for both geometry/settings and provenance. Nested observer changes win. */
     public void changeScope(long token, DetectorConfig detector, boolean qualityEnabled,
             TextSmutConfig text, boolean semanticText, boolean exactText, ProtectionScope scope) {
+        changeScope(token, detector, qualityEnabled, text, semanticText, exactText, scope, -1);
+    }
+
+    public void changeScope(long token, DetectorConfig detector, boolean qualityEnabled,
+            TextSmutConfig text, boolean semanticText, boolean exactText, ProtectionScope scope, int windowId) {
         onMain(); if (closed) return;
         if (configuration != null && configuration.token == token) {
             throw new IllegalArgumentException("scope/config token must change");
         }
         requireTextSource(detector, text);
         Configuration selected = new Configuration(token, detector, qualityEnabled, text, semanticText, exactText);
+        Configuration previous = configuration; long previousEpoch = engine.currentEpoch();
         protectionScope = Objects.requireNonNull(scope);
         configuration = selected;
         // Queue readiness before this transition can schedule a new capture/pixel job. The
         // serial lane still waits for any executing old inference before touching its context.
         if (active) initializeFast(selected);
         // Fence old jobs before admitting new settings or changing provider concurrency.
-        engine.changeScope(token, scope);
+        engine.changeScope(token, scope, windowId);
+        retireNativeReader(previous, previousEpoch);
         if (!closed && configuration == selected) controls();
     }
 
@@ -234,21 +254,34 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     public void changeProtectionScope(ProtectionScope scope) {
         onMain(); Objects.requireNonNull(scope);
         if (closed || protectionScope.equals(scope)) return;
+        Configuration previous = configuration; long previousEpoch = engine.currentEpoch();
         protectionScope = scope;
         if (configuration != null) engine.changeScope(configuration.token, scope);
+        retireNativeReader(previous, previousEpoch);
     }
 
     /** Called by the appearance controller, never as a side effect of View.onDraw. */
     public void canvasSamplingControls(boolean enabled) { onMain(); engine.canvasSamplingControls(enabled); }
 
-    public void stop() { onMain(); if (closed) return; active = false; engine.stop(); }
-    @Override public void close() { onMain(); if (closed) return; closed = true; active = false; engine.close(); }
+    public void stop() {
+        onMain(); if (closed) return;
+        Configuration previous = configuration; long previousEpoch = engine.currentEpoch();
+        active = false; engine.stop(); retireNativeReader(previous, previousEpoch);
+    }
+    @Override public void close() {
+        onMain(); if (closed) return;
+        Configuration previous = configuration; long previousEpoch = engine.currentEpoch();
+        closed = true; active = false; engine.close(); retireNativeReader(previous, previousEpoch);
+    }
 
     public long epoch() { return engine.currentEpoch(); }
+    /** Passive diagnostic loss inventory; it never schedules or renews evidence. */
+    public long nativeCostDiagnosticFailures() { return engine.nativeCostDiagnosticFailures(); }
     public boolean captureInFlight() { return engine.captureInFlight(); }
     public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return engine.acquireRenderView(); }
     public CensorEngine.ActiveScope activeScope() { return engine.activeScope(); }
     public boolean isCurrent(CensorEngine.ActiveScope scope) { return engine.isCurrent(scope); }
+    public boolean evidenceCurrent(CensorEngine.EvidenceReceipt receipt) { return engine.evidenceCurrent(receipt); }
     public CensorEngine.ViewportCoverage viewportCoverage() { return engine.viewportCoverage(); }
     public boolean coverageCurrent(CensorEngine.ViewportCoverage receipt) { return engine.coverageCurrent(receipt); }
     public boolean observationCurrent(CensorEngine.EvidenceReceipt observation, CensorEngine.ViewportCoverage coverage) {
@@ -266,12 +299,20 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     }
     public boolean motion(SceneEngine.Motion motion) { return engine.motion(motion); }
     public boolean motion(SceneEngine.MotionPair pair) { return engine.motion(pair); }
+    public com.subhub.app.censor.engine.ScrollMotionLedger.Scope scrollScope() { return engine.scrollScope(); }
+    public void observeScroll(com.subhub.app.censor.engine.ScrollMotionLedger.Sample sample, boolean missingLookup) {
+        engine.observeScroll(sample, missingLookup);
+    }
+    public void platformResourceFailure() { engine.nativeResourceFailure(); }
     public boolean presentationEstimate(com.subhub.app.censor.engine.ImagePresentationEstimate estimate) {
         return engine.presentationEstimate(estimate);
     }
     public void requestCapture() { onMain(); engine.requestCaptureAt(SystemClock.uptimeMillis()); }
     public void requestNativeText(boolean contentChanged) {
         onMain(); engine.requestNativeTextAt(SystemClock.uptimeMillis(), contentChanged);
+    }
+    public void requestNativeText(CensorEngine.NativeTextChange change) {
+        onMain(); engine.requestNativeTextAt(SystemClock.uptimeMillis(), change);
     }
     public void drawn(long revision) { engine.drawn(revision); }
 
@@ -301,12 +342,38 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         Configuration value = configuration;
         if (input.cancelled() || closed || value == null || value.text == null || !value.text.isEnabled()
                 || input.geometry != value.token) { completion.cancelled(); return; }
-        if (textReaderConfiguration != value) {
+        if (textReaderConfiguration != value || textReaderEpoch != input.epoch) {
+            try { if (textReader != null) textReader.close(); }
+            catch (RuntimeException | Error failure) { disposalFailed.set(true); completion.resourceFailure(); return; }
             textReader = new NativeTextReader(textProvider, new SmutTextClassifier(context), value.text,
                     value.semanticText, value.exactText, nativeReads, NATIVE_CONFIRMATION_MILLIS);
             textReaderConfiguration = value;
+            textReaderEpoch = input.epoch;
         }
         textReader.start(input, completion);
+    }
+
+    private void retireNativeReader(Configuration previous, long epoch) {
+        if (nativeReads == null || previous == null || disposing.get()) return;
+        try {
+            nativeReads.execute(() -> {
+                if (!nativeReaderRetirementMatches(textReaderConfiguration, textReaderEpoch, previous, epoch)) return;
+                NativeTextReader retired = textReader; textReader = null; textReaderConfiguration = null;
+                try { if (retired != null) retired.close(); }
+                catch (RuntimeException | Error failure) {
+                    disposalFailed.set(true); engine.nativeResourceFailure();
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException failure) {
+            if (!disposing.get()) { disposalFailed.set(true); engine.nativeResourceFailure(); }
+        }
+    }
+
+    /** Independent engine invalidation may advance the fence beyond a retained reader's epoch. */
+    static boolean nativeReaderRetirementMatches(Object ownedConfiguration, long ownedEpoch,
+            Object previousConfiguration, long fenceEpoch) {
+        return ownedConfiguration != null && ownedConfiguration == previousConfiguration
+                && ownedEpoch > 0 && ownedEpoch <= fenceEpoch;
     }
 
     /** Pixel-free readiness overlaps acquisition, without moving context ownership off its lane. */
@@ -542,7 +609,14 @@ public final class AccessibilityCensorHost implements AutoCloseable {
     private void disposeAfterDrain() {
         if (!disposing.compareAndSet(false, true)) return;
         callbacks.shutdown();
-        if (nativeReads != null) { nativeReads.shutdown(); textReader = null; textReaderConfiguration = null; }
+        if (nativeReads != null) {
+            nativeReads.execute(() -> {
+                try { if (textReader != null) textReader.close(); }
+                catch (RuntimeException | Error failure) { disposalFailed.set(true); }
+                finally { textReader = null; textReaderConfiguration = null; }
+            });
+            nativeReads.shutdown();
+        }
         AtomicInteger remaining = new AtomicInteger(3);
         Runnable done = () -> { if (remaining.decrementAndGet() == 0) post(this::awaitExecutorTermination); };
         fast.dispose(done); quality.dispose(done); imageText.dispose(done);

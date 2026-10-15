@@ -7,12 +7,14 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.WindowManager;
+import android.view.accessibility.AccessibilityEvent;
 
 import androidx.annotation.RequiresApi;
 
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.SceneEngine;
+import com.subhub.app.censor.engine.ScrollMotionLedger;
 import com.subhub.app.detection.DetectorConfig;
 import com.subhub.app.detection.text.NativeTextReader;
 import com.subhub.app.detection.text.TextSmutConfig;
@@ -88,9 +90,14 @@ public final class AccessibilityCensorController implements AutoCloseable {
     private final WindowManager manager;
     private final Observer observer;
     private final AccessibilityCensorHost host;
+    private final AccessibilityScrollReader scrollReader;
     private final SnapshotCensorSurface surface;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable nativeReadSelected;
+    interface NativeBoundaryControl {
+        void beforeCheck(CensorEngine.NativeTextInput input, NativeTextReader.Boundary boundary);
+    }
+    private final NativeBoundaryControl nativeBoundaryControl;
     private final AtomicLong contentGeneration = new AtomicLong();
     private volatile Configuration configuration;
     private volatile Transition transition;
@@ -124,8 +131,16 @@ public final class AccessibilityCensorController implements AutoCloseable {
     AccessibilityCensorController(AccessibilityService service, SceneEngine.Policy scenePolicy,
             CensorTapTracker taps, Observer observer, AccessibilityCensorHost.WorkerFactory models,
             Runnable rootAcquired, Runnable nativeReadSelected) {
+        this(service, scenePolicy, taps, observer, models, rootAcquired, nativeReadSelected, (input, boundary) -> { });
+    }
+
+    /** Held adverse boundaries keep the real provider, window checks and serial read owner. */
+    AccessibilityCensorController(AccessibilityService service, SceneEngine.Policy scenePolicy,
+            CensorTapTracker taps, Observer observer, AccessibilityCensorHost.WorkerFactory models,
+            Runnable rootAcquired, Runnable nativeReadSelected, NativeBoundaryControl nativeBoundaryControl) {
         onMain(); Objects.requireNonNull(service); this.observer = Objects.requireNonNull(observer);
         this.nativeReadSelected = Objects.requireNonNull(nativeReadSelected);
+        this.nativeBoundaryControl = Objects.requireNonNull(nativeBoundaryControl);
         windows = new AccessibilityWindowReader(service, rootAcquired);
         manager = Objects.requireNonNull(service.getSystemService(WindowManager.class));
         AccessibilityCensorHost.Observer bridge = new AccessibilityCensorHost.Observer() {
@@ -134,6 +149,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
             }
             @Override public void failed(long request, int code) { observer.failed(request, code); }
             @Override public void trace(CensorEngine.Trace trace) { observer.trace(trace); }
+            @Override public void scrollReceived(ScrollMotionLedger.Receipt receipt) { observer.scrollReceived(receipt); }
             @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) {
                 if (current(transition)) observer.providerReady(lane, provider, millis);
             }
@@ -147,6 +163,10 @@ public final class AccessibilityCensorController implements AutoCloseable {
             @Override public void nativeTextAccepted(com.subhub.app.censor.engine.NativeTextFrame frame) {
                 if (sourceCurrent(frame.source.epoch, frame.source.geometry)) observer.nativeTextAccepted(frame);
             }
+            @Override public void nativeReadCost(com.subhub.app.censor.engine.NativeReadCost value) {
+                observer.nativeReadCost(value); // Stale/cancelled reader work is still a real cost, not evidence.
+            }
+            @Override public void nativeReadCostStarted(com.subhub.app.censor.engine.NativeReadCost.Start value) { observer.nativeReadCostStarted(value); }
             @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) {
                 if (paintEligible(receipt.scope)) observer.evidenceAccepted(receipt);
             }
@@ -181,6 +201,14 @@ public final class AccessibilityCensorController implements AutoCloseable {
             @Override public void posted(SnapshotCensorSurface.Post receipt) { observer.posted(receipt); }
         });
         surface.presentationAllowed(false);
+        scrollReader = Build.VERSION.SDK_INT < 33 ? null : new AccessibilityScrollReader(this::scrollCurrent,
+                new AccessibilityScrollReader.Observer() {
+                    @Override public void observed(ScrollMotionLedger.Sample sample) { host.observeScroll(sample, false); }
+                    @Override public void gap(ScrollMotionLedger.Sample sample) { host.observeScroll(sample, true); }
+                    @Override public void resourceFailure() {
+                        resourceFailed = true; host.platformResourceFailure(); observer.resourceFailure();
+                    }
+                });
     }
 
     /** Source selection is observed off-main through this same platform reader. */
@@ -201,6 +229,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
         Transition next = new Transition(selected);
         appearanceGeneration++;
         transition = next; configuration = selected; active = true; contentGeneration.incrementAndGet();
+        if (Build.VERSION.SDK_INT >= 33 && scrollReader != null) scrollReader.invalidate();
         try {
             surface.presentationAllowed(false);
             if (!current(next)) return;
@@ -212,9 +241,9 @@ public final class AccessibilityCensorController implements AutoCloseable {
             if (!current(next)) return;
             if (host.activeScope() != null) {
                 host.changeScope(selected.token, selected.detector, selected.quality, selected.text,
-                        selected.semanticText, selected.exactText, selected.protection);
+                        selected.semanticText, selected.exactText, selected.protection, selected.window.id);
             } else host.start(selected.token, selected.detector, selected.quality, selected.text,
-                    selected.semanticText, selected.exactText, selected.protection);
+                    selected.semanticText, selected.exactText, selected.protection, selected.window.id);
             // Actual capture/native lookup, not this stale descriptor, qualifies presentation.
             if (!current(next)) return;
         } catch (RuntimeException | Error failure) {
@@ -225,9 +254,13 @@ public final class AccessibilityCensorController implements AutoCloseable {
 
     /** Native content is fenced without pretending it is a new screenshot or image camera pose. */
     public void contentChanged(int windowId) {
+        contentChanged(windowId, true);
+    }
+    public void contentChanged(int windowId, boolean hard) {
         onMain(); Configuration value = configuration;
         if (!closed && active && value != null && value.window.id == windowId) {
-            contentGeneration.incrementAndGet(); host.requestNativeText(true);
+            contentGeneration.incrementAndGet();
+            host.requestNativeText(hard ? CensorEngine.NativeTextChange.HARD_CONTENT : CensorEngine.NativeTextChange.TREE_DIRTY);
         }
     }
 
@@ -250,6 +283,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
     public void stop() {
         onMain(); if (closed) return;
         active = false; configuration = null; transition = null; contentGeneration.incrementAndGet();
+        if (Build.VERSION.SDK_INT >= 33 && scrollReader != null) scrollReader.invalidate();
         appearanceGeneration++;
         surface.presentationAllowed(false);
         if (!active && transition == null) host.stop();
@@ -259,6 +293,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
         onMain(); if (closed) return; closed = true; active = false; configuration = null; transition = null;
         appearanceGeneration++;
         contentGeneration.incrementAndGet();
+        if (Build.VERSION.SDK_INT >= 33 && scrollReader != null) scrollReader.close();
         windows.close();
         try { host.close(); }
         finally {
@@ -275,6 +310,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
     /** Closure of the owner, its executor resources and the actual Surface are separate facts. */
     public boolean managedResourcesDrained() {
         return closed && ownerDrained && executorsTerminated && disposalSucceeded && !resourceFailed
+                && (Build.VERSION.SDK_INT < 33 || scrollReader == null || scrollReader.managedResourcesDrained())
                 && windows.managedResourcesDrained() && !attached && surface.managedResourcesDrained();
     }
 
@@ -310,8 +346,26 @@ public final class AccessibilityCensorController implements AutoCloseable {
     }
     public void scrolled(int windowId) {
         onMain(); Configuration value = configuration;
-        if (!closed && active && value != null && value.window.id == windowId)
+        if (!closed && active && value != null && value.window.id == windowId) {
             host.discardDwellObservations(host.activeScope());
+            // Scroll requests fresh node geometry without cancelling unchanged-content confirmation.
+            // Literal content/provider checks still fence every full read before and after geometry.
+            host.requestNativeText(false);
+        }
+    }
+    public void scrolled(AccessibilityEvent event) {
+        onMain(); Objects.requireNonNull(event); scrolled(event.getWindowId());
+        Configuration value = configuration;
+        ScrollMotionLedger.Scope scope = host.scrollScope();
+        if (Build.VERSION.SDK_INT >= 33 && scrollReader != null && value != null && scrollCurrent(scope)) {
+            scrollReader.offer(event, scope, value.window.packageName);
+        }
+    }
+    private boolean scrollCurrent(ScrollMotionLedger.Scope scope) {
+        Transition selected = transition;
+        return current(selected) && scope != null && scope.epoch == host.epoch()
+                && scope.geometry == selected.configuration.token && scope.windowId == selected.configuration.window.id
+                && scope.protection.equals(selected.configuration.protection);
     }
     public boolean dwellPresent(WindowCoverage coverage, CensorEngine.EvidenceReceipt observation) {
         if (!observationCurrent(coverage, observation)) return false;
@@ -325,7 +379,9 @@ public final class AccessibilityCensorController implements AutoCloseable {
         return receipt.canvas == null || (receipt.canvas.width == window.displayWidth
                 && receipt.canvas.height == window.displayHeight);
     }
-    boolean evidenceCurrent(CensorEngine.EvidenceReceipt receipt) { return receipt != null && paintEligible(receipt.scope); }
+    boolean evidenceCurrent(CensorEngine.EvidenceReceipt receipt) {
+        return receipt != null && paintEligible(receipt.scope) && host.evidenceCurrent(receipt);
+    }
     CensorEngine.EvidenceClaim claimEvidence(CensorEngine.EvidenceReceipt receipt, Object consumerScope) {
         return evidenceCurrent(receipt) ? host.claimEvidence(receipt, consumerScope) : null;
     }
@@ -390,6 +446,21 @@ public final class AccessibilityCensorController implements AutoCloseable {
     }
 
     private final class NativeProvider implements NativeTextReader.Provider {
+        @Override public boolean addressRefreshSupported() { return true; }
+        @Override public NativeTextReader.Scope openScope(CensorEngine.NativeTextInput input) {
+            Transition selected = transition;
+            Configuration value = selected == null ? null : selected.configuration;
+            if (!eligible(input, selected)) return null;
+            nativeReadSelected.run();
+            boolean actual;
+            try { actual = eligible(input, selected) && windows.current(value.window); }
+            catch (RuntimeException | Error failure) { invalidate(selected); throw failure; }
+            if (!actual) { invalidate(selected); return null; }
+            if (!eligible(input, selected)) return null;
+            qualify(selected);
+            return new NativeTextReader.Scope(value.window.displayWidth, value.window.displayHeight,
+                    value.window.id, value.window.packageName, contentGeneration.get());
+        }
         @Override public NativeTextReader.Tree open(CensorEngine.NativeTextInput input) {
             Transition selected = transition;
             Configuration value = selected == null ? null : selected.configuration; long generation = contentGeneration.get();
@@ -401,26 +472,41 @@ public final class AccessibilityCensorController implements AutoCloseable {
             if (tree == null) { invalidate(selected); return null; }
             boolean transferred = false;
             try {
-                if (!eligible(input, selected) || generation != contentGeneration.get()) return null;
+                if (!eligible(input, selected)) return null;
                 qualify(selected);
                 transferred = true; return tree;
             } finally { if (!transferred) windows.release(tree); }
         }
         @Override public boolean current(CensorEngine.NativeTextInput input, NativeTextReader.Tree tree) {
+            return current(input, (NativeTextReader.Scope) tree, NativeTextReader.Boundary.RESULT_END);
+        }
+        @Override public boolean current(CensorEngine.NativeTextInput input, NativeTextReader.Tree tree, NativeTextReader.Boundary boundary) {
+            return current(input, (NativeTextReader.Scope) tree, boundary);
+        }
+        @Override public boolean current(CensorEngine.NativeTextInput input, NativeTextReader.Scope tree, NativeTextReader.Boundary boundary) {
+            nativeBoundaryControl.beforeCheck(input, boundary);
             Transition selected = transition;
             Configuration value = selected == null ? null : selected.configuration;
             if (!eligible(input, selected)) return false;
-            boolean matches = tree.windowId == value.window.id
-                    && tree.packageName.equals(value.window.packageName)
-                    && tree.width == value.window.displayWidth && tree.height == value.window.displayHeight
-                    && tree.contentGeneration == contentGeneration.get();
-            if (!matches) return false;
+            if (!matches(tree, value)) return false;
             boolean actual;
             try { actual = windows.current(value.window); }
             catch (RuntimeException | Error failure) { invalidate(selected); throw failure; }
             if (!actual) invalidate(selected);
-            return actual
-                    && eligible(input, selected) && tree.contentGeneration == contentGeneration.get();
+            return actual && eligible(input, selected);
+        }
+        @Override public boolean locallyCurrent(CensorEngine.NativeTextInput input, NativeTextReader.Tree tree) {
+            return locallyCurrent(input, (NativeTextReader.Scope) tree);
+        }
+        @Override public boolean locallyCurrent(CensorEngine.NativeTextInput input, NativeTextReader.Scope tree) {
+            nativeBoundaryControl.beforeCheck(input, NativeTextReader.Boundary.TRAVERSAL);
+            Transition selected = transition;
+            Configuration value = selected == null ? null : selected.configuration;
+            return eligible(input, selected) && matches(tree, value) && eligible(input, selected);
+        }
+        private boolean matches(NativeTextReader.Scope tree, Configuration value) {
+            return tree.windowId == value.window.id && tree.packageName.equals(value.window.packageName)
+                    && tree.width == value.window.displayWidth && tree.height == value.window.displayHeight;
         }
         private boolean eligible(CensorEngine.NativeTextInput input, Transition selected) {
             Configuration value = selected == null ? null : selected.configuration;

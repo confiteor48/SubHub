@@ -181,6 +181,65 @@ public class SceneEvidenceTest {
         assertNull(scene.consumeEvidence(subject.source, Collections.singletonList(subject), 600));
     }
 
+    @Test public void separateNodeObservationsPreserveOnlyCompletedHistoryAndTheirOwnValidationAges() {
+        SceneEngine scene = scene(100);
+        String secondNode = String.join("", Collections.nCopies(64, "c"));
+        NativeTextFrame prior = null;
+        for (int i = 0; i < 3; i++) {
+            long start = i * 300L;
+            prior = accountingFrame(i + 1, i + 1, start, start + 90, 0,
+                    accountingCandidate(NODE, start + 65), accountingCandidate(secondNode, start + 65));
+            assertTrue(scene.admitNativeFrame(prior));
+        }
+        List<SceneEngine.AcceptedSubject> before = scene.acceptedSubjects(prior.source, 700);
+        assertEquals(2, before.size()); assertEquals(3, before.get(0).witnesses.size());
+        NativeTextFrame first = accountingFrame(4, 4, 900, 970, 1, accountingCandidate(NODE, 965));
+        assertTrue(scene.admitNativeFrame(first));
+        SceneEngine.AcceptedSubject a = scene.acceptedSubjects(first.source, 980).get(0);
+        assertTrue(a.witnesses.isEmpty()); assertFalse(a.confirmedForConsumption); assertEquals(1965, a.validUntilMillis);
+        assertFalse(scene.hasNativeTextCoverage(2, 980));
+        SceneEngine.Snapshot intermediate = scene.snapshot(4, 980, false);
+        assertEquals(2, intermediate.groups.size());
+        for (SceneEngine.Group group : intermediate.groups) {
+            SceneEngine.Mask mask = group.members.get(0);
+            if (mask.evidenceSource == first.source) assertFalse(mask.dwellPositive);
+            else assertSame(prior.source, mask.evidenceSource);
+        }
+        NativeTextFrame second = accountingFrame(5, 4, 900, 1600, 2, accountingCandidate(secondNode, 1595));
+        assertTrue(scene.admitNativeFrame(second));
+        assertTrue(scene.acceptedSubjects(second.source, 1610).get(0).witnesses.isEmpty());
+        NativeTextFrame complete = accountingFrame(6, 4, 900, 1700, 0,
+                first.read.candidates.get(0), second.read.candidates.get(0));
+        assertTrue(scene.admitNativeFrame(complete));
+        List<SceneEngine.AcceptedSubject> after = scene.acceptedSubjects(complete.source, 1710);
+        assertEquals(2, after.size());
+        for (SceneEngine.AcceptedSubject subject : after) {
+            assertEquals(4, subject.witnesses.size()); assertEquals(4, subject.witnesses.get(3).producerIdentity);
+            assertEquals(complete.source.sequence, subject.witnesses.get(3).sourceSequence);
+            assertEquals(subject.region.left == 100 ? 1965 : 2595, subject.validUntilMillis);
+            assertEquals(subject.region.left == 100 ? before.get(0).identity : before.get(1).identity, subject.identity);
+            assertFalse(subject.confirmedForConsumption);
+        }
+        assertEquals(1966, scene.snapshot(6, 1710, false).nextChangeAtMillis);
+        assertEquals(1, scene.snapshot(6, 1966, false).groups.size());
+    }
+
+    private static NativeTextResult.Candidate accountingCandidate(String node, long validated) {
+        SceneEngine.Region region = node.equals(NODE) ? REGION : new SceneEngine.Region(400, 100, 500, 200);
+        return new NativeTextResult.Candidate("TEXT", CONTENT, node, .9f, true, Collections.singletonList(region),
+                NativeTextResult.TextSource.TEXT, 0, 4, 4, validated);
+    }
+    private static NativeTextFrame accountingFrame(long sequence, long request, long start, long end, int ordinal,
+            NativeTextResult.Candidate... candidates) {
+        NativeTextResult read = new NativeTextResult(1000, 2000, 7, start, end, Arrays.asList(candidates),
+                candidates.length, candidates.length, candidates.length,
+                ordinal > 0 ? NativeTextResult.Coverage.POSITIVE_NODES_ONLY : NativeTextResult.Coverage.COMPLETE_TREE,
+                1, 1, 1, start + 10, start + 58);
+        SceneEngine.Source source = SceneEngine.Source.nativeText(1, sequence, 42, 1000, 2000, 7, start, end, end + 10,
+                ProtectionScope.normal(7));
+        return new NativeTextFrame(source, 2, read, 1000, request, start, start, ordinal);
+    }
+
     @Test public void repeatedNativeProducerAndUnknownReadLineageCannotConfirm() {
         SceneEngine scene = scene(100); SceneEngine.Source source = null;
         for (int i = 1; i <= 5; i++) {

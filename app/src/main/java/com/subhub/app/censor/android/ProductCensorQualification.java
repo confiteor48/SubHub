@@ -21,6 +21,11 @@ public final class ProductCensorQualification {
     public static final String CANDIDATE_SELECTION = "candidate_selected";
     private static volatile AccessibilityCensorHost.WorkerFactory fixtureModels;
     private static volatile Runnable fixtureSelectionObserved = () -> { };
+    private static volatile Runnable fixtureNativeReadSelected = () -> { };
+    public interface FixtureInputObserver {
+        void boundary(int type, int contentTypes, int windowId, long sourceAt, long receivedAt, String route, boolean completed);
+    }
+    private static volatile FixtureInputObserver fixtureInputObserver;
     private static volatile CensorProductSession.Observer fixtureObserver;
     private static volatile Function<Context, StatsRepository> fixtureStatistics = StatsRepository::new;
     private static volatile Function<Context, PenanceManager> fixturePenance = PenanceManager::new;
@@ -60,6 +65,15 @@ public final class ProductCensorQualification {
         fixtureModels = models;
     }
     static void fixtureSelectionObserved(Runnable action) { requireInactive(); fixtureSelectionObserved = java.util.Objects.requireNonNull(action); }
+    static void fixtureNativeReadSelected(Runnable action) { requireInactive(); fixtureNativeReadSelected = java.util.Objects.requireNonNull(action); }
+    static void fixtureInputObserver(FixtureInputObserver observer) { requireInactive(); fixtureInputObserver = observer; }
+    /** Primitive, synchronous diagnostic boundary available only to installed owned-emulator fixtures. */
+    public static void observeFixtureInput(CensorProductSession selected, int type, int contentTypes, int windowId,
+            long sourceAt, long receivedAt, String route, boolean completed) {
+        FixtureInputObserver probe = fixtureInputObserver;
+        if (probe != null && supported() && current == selected)
+            probe.boundary(type, contentTypes, windowId, sourceAt, receivedAt, route, completed);
+    }
     static void fixtureObserver(CensorProductSession.Observer observer) { requireInactive(); fixtureObserver = observer; }
     static void fixtureStatistics(Function<Context, StatsRepository> factory) {
         requireInactive(); fixtureStatistics = java.util.Objects.requireNonNull(factory);
@@ -94,6 +108,9 @@ public final class ProductCensorQualification {
             @Override public void presentationChanged() { observer.presentationChanged(); probe.presentationChanged(); }
             @Override public void batchAccepted(SceneEngine.Batch batch) { observer.batchAccepted(batch); probe.batchAccepted(batch); }
             @Override public void nativeTextAccepted(NativeTextFrame frame) { observer.nativeTextAccepted(frame); probe.nativeTextAccepted(frame); }
+            @Override public void nativeReadCost(com.subhub.app.censor.engine.NativeReadCost value) { observer.nativeReadCost(value); probe.nativeReadCost(value); }
+            @Override public void nativeReadCostStarted(com.subhub.app.censor.engine.NativeReadCost.Start value) { observer.nativeReadCostStarted(value); probe.nativeReadCostStarted(value); }
+            @Override public void scrollReceived(com.subhub.app.censor.engine.ScrollMotionLedger.Receipt receipt) { observer.scrollReceived(receipt); probe.scrollReceived(receipt); }
             @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { observer.evidenceAccepted(receipt); probe.evidenceAccepted(receipt); }
             @Override public void painted(CensorEngine.PaintReceipt receipt) { observer.painted(receipt); probe.painted(receipt); }
             @Override public void posted(SnapshotCensorSurface.Post receipt) { observer.posted(receipt); probe.posted(receipt); }
@@ -104,7 +121,8 @@ public final class ProductCensorQualification {
             @Override public void executorsTerminated(boolean disposed) { observer.executorsTerminated(disposed); probe.executorsTerminated(disposed); }
         };
         current = new CensorProductSession(service, policy, taps, delivery,
-                models == null ? VisualDetectorWorker::initialize : models, fixtureSelectionObserved, fixtureStatistics, fixturePenance);
+                models == null ? VisualDetectorWorker::initialize : models, fixtureSelectionObserved, fixtureStatistics, fixturePenance,
+                fixtureNativeReadSelected);
         return current;
     }
     public static CensorProductSession current() { return current; }

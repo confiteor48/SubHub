@@ -22,6 +22,135 @@ public class CensorEngineTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(3, 10, 2);
     private static final SceneEngine.Region SUPPORT = new SceneEngine.Region(-10000, -10000, 10000, 10000);
 
+    private static ScrollMotionLedger.Sample scroll(Harness h, long delivery, long at, long y) {
+        return new ScrollMotionLedger.Sample(h.engine.scrollScope(), delivery, 10, 1, at, at + 1, at + 2, at + 3,
+                ScrollMotionLedger.Coordinate.absolute(0), ScrollMotionLedger.Coordinate.absolute(y), SUPPORT);
+    }
+
+    @Test public void callbackBeforeGapCannotUseItsReceiptAsLaterAdministrativeAdmissionCutoff() {
+        Harness h = new Harness(); Pixel pixel = new Pixel(1);
+        h.behavior = (request, callback) -> {
+            assertTrue(request.tryDispatch()); h.now = 100; callback.success(pixel.payload());
+            assertTrue(h.fast.calls.isEmpty());
+            h.now = 154;
+            h.engine.observeScroll(new ScrollMotionLedger.Sample(h.engine.scrollScope(), 1, 0, 0, 150, 151, -1, -1,
+                    ScrollMotionLedger.Coordinate.unknown(), ScrollMotionLedger.Coordinate.unknown(), null), true);
+            h.now = 164; h.engine.observeScroll(scroll(h, 2, 160, 0), false);
+            h.now = 184; h.engine.observeScroll(scroll(h, 3, 180, 100), false);
+            h.now = 200; // Actual capture API return, not the earlier callback receipt or a pixel clock.
+        };
+        h.engine.start(42, ProtectionScope.UNSPECIFIED, 7); h.fire(0); h.fastExecutor.runOne();
+        SceneEngine.Source origin = h.fast.calls.get(0).input.source;
+        assertEquals(100, origin.receivedAtMillis); assertEquals(-1, origin.pixelAtMillis);
+        assertEquals(200, h.engine.scrollContinuation(origin, 10, 1).originAdmittedAtMillis);
+        assertFalse("Pre-admission intervals cannot be a post-admission continuation",
+                h.engine.scrollContinuation(origin, 10, 1).y.available);
+        h.now = 224; h.engine.observeScroll(scroll(h, 4, 220, 200), false);
+        assertFalse("Crossing the actual admission cutoff is not split or interpolated",
+                h.engine.scrollContinuation(origin, 10, 1).y.available);
+        h.now = 244; h.engine.observeScroll(scroll(h, 5, 240, 300), false);
+        ScrollMotionLedger.Continuation tail = h.engine.scrollContinuation(origin, 10, 1);
+        assertEquals(100, tail.y.displacement()); assertEquals(1, tail.omittedStraddlingIntervals);
+        assertFalse(tail.originPixelPhaseKnown); assertFalse(tail.initialBiasKnown);
+        h.engine.close(); h.fast.calls.get(0).completion.cancelled(); h.ui.runAll(); assertEquals(1, pixel.closes);
+    }
+
+    @Test public void refusedOptionalScrollOriginCannotStrandCapturedPixelsOrTheScenePin() {
+        Harness h = new Harness(); Pixel pixel = new Pixel(1);
+        h.behavior = (request, callback) -> {
+            assertTrue(request.tryDispatch()); h.now = 100; callback.success(pixel.payload());
+            h.now = 99; // Adverse clock input: ledger must refuse, never retime receipt to make it valid.
+        };
+        h.engine.start(42, ProtectionScope.UNSPECIFIED, 7); h.fire(0);
+        h.now = 101; h.fastExecutor.runOne(); SceneEngine.Source source = h.fast.calls.get(0).input.source;
+        assertEquals(100, source.receivedAtMillis);
+        assertEquals(ScrollMotionLedger.Refusal.SOURCE, h.engine.scrollContinuation(source, 10, 1).refusal);
+        h.fast.succeed(0, face(500)); h.ui.runAll();
+        assertEquals(1, h.evidence.size()); assertEquals(500, h.engine.viewportCoverage().regions.get(0).displayRegion.top, 0);
+        h.engine.close(); h.ui.runAll(); assertEquals(1, pixel.closes); assertEquals(1, h.drained);
+    }
+
+    @Test public void actualCaptureRegistersScrollOriginWithoutChangingFirstFastGeometryEvidenceOrExpiry() {
+        Harness h = new Harness(); h.engine.start(42, ProtectionScope.UNSPECIFIED, 7); h.fire(0);
+        Pixel pixel = h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        SceneEngine.Source origin = h.fast.calls.get(0).input.source;
+        CensorEngine.EvidenceReceipt evidence = h.evidence.get(0); CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        long beforeExpiry, beforeRevision;
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            beforeExpiry = view.snapshot.nextChangeAtMillis; beforeRevision = view.snapshot.revision;
+        }
+        h.now = 14; h.engine.observeScroll(scroll(h, 1, 10, 0), false);
+        h.now = 24; h.engine.observeScroll(scroll(h, 2, 20, 100), false);
+        ScrollMotionLedger.Continuation continuation = h.engine.scrollContinuation(origin, 10, 1);
+        assertEquals(100, continuation.y.displacement()); assertSame(origin, continuation.origin);
+        assertEquals(0, origin.receivedAtMillis); assertEquals(-1, origin.pixelAtMillis);
+        assertFalse(continuation.memberApplicabilityKnown); assertFalse(continuation.initialBiasKnown);
+        assertEquals(2, h.scrolls.size()); assertSame(evidence, h.evidence.get(0)); assertEquals(1, h.evidence.size());
+        assertTrue(h.engine.coverageCurrent(coverage)); assertEquals(500, coverage.regions.get(0).displayRegion.top, 0);
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertEquals(beforeRevision, view.snapshot.revision); assertEquals(beforeExpiry, view.snapshot.nextChangeAtMillis);
+            assertEquals(500, view.snapshot.groups.get(0).members.get(0).displayRegion.top, 0);
+        }
+        assertEquals(1, h.captures.size()); h.engine.close(); h.ui.runAll(); assertEquals(1, pixel.closes);
+    }
+
+    @Test public void lateInferenceOriginsUseTheirOwnAdministrativeCutoffsNotLatestGlobalCamera() {
+        Harness h = new Harness(); h.engine.start(42, ProtectionScope.UNSPECIFIED, 7); h.fire(0);
+        Pixel first = h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        SceneEngine.Source old = h.fast.calls.get(0).input.source;
+        h.now = 14; h.engine.observeScroll(scroll(h, 1, 10, 0), false);
+        h.now = 24; h.engine.observeScroll(scroll(h, 2, 20, 100), false);
+        h.fire(334); Pixel second = h.deliver(1, 2); h.fastExecutor.runOne();
+        SceneEngine.Source recent = h.fast.calls.get(1).input.source;
+        h.now = 354; h.engine.observeScroll(scroll(h, 3, 350, 200), false);
+        h.now = 404; h.engine.observeScroll(scroll(h, 4, 400, 300), false);
+        assertEquals(300, h.engine.scrollContinuation(old, 10, 1).y.displacement());
+        ScrollMotionLedger.Continuation tail = h.engine.scrollContinuation(recent, 10, 1);
+        assertEquals(100, tail.y.displacement()); assertEquals(1, tail.omittedStraddlingIntervals);
+        assertEquals(334, recent.receivedAtMillis); assertFalse(tail.originPixelPhaseKnown);
+        h.engine.close(); h.fast.calls.get(1).completion.cancelled(); h.ui.runAll();
+        assertEquals(1, first.closes); assertEquals(1, second.closes);
+    }
+
+    @Test public void unknownLookupClocksRemainUnknownAndGapCannotRenewEvidenceOrContinueOldOrigin() {
+        Harness h = new Harness(); h.engine.start(42, ProtectionScope.UNSPECIFIED, 7); h.fire(0);
+        h.deliver(0, 1); h.fastExecutor.runOne(); h.fast.succeed(0, face(500)); h.ui.runAll();
+        SceneEngine.Source origin = h.fast.calls.get(0).input.source;
+        h.now = 14; h.engine.observeScroll(scroll(h, 1, 10, 0), false);
+        h.now = 24; h.engine.observeScroll(scroll(h, 2, 20, 100), false);
+        CensorEngine.ViewportCoverage coverage = h.engine.viewportCoverage();
+        ScrollMotionLedger.Sample missing = new ScrollMotionLedger.Sample(h.engine.scrollScope(), 3, 0, 0, 40, 41, -1, -1,
+                ScrollMotionLedger.Coordinate.unknown(), ScrollMotionLedger.Coordinate.unknown(), null);
+        h.now = 42; ScrollMotionLedger.Receipt receipt = h.engine.observeScroll(missing, true);
+        assertEquals(ScrollMotionLedger.Refusal.EXPLICIT_GAP, receipt.refusal);
+        assertEquals(-1, receipt.sample.readStartedAtMillis); assertEquals(-1, receipt.sample.readFinishedAtMillis);
+        h.now = 64; h.engine.observeScroll(scroll(h, 4, 60, 300), false);
+        assertEquals(ScrollMotionLedger.Refusal.EXPLICIT_GAP, h.engine.scrollContinuation(origin, 10, 1).refusal);
+        assertEquals(1, h.evidence.size()); assertTrue(h.engine.coverageCurrent(coverage));
+        h.engine.close(); h.ui.runAll();
+    }
+
+    @Test public void realWindowScopeReplacementRejectsOldInputWithoutGappingNewScope() {
+        Harness h = new Harness(); h.engine.start(42, ProtectionScope.UNSPECIFIED, 7); h.fire(0);
+        h.deliver(0, 1); h.fastExecutor.runOne(); SceneEngine.Source old = h.fast.calls.get(0).input.source;
+        ScrollMotionLedger.Sample packet = scroll(h, 1, 10, 0);
+        h.engine.changeScope(43, ProtectionScope.lab(99), 8);
+        assertEquals(8, h.engine.scrollScope().windowId); assertEquals(43, h.engine.scrollScope().geometry);
+        h.now = 14; ScrollMotionLedger.Receipt receipt = h.engine.observeScroll(packet, false);
+        assertEquals(ScrollMotionLedger.Admission.STALE, receipt.admission);
+        assertEquals(ScrollMotionLedger.Refusal.SCOPE, h.engine.scrollContinuation(old, 10, 1).refusal);
+        h.engine.close(); h.fast.calls.get(0).completion.cancelled(); h.ui.runAll();
+    }
+
+    @Test public void inactiveUnselectedAndClosedOwnerCannotAcquireScrollInputOrCreateSources() {
+        Harness h = new Harness(); assertNull(h.engine.scrollScope());
+        ScrollMotionLedger.Sample packet = new ScrollMotionLedger.Sample(new ScrollMotionLedger.Scope(0, 42, 7, ProtectionScope.UNSPECIFIED),
+                1, 10, 1, 0, 1, 2, 3, ScrollMotionLedger.Coordinate.delta(0), ScrollMotionLedger.Coordinate.delta(50), null);
+        assertNull(h.engine.observeScroll(packet, false)); assertTrue(h.scrolls.isEmpty()); assertTrue(h.captures.isEmpty());
+        h.engine.close(); h.ui.runAll(); assertNull(h.engine.observeScroll(packet, false)); assertNull(h.engine.scrollScope());
+        assertTrue(h.scrolls.isEmpty()); assertTrue(h.captures.isEmpty());
+    }
+
     @Test public void scrollRevokesOriginalObservationAuthorityWithoutChangingCoverageOrCountClaims() {
         Harness h = new Harness(true, false, false, 8, 2, 16); h.start(); h.fire(0); h.deliver(0, 1);
         h.fastExecutor.runOne(); h.fast.succeed(0, face(500));
@@ -1654,6 +1783,7 @@ public class CensorEngineTest {
         final List<CensorEngine.Trace> traces = Collections.synchronizedList(new ArrayList<>());
         final List<SceneEngine.Batch> accepted = new ArrayList<>();
         final List<CensorEngine.EvidenceReceipt> evidence = new ArrayList<>();
+        final List<ScrollMotionLedger.Receipt> scrolls = new ArrayList<>();
         java.util.function.Consumer<SceneEngine.Batch> acceptHook;
         BiConsumer<CensorEngine.CaptureRequest, CensorEngine.CaptureCallback<Pixel>> behavior;
         java.util.function.Consumer<CensorEngine.Trace> traceHook;
@@ -1679,6 +1809,9 @@ public class CensorEngineTest {
                             if (throwTrace) throw new IllegalStateException("test observer failure");
                             traces.add(trace);
                             if (traceHook != null) traceHook.accept(trace);
+                        }
+                        @Override public void scrollReceived(ScrollMotionLedger.Receipt receipt) {
+                            assertFalse("scroll callback owns runtime lock", Thread.holdsLock(engine)); scrolls.add(receipt);
                         }
                         @Override public void presentationChanged() { presentations++; }
                         @Override public void batchAccepted(SceneEngine.Batch batch) {
@@ -1712,7 +1845,7 @@ public class CensorEngineTest {
             void fire(long at) {
                 assertTrue(at >= now); assertTrue("timer not due", nextAt() <= at); now = at;
                 TimedTask task = tasks.stream().filter(t -> !t.cancelled && !t.ran && t.at <= at)
-                        .findFirst().orElseThrow(AssertionError::new);
+                        .min(java.util.Comparator.comparingLong(t -> t.at)).orElseThrow(AssertionError::new);
                 task.ran = true; task.action.run();
             }
         }

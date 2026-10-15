@@ -11,13 +11,13 @@ import java.util.function.Consumer;
 import java.util.function.BiConsumer;
 
 /** Bounded FIFO resource ownership across a blocking lookup and its asynchronous UI delivery. */
-final class SerialOwnedLookup<T> implements AutoCloseable {
-    enum Offer { ACCEPTED, FULL, CLOSED, EXECUTOR_REJECTED }
-    interface Lease {
+public final class SerialOwnedLookup<T> implements AutoCloseable {
+    public enum Offer { ACCEPTED, FULL, CLOSED, EXECUTOR_REJECTED }
+    public interface Lease {
         boolean isCurrent();
         void release();
     }
-    interface Processor<T> {
+    public interface Processor<T> {
         /** May transfer the lease to a UI callback; that callback must release it in finally. */
         void process(T resource, Lease lease);
     }
@@ -32,7 +32,7 @@ final class SerialOwnedLookup<T> implements AutoCloseable {
     private int outstanding;
     private boolean draining, closed;
 
-    SerialOwnedLookup(int capacity, Executor executor, Processor<T> processor,
+    public SerialOwnedLookup(int capacity, Executor executor, Processor<T> processor,
             Consumer<T> disposer, BiConsumer<T, RuntimeException> failure) {
         if (capacity < 1) throw new IllegalArgumentException("positive capacity required");
         this.capacity = capacity;
@@ -43,7 +43,7 @@ final class SerialOwnedLookup<T> implements AutoCloseable {
     }
 
     /** Always takes ownership, including on rejection. Never coalesces unknown-producer deltas. */
-    Offer offer(T resource) {
+    public Offer offer(T resource) {
         Objects.requireNonNull(resource);
         Offer result;
         List<Entry> abandoned = new ArrayList<>();
@@ -74,10 +74,10 @@ final class SerialOwnedLookup<T> implements AutoCloseable {
         return result;
     }
 
-    synchronized int outstanding() { return outstanding; }
+    public synchronized int outstanding() { return outstanding; }
 
     /** Queued resources close now; a blocking lookup or posted UI delivery closes on completion. */
-    void invalidate() {
+    public void invalidate() {
         List<Entry> abandoned;
         synchronized (this) {
             generation++;

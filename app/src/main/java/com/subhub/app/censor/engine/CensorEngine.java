@@ -24,6 +24,7 @@ import java.util.function.LongSupplier;
  * No platform, model, resource-cleanup or observer callback runs while the owner lock is held.
  */
 public final class CensorEngine<P> implements AutoCloseable {
+    public enum NativeTextChange { DEMAND, TREE_DIRTY, HARD_CONTENT }
     public interface Cancellation { void cancel(); }
     public interface Timer {
         /** Enqueue, never invoke inline. A cancelled runnable may still be delivered. */
@@ -58,12 +59,30 @@ public final class CensorEngine<P> implements AutoCloseable {
         void start(NativeTextInput input, NativeTextCompletion completion);
     }
     public interface NativeTextCompletion {
+        default void costStarted(NativeReadCost.Start value) { }
+        /** One immutable diagnostic before terminal completion; grants no scene or scheduling authority. */
+        default void cost(NativeReadCost value) { }
+        /** Whole-node positive evidence only; retains the parent job/root and grants no address lease. */
+        default boolean observe(int ordinal, NativeTextResult group) { return false; }
         void success(NativeTextResult read);
+        /**
+         * Explicit provider-address admission, not a live evidence/pose lease. Compatibility
+         * completions may publish but cannot authorize retained handles without an owner decision.
+         */
+        default NativeTextAdmission admit(NativeTextResult read) { success(read); return null; }
         void failure();
         void cancelled();
         void resourceFailure();
     }
+    public static final class NativeTextAdmission {
+        public final NativeTextFrame frame;
+        private final NativeTextInput input;
+        private NativeTextAdmission(NativeTextInput input, NativeTextFrame frame) { this.input = input; this.frame = frame; }
+        /** Exact caller and exact admitted record, not equality of reusable numeric tokens. */
+        public boolean matches(NativeTextInput selected, NativeTextResult read) { return input == selected && frame.read == read; }
+    }
     public static final class NativeTextLane {
+        /** Minimum admitted read-start spacing; failed/rejected attempts back off from termination. */
         public final long partition, minimumRefreshMillis, maximumAgeMillis;
         public final Executor executor;
         public final NativeTextWorker worker;
@@ -77,12 +96,17 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
     public interface Observer {
         default void trace(Trace trace) { }
+        /** Reported event coordinates only; this callback does not establish image-member motion. */
+        default void scrollReceived(ScrollMotionLedger.Receipt receipt) { }
         /** Renderer must acquire a read handle, not keep/mutate runtime scene state. */
         default void presentationChanged() { }
         /** Accepted source-local evidence, not a draw/vsync or failed/incomplete worker result. */
         default void batchAccepted(SceneEngine.Batch batch) { }
-        /** Complete typed native read; no image timing/ownership is implied by this callback. */
+        /** Typed native evidence; frame.observationOrdinal distinguishes nonterminal observations. */
         default void nativeTextAccepted(NativeTextFrame frame) { }
+        /** May be off-main and may describe cancelled/stale/refused work, never accepted evidence. */
+        default void nativeReadCost(NativeReadCost value) { }
+        default void nativeReadCostStarted(NativeReadCost.Start value) { }
         /** Canonical source-owned subjects; never inferred from presentation or a draw. */
         default void evidenceAccepted(EvidenceReceipt receipt) { }
         /** Actual qualified surface recording, not capture, inference or compositor completion. */
@@ -167,14 +191,19 @@ public final class CensorEngine<P> implements AutoCloseable {
          * Empty means no positive at this source, not empty input or whole-viewport absence.
          */
         public final List<SceneEngine.AcceptedSubject> subjects;
+        /** Null for IMAGE inputs; partial positives are never whole-tree/dwell accounting authority. */
+        public final NativeTextResult.Coverage nativeCoverage;
         private final Object observationAuthority;
+        private final long nativeGeneration, nativeTreeGeneration;
 
         private EvidenceReceipt(ActiveScope scope, Object observationAuthority, SceneEngine.Source source, SceneEngine.Lane lane, boolean positiveInput,
-                long atMillis, List<SceneEngine.AcceptedSubject> subjects) {
+                long atMillis, List<SceneEngine.AcceptedSubject> subjects, NativeTextResult.Coverage nativeCoverage,
+                long nativeGeneration, long nativeTreeGeneration) {
             this.scope = scope; this.source = source; this.triggerLane = lane;
             this.observationAuthority = observationAuthority;
             this.positiveInput = positiveInput;
             acceptedAtMillis = atMillis; this.subjects = subjects;
+            this.nativeCoverage = nativeCoverage; this.nativeGeneration = nativeGeneration; this.nativeTreeGeneration = nativeTreeGeneration;
         }
     }
 
@@ -248,12 +277,13 @@ public final class CensorEngine<P> implements AutoCloseable {
         public final long compositorAtMillis = -1;
         private final Object owner, publication;
         private final SceneEngine.Source imageTarget;
-        private final long nativeGeneration;
+        private final long nativeGeneration, nativeTreeGeneration;
         private ViewportCoverage(Object owner, Object publication, ActiveScope scope,
-                SceneEngine.Source imageTarget, long nativeGeneration, CoverageState state,
+                SceneEngine.Source imageTarget, long nativeGeneration, long nativeTreeGeneration, CoverageState state,
                 SceneEngine.Snapshot snapshot, long now, List<DetectedRegion> regions, int ineligible) {
             this.owner = owner; this.publication = publication; this.scope = scope;
             this.imageTarget = imageTarget; this.nativeGeneration = nativeGeneration; this.state = state;
+            this.nativeTreeGeneration = nativeTreeGeneration;
             canvas = snapshot == null ? null : snapshot.destination; queriedAtMillis = now;
             validBeforeMillis = snapshot == null ? Long.MAX_VALUE : snapshot.nextChangeAtMillis;
             unresolvedTracks = snapshot == null ? 0 : snapshot.unresolvedTracks;
@@ -356,19 +386,34 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     /** Independent provider read request. It is not a captured image or a source descriptor yet. */
     public static final class NativeTextInput {
-        public final long identity, epoch, geometry;
+        public final long identity, epoch, geometry, hardGeneration;
         public final ProtectionScope protectionScope;
         private final InputLifetime lifetime;
-        private final LongSupplier beginRead, clock;
-        private NativeTextInput(long identity, long epoch, long geometry, ProtectionScope protectionScope, BooleanSupplier cancellation,
-                LongSupplier beginRead, LongSupplier clock) {
+        private final LongSupplier beginRead, clock, treeGeneration;
+        private volatile long scanGeneration = -1;
+        private volatile NativeTextResult.ReadMode readMode;
+        private NativeTextInput(long identity, long epoch, long geometry, long hardGeneration, ProtectionScope protectionScope, BooleanSupplier cancellation,
+                LongSupplier beginRead, LongSupplier clock, LongSupplier treeGeneration) {
             this.identity = identity; this.epoch = epoch; this.geometry = geometry;
             this.protectionScope = protectionScope;
+            this.hardGeneration = hardGeneration; this.treeGeneration = treeGeneration;
             lifetime = new InputLifetime(cancellation); this.beginRead = beginRead; this.clock = clock;
         }
         /** Call once immediately before root/provider access. Negative means admission was cancelled. */
-        public long beginRead() { return beginRead.getAsLong(); }
+        public long beginRead() { return beginRead(NativeTextResult.ReadMode.FULL_DISCOVERY); }
+        public long beginRead(NativeTextResult.ReadMode selected) {
+            synchronized (this) {
+                if (readMode != null) return -1;
+                readMode = Objects.requireNonNull(selected);
+            }
+            return beginRead.getAsLong();
+        }
+        public NativeTextResult.ReadMode readMode() { return readMode; }
         public long nowMillis() { return clock.getAsLong(); }
+        /** Actual engine dirty-tree revision at this provider boundary, not a renamed scan token. */
+        public long treeGeneration() { return treeGeneration.getAsLong(); }
+        /** Captured atomically by beginRead; later tree revisions cannot rename the original scan. */
+        public long scanGeneration() { return scanGeneration; }
         public boolean cancelled() { return lifetime.cancelled(); }
         public void onCancellation(Cancellation handle) { lifetime.onCancellation(handle); }
     }
@@ -466,6 +511,8 @@ public final class CensorEngine<P> implements AutoCloseable {
         }
     }
 
+    private enum NativeTerminal { READ, FAILURE, CANCELLED, RESOURCE_FAILURE }
+
     private final class NativeJob {
         final long epoch = CensorEngine.this.epoch;
         final long generation = nativeGeneration;
@@ -474,11 +521,17 @@ public final class CensorEngine<P> implements AutoCloseable {
         volatile boolean cancellation;
         JobPhase phase = JobPhase.QUEUED;
         long readStartedAt = -1;
+        long readTreeGeneration = -1;
         long startedAt = -1;
+        boolean costReported;
+        long costInvokedAt = -1;
+        NativeTextResult.ReadMode costReadMode;
+        int lastObservationOrdinal;
+        final Set<String> observedNodes = new java.util.HashSet<>();
         NativeJob(long identity, long queuedAt) {
             this.queuedAt = queuedAt;
-            input = new NativeTextInput(identity, epoch, geometry, protectionScope, () -> cancellation,
-                    () -> beginNativeRead(this), clock);
+            input = new NativeTextInput(identity, epoch, geometry, generation, protectionScope, () -> cancellation,
+                    () -> beginNativeRead(this), clock, CensorEngine.this::nativeTreeGeneration);
         }
     }
 
@@ -554,6 +607,8 @@ public final class CensorEngine<P> implements AutoCloseable {
     private final LongSupplier clock;
     private final Timer timer;
     private final Capturer<P> capturer;
+    private final ScrollMotionLedger scrollMotion;
+    private int protectedWindowId = -1;
     private final Executor presentationExecutor;
     private final Observer observer;
     private final NativeTextLane nativeText;
@@ -579,9 +634,11 @@ public final class CensorEngine<P> implements AutoCloseable {
     private SceneEngine.Source latestImageSource;
     private SceneEngine.Source nativeBasis;
     private long nativeBasisGeneration = -1;
+    private long nativeBasisTreeGeneration = -1;
     private int displayWidth, displayHeight;
-    private long nextSource, nextNativeRequest, nativeGeneration;
-    private long nativeDemandAt = Long.MAX_VALUE, lastNativeCompletedAt = -1;
+    private long nextSource, nextNativeRequest, nativeGeneration, nativeTreeGeneration;
+    private long nativeDemandAt = Long.MAX_VALUE, lastNativeTerminatedAt = -1;
+    private long nativeAdmittedReadStartedAt = -1, nativeAdmittedEpoch = -1, nativeAdmittedGeneration = -1;
     private NativeJob nativeJob;
     private TimerTicket nativeTimer;
     private boolean nativeEnabled;
@@ -608,6 +665,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     private int unadoptedDisposals;
     private int renderViews;
     private long basisAdmissionDrops;
+    private long nativeCostDiagnosticFailures;
 
     public CensorEngine(Policy policy, SceneEngine.Policy scenePolicy, LongSupplier clock, Timer timer,
             Capturer<P> capturer, List<LaneWorker<P>> workers, Executor presentationExecutor, Observer observer) {
@@ -628,6 +686,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         this.nativeText = nativeText; nativeEnabled = nativeText != null;
         SceneEngine.Policy selectedScenePolicy = Objects.requireNonNull(scenePolicy);
         scene = new SceneEngine(epoch, selectedScenePolicy);
+        scrollMotion = new ScrollMotionLedger(selectedScenePolicy.maximumSources, 8, 192);
         maximumRenderBases = Math.min(selectedScenePolicy.maximumTracks, selectedScenePolicy.maximumCorrespondences);
         // Reserve acquisition/job/frame capacity plus the detector/canvas metadata pin. Optional
         // display metadata must not starve active work or the latest pending source after disposal.
@@ -646,12 +705,18 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     public void start(long geometry, ProtectionScope protectionScope) {
+        start(geometry, protectionScope, -1);
+    }
+
+    public void start(long geometry, ProtectionScope protectionScope, int windowId) {
         Objects.requireNonNull(protectionScope);
+        if (windowId < -1) throw new IllegalArgumentException("protected window");
         List<Runnable> actions = new ArrayList<>();
         synchronized (this) {
             if (closed) throw new IllegalStateException("closed engine");
             if (active) throw new IllegalStateException("already active");
             this.geometry = geometry;
+            protectedWindowId = windowId;
             this.protectionScope = protectionScope;
             active = true;
             invalidate(actions);
@@ -662,17 +727,23 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     public void changeScope(long geometry) {
-        changeScopeInternal(geometry, null);
+        changeScopeInternal(geometry, null, null);
     }
 
     public void changeScope(long geometry, ProtectionScope protectionScope) {
-        changeScopeInternal(geometry, Objects.requireNonNull(protectionScope));
+        changeScopeInternal(geometry, Objects.requireNonNull(protectionScope), null);
     }
 
-    private void changeScopeInternal(long geometry, ProtectionScope protectionScope) {
+    public void changeScope(long geometry, ProtectionScope protectionScope, int windowId) {
+        if (windowId < -1) throw new IllegalArgumentException("protected window");
+        changeScopeInternal(geometry, Objects.requireNonNull(protectionScope), windowId);
+    }
+
+    private void changeScopeInternal(long geometry, ProtectionScope protectionScope, Integer windowId) {
         List<Runnable> actions = new ArrayList<>();
         synchronized (this) {
             this.geometry = geometry;
+            if (windowId != null) protectedWindowId = windowId;
             if (protectionScope != null) this.protectionScope = protectionScope;
             invalidate(actions);
             wake(clock.getAsLong(), actions);
@@ -720,13 +791,47 @@ public final class CensorEngine<P> implements AutoCloseable {
         run(actions);
     }
 
+    public synchronized ScrollMotionLedger.Scope scrollScope() {
+        return !active || closed || resourceFailures != 0 ? null
+                : new ScrollMotionLedger.Scope(epoch, geometry, protectedWindowId, protectionScope);
+    }
+
+    /** Ingestion only. No graph edge, fake current Source or viewport-wide presentation is added. */
+    public ScrollMotionLedger.Receipt observeScroll(ScrollMotionLedger.Sample sample, boolean missingLookup) {
+        Objects.requireNonNull(sample);
+        List<Runnable> actions = new ArrayList<>();
+        ScrollMotionLedger.Receipt receipt;
+        synchronized (this) {
+            if (!active || closed || resourceFailures != 0) return null;
+            long now = clock.getAsLong();
+            receipt = missingLookup ? scrollMotion.gap(sample, now) : scrollMotion.observe(sample, now);
+            actions.add(() -> observer.scrollReceived(receipt));
+        }
+        run(actions);
+        return receipt;
+    }
+
+    public synchronized ScrollMotionLedger.Continuation scrollContinuation(SceneEngine.Source origin, long owner, long producer) {
+        return scrollMotion.continuation(origin, owner, producer);
+    }
+
     /** Native demand is independent of image acquisition and its platform spacing. */
     public void requestNativeTextAt(long atMillis, boolean contentChanged) {
+        requestNativeTextAt(atMillis, contentChanged ? NativeTextChange.HARD_CONTENT : NativeTextChange.DEMAND);
+    }
+
+    public void requestNativeTextAt(long atMillis, NativeTextChange change) {
         if (atMillis < 0) throw new IllegalArgumentException("native request time");
+        Objects.requireNonNull(change);
         List<Runnable> actions = new ArrayList<>();
         synchronized (this) {
             if (nativeText == null || !nativeEnabled || !active || closed) return;
-            if (contentChanged) { nativeGeneration++; cancelNative(actions); }
+            if (change != NativeTextChange.DEMAND) {
+                nativeTreeGeneration++; observationAuthority = new Object();
+                if (change == NativeTextChange.HARD_CONTENT) {
+                    nativeGeneration++; scene.fenceNativeEvidence(nativeText.partition); cancelNative(actions);
+                }
+            }
             demandNative(atMillis, actions);
         }
         run(actions);
@@ -741,6 +846,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (enabled) demandNative(clock.getAsLong(), actions);
             else {
                 nativeGeneration++; nativeDemandAt = Long.MAX_VALUE;
+                nativeTreeGeneration++;
                 cancelNativeTimer(actions); cancelNative(actions);
                 if (nativeBasis != null) { scene.unpin(nativeBasis); nativeBasis = null; }
                 scene.clearNative(nativeText.partition);
@@ -751,10 +857,13 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     public synchronized boolean nativeTextInFlight() { return nativeJob != null; }
+    public synchronized long nativeTreeGeneration() { return nativeTreeGeneration; }
 
     /** A failed read is not an empty read; only current accepted finite native coverage suppresses OCR. */
     public synchronized boolean imageTextSuppressed() {
-        return nativeEnabled && scene.hasNativeTextCoverage(nativeText.partition, clock.getAsLong());
+        return nativeEnabled && nativeBasisGeneration == nativeGeneration
+                && nativeBasisTreeGeneration == nativeTreeGeneration
+                && scene.hasNativeTextCoverage(nativeText.partition, clock.getAsLong());
     }
 
     /**
@@ -807,7 +916,8 @@ public final class CensorEngine<P> implements AutoCloseable {
                     if (entry.getKey() != motion.partition) basisSources.add(entry.getValue().sequence);
                 }
                 basisSources.add(selected.sequence);
-                if ((previous == null && renderBases.size() >= maximumRenderBases)
+                Set<Long> nativeSources = nativeBasisSources(); basisSources.addAll(nativeSources);
+                if ((long) renderBases.size() + (previous == null ? 1 : 0) + nativeSources.size() > maximumRenderBases
                         || basisSources.size() > maximumBasisSources || !scene.pin(selected)) {
                     basisRejected = true;
                     advance = false; // A valid spatial map can still help later detector/quality work.
@@ -916,7 +1026,9 @@ public final class CensorEngine<P> implements AutoCloseable {
             for (SceneEngine.Group group : snapshot.groups) for (SceneEngine.Mask member : group.members) {
                 boolean supported = !member.heldGeometry && !member.estimatedMotion && !member.imageEstimated
                         && (member.nativeValidated
-                        ? nativeEnabled && nativeBasisGeneration == nativeGeneration && member.evidenceSource == nativeBasis
+                        ? nativeEnabled && member.nativeCoverage == NativeTextResult.Coverage.COMPLETE_TREE
+                            && nativeBasisGeneration == nativeGeneration && nativeBasisTreeGeneration == nativeTreeGeneration
+                            && member.evidenceSource == nativeBasis
                         : member.geometrySource == latestImageSource);
                 SceneEngine.Region clipped = supported ? member.displayRegion.clippedTo(display) : null;
                 if (clipped == null) ineligible++;
@@ -925,13 +1037,14 @@ public final class CensorEngine<P> implements AutoCloseable {
             state = regions.isEmpty() ? CoverageState.NO_ELIGIBLE_REGIONS : CoverageState.AVAILABLE;
         }
         return new ViewportCoverage(scopeAuthority, coveragePublication, scope, latestImageSource,
-                nativeGeneration, state, snapshot, now, regions, ineligible);
+                nativeGeneration, nativeTreeGeneration, state, snapshot, now, regions, ineligible);
     }
 
     /** Validate the original receipt again immediately before use; no wrapper can renew it. */
     public synchronized boolean coverageCurrent(ViewportCoverage receipt) {
         if (receipt == null || receipt.owner != scopeAuthority || receipt.publication != coveragePublication
-                || receipt.imageTarget != latestImageSource || receipt.nativeGeneration != nativeGeneration) return false;
+                || receipt.imageTarget != latestImageSource || receipt.nativeGeneration != nativeGeneration
+                || receipt.nativeTreeGeneration != nativeTreeGeneration) return false;
         long now = clock.getAsLong();
         if (now < receipt.queriedAtMillis) return false;
         // Withdrawal is authenticated without an ActiveScope. It cannot clear a restarted owner.
@@ -942,12 +1055,14 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     /** An accepted observation tick, not a display/query clock or a delayed obsolete result. */
     public synchronized boolean observationCurrent(EvidenceReceipt observation, ViewportCoverage coverage) {
-        return observation != null && coverageCurrent(coverage) && isCurrent(observation.scope)
+        return observation != null && coverageCurrent(coverage) && evidenceCurrent(observation)
                 && observation.observationAuthority == observationAuthority
                 && observation.acceptedAtMillis <= coverage.queriedAtMillis
                 && (observation.source.kind == SceneEngine.SourceKind.IMAGE
                     ? observation.source == latestImageSource
-                    : nativeEnabled && nativeBasisGeneration == nativeGeneration && observation.source == nativeBasis);
+                    : observation.nativeCoverage == NativeTextResult.Coverage.COMPLETE_TREE && nativeEnabled
+                        && nativeBasisGeneration == nativeGeneration && nativeBasisTreeGeneration == nativeTreeGeneration
+                        && observation.source == nativeBasis);
     }
 
     /** Current-window scroll revokes queued dwell observations without changing count or geometry. */
@@ -983,18 +1098,32 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     /** Consumer binding is opaque to the owner, and cannot replace its captured/current scope. */
     public synchronized EvidenceClaim claimEvidence(EvidenceReceipt receipt, Object consumerScope) {
-        if (receipt == null || !isCurrent(receipt.scope)) return null;
+        if (!evidenceCurrent(receipt)) return null;
         List<SceneEngine.AcceptedSubject> claimed = scene.consumeEvidence(receipt.source, receipt.subjects, clock.getAsLong());
         return claimed == null ? null : new EvidenceClaim(receipt, claimed, consumerScope);
     }
 
     private void acceptedEvidence(SceneEngine.Source source, SceneEngine.Lane lane, boolean positiveInput,
             List<Runnable> actions) {
+        acceptedEvidence(source, lane, positiveInput, null, actions);
+    }
+
+    /** Also guards already-committed downstream effects; a claim does not renew its captured fence. */
+    public synchronized boolean evidenceCurrent(EvidenceReceipt receipt) {
+        return receipt != null && isCurrent(receipt.scope)
+                && (receipt.source.kind == SceneEngine.SourceKind.IMAGE || (nativeEnabled
+                    && receipt.nativeGeneration == nativeGeneration
+                    && (receipt.nativeCoverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY
+                        || receipt.nativeTreeGeneration == nativeTreeGeneration)));
+    }
+
+    private void acceptedEvidence(SceneEngine.Source source, SceneEngine.Lane lane, boolean positiveInput,
+            NativeTextResult.Coverage nativeCoverage, List<Runnable> actions) {
         long now = clock.getAsLong();
         EvidenceReceipt receipt = new EvidenceReceipt(activeScope(), observationAuthority, source, lane, positiveInput,
-                now, scene.acceptedSubjects(source, now));
+                now, scene.acceptedSubjects(source, now), nativeCoverage, nativeGeneration, nativeTreeGeneration);
         actions.add(() -> {
-            if (isCurrent(receipt.scope)) observer.evidenceAccepted(receipt);
+            if (evidenceCurrent(receipt)) observer.evidenceAccepted(receipt);
         });
     }
 
@@ -1052,6 +1181,7 @@ public final class CensorEngine<P> implements AutoCloseable {
     public synchronized long basisAdmissionDrops() { return basisAdmissionDrops; }
     public synchronized long callbackFailures() { return callbackFailures; }
     public synchronized long resourceFailures() { return resourceFailures; }
+    public synchronized long nativeCostDiagnosticFailures() { return nativeCostDiagnosticFailures; }
     /** A host-owned native context failed disposal outside a pixel job, such as model startup. */
     public void nativeResourceFailure() { resourceFailed(currentEpoch(), 0); }
     public synchronized int pendingCount(SceneEngine.Lane lane) {
@@ -1064,6 +1194,8 @@ public final class CensorEngine<P> implements AutoCloseable {
     private void invalidate(List<Runnable> actions) {
         epoch++;
         scene.reset(epoch);
+        if (closed) scrollMotion.close();
+        else scrollMotion.reset(new ScrollMotionLedger.Scope(epoch, geometry, protectedWindowId, protectionScope));
         renderBases.clear();
         basisAdmissionDrops = 0;
         destination = 0;
@@ -1072,9 +1204,10 @@ public final class CensorEngine<P> implements AutoCloseable {
         latestImageSource = null;
         nativeBasis = null;
         nativeBasisGeneration = -1;
+        nativeBasisTreeGeneration = -1;
         coverageSnapshot = null; coveragePublication = new Object();
         displayWidth = 0; displayHeight = 0;
-        nativeGeneration++; nativeDemandAt = Long.MAX_VALUE;
+        nativeGeneration++; nativeTreeGeneration++; nativeDemandAt = Long.MAX_VALUE;
         firstFastCompleted = false;
         cancelTimer(actions);
         cancelPresentationTimer(actions);
@@ -1100,11 +1233,18 @@ public final class CensorEngine<P> implements AutoCloseable {
         wakeNative(actions);
     }
 
+    private long nextNativeEligibleAt() {
+        // Successful work keeps the start-to-start budget; every failed/rejected attempt backs
+        // off from its real terminal. An old success cannot accelerate a new scope after callbacks.
+        long basis = nativeAdmittedReadStartedAt >= 0 && nativeAdmittedEpoch == epoch
+                && nativeAdmittedGeneration == nativeGeneration ? nativeAdmittedReadStartedAt : lastNativeTerminatedAt;
+        return basis < 0 ? 0 : plus(basis, nativeText.minimumRefreshMillis);
+    }
+
     private void wakeNative(List<Runnable> actions) {
         if (nativeText == null || !nativeEnabled || !active || closed || nativeJob != null
                 || nativeDemandAt == Long.MAX_VALUE || resourceFailures != 0 || unadoptedDisposals != 0) return;
-        long target = Math.max(clock.getAsLong(), Math.max(nativeDemandAt,
-                lastNativeCompletedAt < 0 ? 0 : plus(lastNativeCompletedAt, nativeText.minimumRefreshMillis)));
+        long target = Math.max(clock.getAsLong(), Math.max(nativeDemandAt, nextNativeEligibleAt()));
         if (nativeTimer != null && nativeTimer.at <= target) return;
         cancelNativeTimer(actions);
         TimerTicket expected = new TimerTicket(target); nativeTimer = expected;
@@ -1127,8 +1267,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             nativeTimer = null;
             if (nativeJob != null) return;
             long now = clock.getAsLong();
-            long eligible = Math.max(expected.at, Math.max(nativeDemandAt,
-                    lastNativeCompletedAt < 0 ? 0 : plus(lastNativeCompletedAt, nativeText.minimumRefreshMillis)));
+            long eligible = Math.max(expected.at, Math.max(nativeDemandAt, nextNativeEligibleAt()));
             if (now < eligible) {
                 // A timer callback is not actual provider-read eligibility.
                 wakeNative(actions);
@@ -1137,7 +1276,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                 nativeJob = job; nativeDemandAt = Long.MAX_VALUE;
                 actions.add(() -> {
                     try { nativeText.executor.execute(() -> invokeNative(job)); }
-                    catch (RuntimeException failure) { completeNative(job, null, false); }
+                    catch (RuntimeException failure) { completeNative(job, null, NativeTerminal.FAILURE); }
                 });
             }
         }
@@ -1151,12 +1290,41 @@ public final class CensorEngine<P> implements AutoCloseable {
         }
         try {
             nativeText.worker.start(job.input, new NativeTextCompletion() {
-                @Override public void success(NativeTextResult read) { completeNative(job, read, false); }
-                @Override public void failure() { completeNative(job, null, false); }
-                @Override public void cancelled() { completeNative(job, null, false); }
-                @Override public void resourceFailure() { completeNative(job, null, true); }
+                @Override public void costStarted(NativeReadCost.Start value) {
+                    synchronized (CensorEngine.this) {
+                        if (job.phase != JobPhase.RUNNING || job.costInvokedAt >= 0 || value.request != job.input.identity
+                                || value.epoch != job.epoch || value.geometry != job.input.geometry || value.hardGeneration != job.generation
+                                || value.invokedAtMillis < job.startedAt || value.invokedAtMillis > clock.getAsLong())
+                            throw new IllegalArgumentException("native cost invocation");
+                        job.costInvokedAt = value.invokedAtMillis;
+                        job.costReadMode = value.readMode;
+                    }
+                    try { observer.nativeReadCostStarted(value); }
+                    catch (RuntimeException diagnosticFailure) { synchronized (CensorEngine.this) { nativeCostDiagnosticFailures++; } }
+                }
+                @Override public void cost(NativeReadCost value) {
+                    synchronized (CensorEngine.this) {
+                        if (job.phase != JobPhase.RUNNING || job.costReported || value.request != job.input.identity
+                                || value.epoch != job.epoch || value.geometry != job.input.geometry || value.hardGeneration != job.generation
+                                || value.readStartedAtMillis != job.readStartedAt || value.scanGeneration != job.readTreeGeneration
+                                || job.costInvokedAt < 0 || value.invokedAtMillis != job.costInvokedAt
+                                || value.readMode != job.costReadMode || (job.readStartedAt >= 0 && value.readMode != job.input.readMode())
+                                || value.terminalAtMillis > clock.getAsLong()) throw new IllegalArgumentException("native cost operation");
+                        job.costReported = true;
+                    }
+                    try { observer.nativeReadCost(value); }
+                    catch (RuntimeException diagnosticFailure) {
+                        synchronized (CensorEngine.this) { nativeCostDiagnosticFailures++; }
+                    }
+                }
+                @Override public void success(NativeTextResult read) { completeNative(job, read, NativeTerminal.READ); }
+                @Override public boolean observe(int ordinal, NativeTextResult group) { return observeNative(job, ordinal, group); }
+                @Override public NativeTextAdmission admit(NativeTextResult read) { return completeNative(job, read, NativeTerminal.READ); }
+                @Override public void failure() { completeNative(job, null, NativeTerminal.FAILURE); }
+                @Override public void cancelled() { completeNative(job, null, NativeTerminal.CANCELLED); }
+                @Override public void resourceFailure() { completeNative(job, null, NativeTerminal.RESOURCE_FAILURE); }
             });
-        } catch (RuntimeException failure) { completeNative(job, null, false); }
+        } catch (RuntimeException failure) { completeNative(job, null, NativeTerminal.FAILURE); }
     }
 
     private long beginNativeRead(NativeJob job) {
@@ -1165,6 +1333,8 @@ public final class CensorEngine<P> implements AutoCloseable {
                     || !nativeEnabled || job.epoch != epoch || job.generation != nativeGeneration
                     || job.readStartedAt != -1 || resourceFailures != 0) return -1;
             job.readStartedAt = clock.getAsLong();
+            job.readTreeGeneration = nativeTreeGeneration;
+            job.input.scanGeneration = job.readTreeGeneration;
             return job.readStartedAt;
         }
     }
@@ -1179,56 +1349,133 @@ public final class CensorEngine<P> implements AutoCloseable {
         }
     }
 
-    private void completeNative(NativeJob job, NativeTextResult read, boolean unsafe) {
+    private boolean observeNative(NativeJob job, int ordinal, NativeTextResult read) {
         List<Runnable> actions = new ArrayList<>();
+        NativeTextFrame admitted;
         synchronized (this) {
-            if (job.phase == JobPhase.DONE) return;
+            long now = clock.getAsLong();
+            if (nativeJob != job || job.phase != JobPhase.RUNNING || job.costReported || job.cancellation
+                    || !active || closed || !nativeEnabled || job.epoch != epoch || job.generation != nativeGeneration
+                    || resourceFailures != 0 || job.readStartedAt < 0 || read == null
+                    || ordinal <= job.lastObservationOrdinal || ordinal > NativeTextResult.MAXIMUM_CANDIDATES
+                    || read.coverage != NativeTextResult.Coverage.POSITIVE_NODES_ONLY || read.candidates.size() != 1
+                    || read.readMode != NativeTextResult.ReadMode.FULL_DISCOVERY
+                    || read.readStartedAtMillis != job.readStartedAt || read.readFinishedAtMillis > now
+                    || !nativeReadCurrent(job, read) || now > plus(read.readFinishedAtMillis, nativeText.maximumAgeMillis)
+                    || job.observedNodes.contains(read.candidates.get(0).nodeKey)) return false;
+            job.lastObservationOrdinal = ordinal;
+            admitted = admitNativeFrame(job, read, ordinal, now, actions);
+            if (admitted != null) job.observedNodes.add(read.candidates.get(0).nodeKey);
+            // No terminal transition, retry wake or lifetime.finish here. The worker still owns its roots.
+        }
+        run(actions);
+        synchronized (this) {
+            return admitted != null && nativeJob == job && job.phase == JobPhase.RUNNING && !job.cancellation
+                    && active && !closed && nativeEnabled && epoch == job.epoch && nativeGeneration == job.generation
+                    && resourceFailures == 0;
+        }
+    }
+
+    private NativeTextAdmission completeNative(NativeJob job, NativeTextResult read, NativeTerminal terminal) {
+        List<Runnable> actions = new ArrayList<>();
+        NativeTextFrame admitted = null;
+        synchronized (this) {
+            if (job.phase == JobPhase.DONE) return null;
             job.phase = JobPhase.DONE; job.input.lifetime.finish();
             if (nativeJob == job) nativeJob = null;
             long now = clock.getAsLong();
-            if (job.readStartedAt >= 0) lastNativeCompletedAt = now;
-            if (unsafe) {
+            // Retry cooldown always starts at the actual terminal. Only actual Scene admission
+            // below can replace it with a current-owner successful start-spacing budget.
+            lastNativeTerminatedAt = now;
+            nativeAdmittedReadStartedAt = -1;
+            boolean renew = active && !closed && nativeEnabled && !job.cancellation
+                    && job.epoch == epoch && job.generation == nativeGeneration
+                    && (terminal == NativeTerminal.READ || terminal == NativeTerminal.FAILURE);
+            if (terminal == NativeTerminal.RESOURCE_FAILURE) {
                 if (resourceFailures++ == 0) invalidate(actions);
                 trace(Stage.RESOURCE_FAILED, null, SceneEngine.Lane.TEXT, 0, null, actions);
             } else if (read != null && active && !closed && nativeEnabled && !job.cancellation
                     && job.epoch == epoch && job.generation == nativeGeneration && job.readStartedAt >= 0
                     && read.readStartedAtMillis == job.readStartedAt && read.readFinishedAtMillis <= now
+                    && nativeReadCurrent(job, read)
+                    && nativeObservationInventoryConsistent(job, read)
                     && now <= plus(read.readFinishedAtMillis, nativeText.maximumAgeMillis)) {
-                if (displayWidth != 0 && (read.width != displayWidth || read.height != displayHeight)) {
-                    invalidate(actions); demandNative(now, actions); wake(now, actions);
-                } else {
-                    Set<Long> basisSources = new java.util.HashSet<>();
-                    for (SceneEngine.Source basis : renderBases.values()) basisSources.add(basis.sequence);
-                    boolean capacity = (long) basisSources.size() + 1 <= maximumBasisSources
-                            && (long) renderBases.size() + 1 <= maximumRenderBases;
-                    if (capacity) {
-                        SceneEngine.Source source = SceneEngine.Source.nativeText(job.epoch, ++nextSource, job.input.geometry,
-                                read.width, read.height, read.windowId, read.readStartedAtMillis, read.readFinishedAtMillis, now,
-                                job.input.protectionScope);
-                        NativeTextFrame frame = new NativeTextFrame(source, nativeText.partition, read,
-                                nativeText.maximumAgeMillis, job.input.identity, job.queuedAt, job.startedAt);
-                        if (scene.admitNativeFrame(frame)) {
-                            if (nativeBasis != null) scene.unpin(nativeBasis);
-                            nativeBasis = source;
-                            nativeBasisGeneration = job.generation;
-                            if (!frame.read.candidates.isEmpty()) scene.clearImageText();
-                            displayWidth = read.width; displayHeight = read.height;
-                            if (destinationSource == null || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT) {
-                                if (destinationSource != null) scene.unpin(destinationSource);
-                                if (!scene.pin(source)) throw new IllegalStateException("native canvas source lost");
-                                destinationSource = source; destination = source.sequence;
-                                canvasLane = null;
-                            }
-                            queuePresentation(actions);
-                            actions.add(() -> observer.nativeTextAccepted(frame));
-                            acceptedEvidence(source, SceneEngine.Lane.TEXT, !frame.read.candidates.isEmpty(), actions);
-                        }
-                    }
-                }
+                admitted = admitNativeFrame(job, read, 0, now, actions);
             }
+            if (admitted != null) {
+                nativeAdmittedReadStartedAt = job.readStartedAt;
+                nativeAdmittedEpoch = job.epoch;
+                nativeAdmittedGeneration = job.generation;
+            }
+            // This owns a producer clock, not evidence. Only an admitted real classified read
+            // above can change witnesses, source age or expiry; all metadata queries stay passive.
+            if (renew && job.epoch == epoch && job.generation == nativeGeneration
+                    && resourceFailures == 0 && unadoptedDisposals == 0) demandNative(now, actions);
             wakeNative(actions); checkDrained(actions);
         }
         run(actions);
+        synchronized (this) {
+            // Notifications can synchronously stop/reconfigure the owner. Historical acceptance
+            // is not authority to retain an address in a now-fenced provider scope.
+            if (admitted == null || !active || closed || !nativeEnabled || resourceFailures != 0
+                    || epoch != job.epoch || geometry != job.input.geometry || nativeGeneration != job.generation
+                    || !protectionScope.equals(job.input.protectionScope)) return null;
+            return new NativeTextAdmission(job.input, admitted);
+        }
+    }
+
+    /** One shared source/scene/presentation path for terminal reads and explicit positive observations. */
+    private NativeTextFrame admitNativeFrame(NativeJob job, NativeTextResult read, int ordinal, long now, List<Runnable> actions) {
+        if (displayWidth != 0 && (read.width != displayWidth || read.height != displayHeight)) {
+            invalidate(actions); demandNative(now, actions); wake(now, actions); return null;
+        }
+        Set<Long> basisSources = new java.util.HashSet<>();
+        for (SceneEngine.Source basis : renderBases.values()) basisSources.add(basis.sequence);
+        SceneEngine.Source source = SceneEngine.Source.nativeText(job.epoch, ++nextSource, job.input.geometry,
+                read.width, read.height, read.windowId, read.readStartedAtMillis, read.readFinishedAtMillis, now,
+                job.input.protectionScope);
+        NativeTextFrame frame = new NativeTextFrame(source, nativeText.partition, read,
+                nativeText.maximumAgeMillis, job.input.identity, job.queuedAt, job.startedAt, ordinal);
+        Set<SceneEngine.Source> retainedNative = scene.nativeOriginsRetainedBy(frame);
+        for (SceneEngine.Source retained : retainedNative) basisSources.add(retained.sequence);
+        boolean capacity = (long) basisSources.size() + 1 <= maximumBasisSources
+                && (long) renderBases.size() + retainedNative.size() + 1 <= maximumRenderBases;
+        if (!capacity || !scene.admitNativeFrame(frame)) return null;
+        if (nativeBasis != null) scene.unpin(nativeBasis);
+        nativeBasis = source;
+        nativeBasisGeneration = job.generation;
+        nativeBasisTreeGeneration = nativeTreeGeneration;
+        if (read.coverage == NativeTextResult.Coverage.COMPLETE_TREE && !frame.read.candidates.isEmpty()) scene.clearImageText();
+        displayWidth = read.width; displayHeight = read.height;
+        if (destinationSource == null || destinationSource.kind == SceneEngine.SourceKind.NATIVE_TEXT) {
+            if (destinationSource != null) scene.unpin(destinationSource);
+            if (!scene.pin(source)) throw new IllegalStateException("native canvas source lost");
+            destinationSource = source; destination = source.sequence;
+            canvasLane = null;
+        }
+        queuePresentation(actions);
+        actions.add(() -> observer.nativeTextAccepted(frame));
+        acceptedEvidence(source, SceneEngine.Lane.TEXT, !frame.read.candidates.isEmpty(), read.coverage, actions);
+        return frame;
+    }
+
+    private boolean nativeReadCurrent(NativeJob job, NativeTextResult read) {
+        if (read.readMode != job.input.readMode()) return false;
+        if (read.hardGeneration != -1 && read.hardGeneration != job.generation) return false;
+        if (read.coverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY) {
+            return read.scanGeneration == job.readTreeGeneration && read.confirmationGeneration <= nativeTreeGeneration;
+        }
+        return read.scanGeneration == -1 ? job.readTreeGeneration == nativeTreeGeneration
+                : read.scanGeneration == job.readTreeGeneration && read.scanGeneration == nativeTreeGeneration;
+    }
+
+    private boolean nativeObservationInventoryConsistent(NativeJob job, NativeTextResult read) {
+        if (read.coverage != NativeTextResult.Coverage.COMPLETE_TREE || job.observedNodes.isEmpty()) return true;
+        Set<String> finalNodes = new java.util.HashSet<>();
+        for (NativeTextResult.Candidate candidate : read.candidates) finalNodes.add(candidate.nodeKey);
+        // This contract has positive observations, not an independent later negative-node proof.
+        // Ending the acquisition cannot manufacture that proof for a previously observed node.
+        return finalNodes.containsAll(job.observedNodes);
     }
 
     private void wake(long requested, List<Runnable> actions) {
@@ -1368,6 +1615,9 @@ public final class CensorEngine<P> implements AutoCloseable {
                 SceneEngine.Source source = SceneEngine.Source.image(ticket.request.epoch, nextSource, ticket.request.identity, ticket.request.geometry,
                         payload.width, payload.height, ticket.receivedAt, payload.pixelAtMillis, ticket.request.protectionScope);
                 if (scene.register(source) && scene.pin(source)) {
+                    // Optional event metadata may refuse an invalid administrative clock. That
+                    // remains an explicit unknown continuation, never a stranded pixel/frame pin.
+                    scrollMotion.registerImage(source, clock.getAsLong());
                     Frame frame = new Frame(source, payload);
                     frames.put(source.sequence, frame);
                     latestImageSource = source;
@@ -1529,7 +1779,9 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (previous == null || previous.sequence < batch.source.sequence) changed.put(partition, batch.source);
         }
         if (!changed.isEmpty()) sources.add(batch.source.sequence);
-        if ((long) renderBases.size() + changed.keySet().stream().filter(p -> !renderBases.containsKey(p)).count() > maximumRenderBases
+        Set<Long> nativeSources = nativeBasisSources(); sources.addAll(nativeSources);
+        if ((long) renderBases.size() + changed.keySet().stream().filter(p -> !renderBases.containsKey(p)).count()
+                + nativeSources.size() > maximumRenderBases
                 || sources.size() > maximumBasisSources) { basisAdmissionDrops++; return false; }
         List<SceneEngine.Source> pinned = new ArrayList<>();
         for (SceneEngine.Source value : changed.values()) {
@@ -1542,6 +1794,13 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (previous != null) scene.unpin(previous);
         }
         return true;
+    }
+
+    private Set<Long> nativeBasisSources() {
+        Set<Long> sources = new java.util.HashSet<>();
+        for (SceneEngine.Source source : scene.activeNativeOrigins()) sources.add(source.sequence);
+        if (nativeBasis != null) sources.add(nativeBasis.sequence);
+        return sources;
     }
 
     private void queuePresentation(List<Runnable> actions) {

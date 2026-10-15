@@ -5,8 +5,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-/** A complete, provider-revalidated read. It contains no pixels, text strings or native nodes. */
+/** Typed provider-revalidated facts. Partial positives do not claim an observed whole tree. */
 public final class NativeTextResult {
+    public enum Coverage { COMPLETE_TREE, POSITIVE_NODES_ONLY }
+    public enum ReadMode { FULL_DISCOVERY, ADMITTED_NODE_RECLASSIFY }
+    public enum TextSource { UNKNOWN, TEXT, CONTENT_DESCRIPTION }
     public static final int MAXIMUM_CANDIDATES = 64;
     public static final int MAXIMUM_REGIONS = 256;
     public static final int MAXIMUM_LINES = 12;
@@ -14,6 +17,11 @@ public final class NativeTextResult {
     public final long readStartedAtMillis, readFinishedAtMillis;
     public final List<Candidate> candidates;
     public final int visitedNodes, classifiedNodes, confirmationReads;
+    public final Coverage coverage;
+    public final ReadMode readMode;
+    /** -1 is unknown legacy complete-read provenance, never an admissible partial-read token. */
+    public final long scanGeneration, confirmationGeneration, hardGeneration;
+    public final long classificationCompletedAtMillis, confirmationStartedAtMillis;
 
     public static final class Candidate {
         public final String category;
@@ -24,9 +32,19 @@ public final class NativeTextResult {
         public final float confidence;
         public final boolean exactGeometry;
         public final List<SceneEngine.Region> regions;
+        public final TextSource textSource;
+        public final int matchStart, matchEnd, normalizedLength;
+        public final long validatedAtMillis;
 
         public Candidate(String category, String contentKey, String nodeKey, float confidence,
                 boolean exactGeometry, List<SceneEngine.Region> regions) {
+            this(category, contentKey, nodeKey, confidence, exactGeometry, regions,
+                    TextSource.UNKNOWN, -1, -1, -1, -1);
+        }
+
+        public Candidate(String category, String contentKey, String nodeKey, float confidence,
+                boolean exactGeometry, List<SceneEngine.Region> regions, TextSource textSource,
+                int matchStart, int matchEnd, int normalizedLength, long validatedAtMillis) {
             if (category == null || category.isEmpty() || category.length() > 80
                     || !digest(contentKey) || (nodeKey != null && !digest(nodeKey))
                     || !Float.isFinite(confidence) || confidence < 0 || confidence > 1) {
@@ -35,10 +53,20 @@ public final class NativeTextResult {
             this.category = category; this.contentKey = contentKey; this.nodeKey = nodeKey;
             this.confidence = confidence; this.exactGeometry = exactGeometry;
             this.regions = bounded(regions, MAXIMUM_LINES, false);
+            this.textSource = Objects.requireNonNull(textSource);
+            boolean unknownSpan = matchStart == -1 && matchEnd == -1 && normalizedLength == -1;
+            if ((!unknownSpan && (matchStart < 0 || matchEnd <= matchStart || matchEnd > normalizedLength
+                    || normalizedLength > 2000)) || validatedAtMillis < -1) throw new IllegalArgumentException("native match provenance");
+            this.matchStart = matchStart; this.matchEnd = matchEnd; this.normalizedLength = normalizedLength;
+            this.validatedAtMillis = validatedAtMillis;
         }
 
+        public boolean matchProvenanceKnown() { return textSource != TextSource.UNKNOWN && matchStart >= 0; }
+
         boolean sameContent(Candidate other) {
-            return category.equals(other.category) && contentKey.equals(other.contentKey);
+            return category.equals(other.category) && contentKey.equals(other.contentKey)
+                    && textSource == other.textSource && matchStart == other.matchStart
+                    && matchEnd == other.matchEnd && normalizedLength == other.normalizedLength;
         }
 
         boolean samePose(Candidate other) {
@@ -54,6 +82,23 @@ public final class NativeTextResult {
     public NativeTextResult(int width, int height, int windowId, long readStartedAtMillis,
             long readFinishedAtMillis, List<Candidate> candidates,
             int visitedNodes, int classifiedNodes, int confirmationReads) {
+        this(width, height, windowId, readStartedAtMillis, readFinishedAtMillis, candidates,
+                visitedNodes, classifiedNodes, confirmationReads, Coverage.COMPLETE_TREE, -1, -1, -1, -1, -1);
+    }
+
+    public NativeTextResult(int width, int height, int windowId, long readStartedAtMillis,
+            long readFinishedAtMillis, List<Candidate> candidates, int visitedNodes, int classifiedNodes,
+            int confirmationReads, Coverage coverage, long scanGeneration, long confirmationGeneration,
+            long hardGeneration, long classificationCompletedAtMillis, long confirmationStartedAtMillis) {
+        this(width, height, windowId, readStartedAtMillis, readFinishedAtMillis, candidates, visitedNodes,
+                classifiedNodes, confirmationReads, coverage, scanGeneration, confirmationGeneration, hardGeneration,
+                classificationCompletedAtMillis, confirmationStartedAtMillis, ReadMode.FULL_DISCOVERY);
+    }
+
+    public NativeTextResult(int width, int height, int windowId, long readStartedAtMillis,
+            long readFinishedAtMillis, List<Candidate> candidates, int visitedNodes, int classifiedNodes,
+            int confirmationReads, Coverage coverage, long scanGeneration, long confirmationGeneration,
+            long hardGeneration, long classificationCompletedAtMillis, long confirmationStartedAtMillis, ReadMode readMode) {
         if (width <= 0 || height <= 0 || windowId < 0 || readStartedAtMillis < 0
                 || readFinishedAtMillis < readStartedAtMillis || visitedNodes < 0 || visitedNodes > 900
                 || classifiedNodes < 0 || classifiedNodes > visitedNodes
@@ -68,9 +113,38 @@ public final class NativeTextResult {
         }
         this.visitedNodes = visitedNodes; this.classifiedNodes = classifiedNodes;
         this.confirmationReads = confirmationReads;
+        this.coverage = Objects.requireNonNull(coverage);
+        this.readMode = Objects.requireNonNull(readMode);
+        if (readMode == ReadMode.ADMITTED_NODE_RECLASSIFY && (coverage != Coverage.POSITIVE_NODES_ONLY
+                || candidates.size() != 1 || visitedNodes != 1 || classifiedNodes != 1 || confirmationReads != 1))
+            throw new IllegalArgumentException("direct native read cannot claim a tree or an unknown selected node");
+        boolean unknownRevision = scanGeneration == -1 && confirmationGeneration == -1 && hardGeneration == -1;
+        boolean unknownClocks = classificationCompletedAtMillis == -1 && confirmationStartedAtMillis == -1;
+        if (unknownRevision != unknownClocks
+                || (!unknownRevision && (scanGeneration < 0 || confirmationGeneration < scanGeneration || hardGeneration < 0))
+                || (coverage == Coverage.COMPLETE_TREE && !unknownRevision && scanGeneration != confirmationGeneration)
+                || (!unknownClocks && (classificationCompletedAtMillis < readStartedAtMillis
+                    || classificationCompletedAtMillis > readFinishedAtMillis
+                    || (this.candidates.isEmpty() ? confirmationStartedAtMillis != -1
+                        : confirmationStartedAtMillis < classificationCompletedAtMillis
+                            || confirmationStartedAtMillis - classificationCompletedAtMillis < 48
+                            || confirmationStartedAtMillis > readFinishedAtMillis)))
+                || (coverage == Coverage.POSITIVE_NODES_ONLY && (unknownRevision || unknownClocks))) {
+            throw new IllegalArgumentException("native read coverage provenance");
+        }
+        this.scanGeneration = scanGeneration; this.confirmationGeneration = confirmationGeneration;
+        this.hardGeneration = hardGeneration; this.classificationCompletedAtMillis = classificationCompletedAtMillis;
+        this.confirmationStartedAtMillis = confirmationStartedAtMillis;
         int count = 0;
         SceneEngine.Region bounds = new SceneEngine.Region(0, 0, width, height);
         for (Candidate candidate : this.candidates) {
+            if (coverage == Coverage.POSITIVE_NODES_ONLY && (candidate.nodeKey == null || !candidate.matchProvenanceKnown()
+                    || candidate.validatedAtMillis < confirmationStartedAtMillis || candidate.validatedAtMillis > readFinishedAtMillis))
+                throw new IllegalArgumentException("unbound partial native candidate");
+            if (!unknownClocks && (candidate.validatedAtMillis < confirmationStartedAtMillis
+                    || !candidate.matchProvenanceKnown())) throw new IllegalArgumentException("unconfirmed typed native candidate");
+            if (candidate.validatedAtMillis != -1 && (candidate.validatedAtMillis < readStartedAtMillis
+                    || candidate.validatedAtMillis > readFinishedAtMillis)) throw new IllegalArgumentException("native candidate clock");
             count += candidate.regions.size();
             if (count > MAXIMUM_REGIONS) throw new IllegalArgumentException("native region capacity");
             for (SceneEngine.Region region : candidate.regions) {

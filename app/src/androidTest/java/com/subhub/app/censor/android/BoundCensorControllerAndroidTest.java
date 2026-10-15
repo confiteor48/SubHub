@@ -13,6 +13,7 @@ import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.MotionEvent;
@@ -25,6 +26,8 @@ import androidx.test.platform.app.InstrumentationRegistry;
 
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.NativeTextFrame;
+import com.subhub.app.censor.engine.NativeTextResult;
+import com.subhub.app.censor.engine.NativeReadCost;
 import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.detection.BBox;
@@ -32,6 +35,7 @@ import com.subhub.app.detection.Detection;
 import com.subhub.app.detection.DetectionEngine;
 import com.subhub.app.detection.DetectorConfig;
 import com.subhub.app.detection.text.TextSmutConfig;
+import com.subhub.app.detection.text.NativeTextReader;
 import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.settings.CensorAppearance;
 import com.subhub.app.settings.EffectPalette;
@@ -45,6 +49,8 @@ import org.junit.runner.RunWith;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
@@ -67,9 +73,10 @@ public final class BoundCensorControllerAndroidTest {
     private UiAutomation ui;
     private Context context;
     private ComponentName component;
-    private String previousServices;
-    private int previousEnabled, previousComponent;
+    private String previousServices, previousEnabled;
+    private int previousComponent;
     private boolean settingsOwned;
+    private FixtureServiceConnection.Lease<BoundCensorFixtureService> boundLease;
 
     @Before public void bindActualNonSuppressedService() throws Exception {
         instrumentation = InstrumentationRegistry.getInstrumentation(); context = instrumentation.getTargetContext();
@@ -77,13 +84,15 @@ public final class BoundCensorControllerAndroidTest {
                 InstrumentationRegistry.getArguments().getString("bound_censor_fixture"));
         assertTrue("Not authorized on a phone", android.os.Build.FINGERPRINT.contains("generic")
                 || android.os.Build.MODEL.contains("sdk_gphone"));
-        ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
         component = new ComponentName(context, BoundCensorFixtureService.class);
         previousServices = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-        previousEnabled = Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0);
+        previousEnabled = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED);
         previousComponent = context.getPackageManager().getComponentEnabledSetting(component);
         assertFalse("Legacy service must remain inactive", previousServices != null && previousServices.contains("ScreenshotAccessibilityService"));
         assertFalse("Product continuous capture is not in scope", previousServices != null && previousServices.contains("ScreenCapture"));
+        assertNull("A prior callback lease must already be retired", BoundCensorFixtureService.CONNECTIONS.currentLease());
+        long previousGeneration = BoundCensorFixtureService.CONNECTIONS.lastGeneration();
+        ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
         settingsOwned = true;
         context.getPackageManager().setComponentEnabledSetting(component, PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
                 PackageManager.DONT_KILL_APP);
@@ -92,45 +101,344 @@ public final class BoundCensorControllerAndroidTest {
                 .anyMatch(info -> component.equals(new ComponentName(info.getResolveInfo().serviceInfo.packageName, info.getResolveInfo().serviceInfo.name))));
         secure(previousServices == null || previousServices.isEmpty() ? component.flattenToString()
                 : previousServices + ":" + component.flattenToString(), 1);
-        await("Actual service connection", () -> BoundCensorFixtureService.current != null);
+        awaitConnectedFixture(previousGeneration);
         assertBinding();
     }
     @After public void restoreExactOwnedGuestSettings() throws Exception {
         if (!settingsOwned) return;
+        FixtureServiceConnection.Lease<BoundCensorFixtureService> closing = boundLease != null
+                ? boundLease : BoundCensorFixtureService.CONNECTIONS.currentLease();
+        boolean originallyActive = previousComponent == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                && FixtureServiceConnection.activeSelection(previousEnabled, previousServices, component.flattenToString());
+        Throwable primaryFailure = null;
         try {
-            BoundCensorFixtureService service = BoundCensorFixtureService.current;
+            BoundCensorFixtureService service = closing == null ? null : closing.service;
             if (service != null && service.controller != null) {
                 main(service.controller::close);
                 await("Controller actual managed closure before settings restore", service.controller::managedResourcesDrained);
             }
+            if (!originallyActive) {
+                // Removing the component first can disconnect the protocol without lifecycle callbacks.
+                List<FixtureServiceConnection.Lease<BoundCensorFixtureService>> targets = BoundCensorFixtureService.CONNECTIONS.closureTargets(closing);
+                for (FixtureServiceConnection.Lease<BoundCensorFixtureService> target : targets) {
+                    assertEquals("Cleanup remains in the owned fixture process", Process.myPid(), target.service.boundPid);
+                    if (target != closing && target.service.controller != null) {
+                        main(target.service.controller::close);
+                        await("Replacement controller actual managed closure", target.service.controller::managedResourcesDrained);
+                    }
+                    if (!target.completedSuccessfully()) main(target.service::disableSelf);
+                }
+                if (targets.isEmpty()) awaitRetiredFixture(closing);
+                else for (FixtureServiceConnection.Lease<BoundCensorFixtureService> target : targets) awaitRetiredFixture(target);
+            }
+        } catch (Exception | Error failure) {
+            primaryFailure = failure; throw failure;
         } finally {
-            secure(previousServices, previousEnabled);
-            context.getPackageManager().setComponentEnabledSetting(component, previousComponent, PackageManager.DONT_KILL_APP);
+            try { restoreFixtureSettingsAndComponent(); }
+            catch (Exception | Error restoreFailure) {
+                if (primaryFailure == null) throw restoreFailure;
+                if (primaryFailure != restoreFailure) primaryFailure.addSuppressed(restoreFailure);
+            }
         }
         assertEquals(previousServices, Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES));
-        assertEquals(previousEnabled, Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0));
+        assertEquals(previousEnabled, Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED));
         assertEquals(previousComponent, context.getPackageManager().getComponentEnabledSetting(component));
-        if (previousServices == null || !previousServices.contains(component.flattenToString())) {
-            await("Actual fixture unbinding", () -> BoundCensorFixtureService.current == null);
+        if (!originallyActive) {
+            awaitRetiredFixture(closing);
+        }
+        settingsOwned = false;
+    }
+    private void restoreFixtureSettingsAndComponent() throws Exception {
+        Throwable primaryFailure = null;
+        try {
+            ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
+            secure(previousServices, previousEnabled);
+        } catch (Exception | Error failure) {
+            primaryFailure = failure; throw failure;
+        } finally {
+            try { context.getPackageManager().setComponentEnabledSetting(component, previousComponent, PackageManager.DONT_KILL_APP); }
+            catch (Exception | Error componentFailure) {
+                if (primaryFailure == null) throw componentFailure;
+                if (primaryFailure != componentFailure) primaryFailure.addSuppressed(componentFailure);
+            }
         }
     }
     private void secure(String services, int enabled) {
+        secure(services, Integer.toString(enabled));
+    }
+    private void secure(String services, String enabled) {
         ui.adoptShellPermissionIdentity(Manifest.permission.WRITE_SECURE_SETTINGS);
         try {
-            assertTrue(Settings.Secure.putString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, services));
-            assertTrue(Settings.Secure.putInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, enabled));
+            try { assertTrue(Settings.Secure.putString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, services)); }
+            finally { assertTrue(Settings.Secure.putString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, enabled)); }
         } finally { ui.dropShellPermissionIdentity(); }
     }
     private void assertBinding() {
-        BoundCensorFixtureService service = BoundCensorFixtureService.current;
-        assertNotNull(service); assertEquals(Process.myPid(), service.boundPid);
-        assertEquals(component, new ComponentName(service.getServiceInfo().getResolveInfo().serviceInfo.packageName,
-                service.getServiceInfo().getResolveInfo().serviceInfo.name));
-        assertTrue(service.getServiceInfo().getCanRetrieveWindowContent());
-        assertTrue((service.getServiceInfo().getCapabilities()
-                & android.accessibilityservice.AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT) != 0);
-        assertTrue(Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-                .contains(component.flattenToString()));
+        FixtureServiceConnection.Snapshot<BoundCensorFixtureService, android.accessibilityservice.AccessibilityServiceInfo> snapshot = connectedSnapshot();
+        assertNotNull("Actual registered fixture connection snapshot", snapshot);
+        assertSame("A replacement connection cannot satisfy an older fixture", boundLease, snapshot.lease);
+    }
+    private FixtureServiceConnection.Snapshot<BoundCensorFixtureService, android.accessibilityservice.AccessibilityServiceInfo> connectedSnapshot() {
+        return BoundCensorFixtureService.CONNECTIONS.ready(BoundCensorFixtureService::getServiceInfo, (service, info) -> {
+            android.content.pm.ResolveInfo resolved = info.getResolveInfo();
+            String enabled = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            return service.boundPid == Process.myPid() && resolved != null && resolved.serviceInfo != null
+                    && component.equals(new ComponentName(resolved.serviceInfo.packageName, resolved.serviceInfo.name))
+                    && info.getCanRetrieveWindowContent()
+                    && (info.getCapabilities() & android.accessibilityservice.AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT) != 0
+                    && (info.flags & android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS) != 0
+                    && FixtureServiceConnection.activeSelection(
+                            Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED),
+                            enabled, component.flattenToString())
+                    && context.getPackageManager().getComponentEnabledSetting(component) == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+        });
+    }
+    private void awaitConnectedFixture(long previousGeneration) throws Exception {
+        await("Actual complete service connection snapshot", () -> {
+            FixtureServiceConnection.Snapshot<BoundCensorFixtureService, android.accessibilityservice.AccessibilityServiceInfo> snapshot = connectedSnapshot();
+            if (snapshot == null || snapshot.lease.generation <= previousGeneration) return false;
+            boundLease = snapshot.lease; return true;
+        });
+    }
+    private void awaitRetiredFixture(FixtureServiceConnection.Lease<BoundCensorFixtureService> lease) throws Exception {
+        await("Actual exact-lease callback and protocol unbinding", () -> {
+            if (lease != null) assertNull("Fixture lifecycle cleanup failed", lease.failure);
+            return (lease == null || (lease.completedSuccessfully() && lease.service.getServiceInfo() == null))
+                    && BoundCensorFixtureService.CONNECTIONS.currentLease() == null && BoundCensorFixtureService.current == null;
+        });
+    }
+
+    @Test public void actualFixtureConnectionLeaseCyclesWithoutRunningCensorWork() throws Exception {
+        JSONArray steps = new JSONArray(); int completed = 0; boolean passed = false;
+        JSONArray observations = new JSONArray(); int cycle = -1; String phase = "START";
+        Throwable primaryFailure = null;
+        try {
+            for (cycle = 0; cycle < 8; cycle++) {
+                phase = "BINDING";
+                assertBinding(); FixtureServiceConnection.Lease<BoundCensorFixtureService> lease = boundLease;
+                assertNull("Lifecycle-only probe must never own a Censor controller", lease.service.controller);
+                lifecycleStep(steps, cycle, "CONNECTED", lease);
+                phase = "DISABLE";
+                main(lease.service::disableSelf);
+                phase = "AWAIT_RETIRE";
+                awaitRetiredFixture(lease);
+                phase = "RETIRED_RECEIPT";
+                assertNull(lease.service.controller); lifecycleStep(steps, cycle, "RETIRED", lease); completed++;
+                if (cycle < 7) {
+                    phase = "ENABLE";
+                    secure(previousServices == null || previousServices.isEmpty() ? component.flattenToString()
+                            : previousServices + ":" + component.flattenToString(), 1);
+                    phase = "AWAIT_CONNECT";
+                    awaitConnectedFixture(lease.generation);
+                }
+            }
+            passed = true;
+        } catch (Exception | Error failure) {
+            primaryFailure = failure;
+            try { observations.put(lifecycleFailureObservation(cycle, phase, failure)); }
+            catch (Exception | Error diagnosticFailure) { failure.addSuppressed(diagnosticFailure); }
+            throw failure;
+        } finally {
+            try {
+                JSONObject receipt = new JSONObject().put("schemaVersion", 3).put("requestedCycles", 8).put("completedCycles", completed)
+                        .put("pid", Process.myPid()).put("controllerWorkRun", false).put("nativeBodyPassed", passed)
+                        .put("rawStepCount", steps.length()).put("steps", steps).put("pixelPerformanceAcceptance", false)
+                        .put("rawFailureObservationCount", observations.length()).put("failureObservations", observations)
+                        .put("disableTrigger", "SERVICE_DISABLE_SELF").put("enableTrigger", "SECURE_SELECTION_ONLY")
+                        .put("componentInstallationRequired", true);
+                try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-fixture-lifecycle-" + System.nanoTime() + ".json"))) {
+                    stream.write(receipt.toString().getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception | Error exportFailure) {
+                if (primaryFailure == null) throw exportFailure;
+                primaryFailure.addSuppressed(exportFailure);
+            }
+        }
+    }
+    private JSONObject lifecycleFailureObservation(int cycle, String phase, Throwable failure) throws Exception {
+        long startedAt = SystemClock.uptimeMillis();
+        JSONObject before = lifecycleMemoryObservation();
+        CountDownLatch heartbeat = new CountDownLatch(1); AtomicLong acknowledgedAt = new AtomicLong(-1);
+        AtomicLong acknowledgedSequence = new AtomicLong(); long postedAt = SystemClock.uptimeMillis();
+        boolean posted = new Handler(Looper.getMainLooper()).post(() -> {
+            acknowledgedAt.set(SystemClock.uptimeMillis()); acknowledgedSequence.set(1); heartbeat.countDown();
+        });
+        if (posted) heartbeat.await(250, TimeUnit.MILLISECONDS);
+        long sequence = acknowledgedSequence.get(); long ackAt = sequence == 1 ? acknowledgedAt.get() : -1;
+        boolean responded = sequence == 1 && ackAt >= postedAt && ackAt - postedAt <= 250;
+        JSONObject mainProgress = new JSONObject().put("postedAtMillis", postedAt).put("postAccepted", posted)
+                .put("postedSequence", 1).put("responseWithinPostDeadline", responded).put("maximumWaitMillis", 250)
+                .put("acknowledgedSequence", sequence).put("acknowledgedAtMillis", ackAt)
+                .put("observedAtMillis", SystemClock.uptimeMillis());
+        JSONArray queries = new JSONArray();
+        queries.put(diagnosticQuery("SERVICE_INFO", () -> boundLease.service.getServiceInfo() != null));
+        queries.put(diagnosticQuery("SETTINGS", () -> new JSONObject()
+                .put("services", nullable(Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)))
+                .put("enabled", nullable(Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED)))
+                .put("componentState", context.getPackageManager().getComponentEnabledSetting(component))));
+        queries.put(diagnosticQuery("ACCESSIBILITY_DUMP", () -> {
+            try (ParcelFileDescriptor descriptor = ui.executeShellCommand("dumpsys accessibility");
+                    InputStream stream = new ParcelFileDescriptor.AutoCloseInputStream(descriptor);
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192]; int count;
+                while ((count = stream.read(buffer)) != -1) {
+                    if (bytes.size() + count > 262144) throw new IllegalStateException("Diagnostic dump size bound");
+                    bytes.write(buffer, 0, count);
+                }
+                return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
+            }
+        }));
+        JSONObject after = lifecycleMemoryObservation();
+        return new JSONObject().put("cycle", cycle).put("phase", phase).put("failureType", failure.getClass().getName())
+                .put("startedAtMillis", startedAt).put("finishedAtMillis", SystemClock.uptimeMillis())
+                .put("beforeTeardown", true).put("atomicFrameworkSnapshot", false).put("clockDomain", "UPTIME_MILLIS")
+                .put("before", before).put("after", after).put("heartbeat", mainProgress)
+                .put("rawQueryCount", queries.length()).put("queries", queries);
+    }
+    private JSONObject lifecycleMemoryObservation() throws Exception {
+        JSONObject memory = new JSONObject(BoundCensorFixtureService.CONNECTIONS.inspect(boundLease));
+        BoundCensorFixtureService published = BoundCensorFixtureService.current;
+        return memory.put("publishedPresent", published != null).put("publishedIsOwn", published == boundLease.service)
+                .put("publishedGeneration", published == null || published.connection == null ? -1 : published.connection.generation)
+                .put("controllerPresent", boundLease.service.controller != null).put("observedAtMillis", SystemClock.uptimeMillis());
+    }
+    private JSONObject diagnosticQuery(String name, java.util.concurrent.Callable<Object> query) throws Exception {
+        FixtureDiagnosticQuery.Result<Object> result = FixtureDiagnosticQuery.read(name, 1000, SystemClock::uptimeMillis, query);
+        return new JSONObject().put("name", name).put("status", result.status).put("maximumMillis", result.maximumMillis)
+                .put("startedAtMillis", result.startedAtMillis).put("returnedAtMillis", result.returnedAtMillis)
+                .put("responseObservedAtMillis", result.responseObservedAtMillis).put("snapshotAtMillis", result.snapshotAtMillis)
+                .put("workerFinished", result.workerFinished).put("value", nullable(result.value)).put("failureType", nullable(result.failureType));
+    }
+    private static Object nullable(Object value) { return value == null ? JSONObject.NULL : value; }
+
+    private JSONObject windowFailureObservation(Harness harness, int waitOrdinal, Throwable failure) throws Exception {
+        long startedAt = SystemClock.uptimeMillis();
+        JSONObject before = new JSONObject(BoundCensorFixtureService.CONNECTIONS.inspect(harness.lease))
+                .put("observedAtMillis", SystemClock.uptimeMillis());
+        CountDownLatch heartbeat = new CountDownLatch(1); AtomicLong acknowledgedAt = new AtomicLong(-1);
+        long postedAt = SystemClock.uptimeMillis();
+        boolean posted = new Handler(Looper.getMainLooper()).post(() -> {
+            acknowledgedAt.set(SystemClock.uptimeMillis()); heartbeat.countDown();
+        });
+        if (posted) heartbeat.await(250, TimeUnit.MILLISECONDS);
+        long ackAt = acknowledgedAt.get(), observedAt = SystemClock.uptimeMillis();
+        JSONObject mainProgress = new JSONObject().put("postedAtMillis", postedAt).put("postAccepted", posted)
+                .put("acknowledgedAtMillis", ackAt).put("observedAtMillis", observedAt).put("maximumWaitMillis", 250)
+                .put("responseWithinPostDeadline", ackAt >= postedAt && ackAt - postedAt <= 250);
+        JSONArray queries = new JSONArray();
+        queries.put(diagnosticQuery("SERVICE_INFO", () -> harness.service.getServiceInfo() != null));
+        queries.put(diagnosticQuery("SETTINGS", () -> new JSONObject()
+                .put("services", nullable(Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)))
+                .put("enabled", nullable(Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED)))
+                .put("componentState", context.getPackageManager().getComponentEnabledSetting(component))));
+        queries.put(diagnosticQuery("ACCESSIBILITY_WINDOWS", () -> windowInventory(harness.service)));
+        AtomicLong activityStartedAt = new AtomicLong(-1), activityFinishedAt = new AtomicLong(-1);
+        AtomicBoolean activityPosted = new AtomicBoolean(), activityCancellationAttempted = new AtomicBoolean();
+        queries.put(diagnosticQuery("ACTIVITY_GEOMETRY", () -> {
+            java.util.concurrent.FutureTask<Object> task = new java.util.concurrent.FutureTask<>(() -> {
+                activityStartedAt.set(SystemClock.uptimeMillis());
+                try {
+                    JSONArray activities = new JSONArray();
+                    for (android.app.Activity activity : androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance()
+                            .getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED)) {
+                        if (activities.length() >= 8) throw new IllegalStateException("Activity diagnostic inventory bound");
+                        View decor = activity.getWindow().getDecorView(), content = activity.findViewById(android.R.id.content);
+                        int[] decorAt = new int[2], contentAt = new int[2]; decor.getLocationOnScreen(decorAt);
+                        if (content != null) content.getLocationOnScreen(contentAt);
+                        android.view.WindowInsets insets = decor.getRootWindowInsets();
+                        android.graphics.Insets bars = insets == null ? null : insets.getInsets(android.view.WindowInsets.Type.systemBars());
+                        android.view.WindowManager.LayoutParams attributes = activity.getWindow().getAttributes();
+                        activities.put(new JSONObject().put("className", activity.getClass().getName())
+                                .put("packageName", activity.getPackageName()).put("hasWindowFocus", decor.hasWindowFocus())
+                                .put("decorLeft", decorAt[0]).put("decorTop", decorAt[1]).put("decorWidth", decor.getWidth()).put("decorHeight", decor.getHeight())
+                                .put("contentPresent", content != null).put("contentLeft", content == null ? -1 : contentAt[0])
+                                .put("contentTop", content == null ? -1 : contentAt[1]).put("contentWidth", content == null ? -1 : content.getWidth())
+                                .put("contentHeight", content == null ? -1 : content.getHeight()).put("flags", attributes.flags)
+                                .put("requestedWidth", attributes.width).put("requestedHeight", attributes.height)
+                                .put("systemBars", bars == null ? JSONObject.NULL : new JSONObject().put("left", bars.left).put("top", bars.top)
+                                        .put("right", bars.right).put("bottom", bars.bottom)).put("observedAtMillis", SystemClock.uptimeMillis()));
+                    }
+                    return new JSONObject().put("rawActivityCount", activities.length()).put("activities", activities);
+                } finally { activityFinishedAt.set(SystemClock.uptimeMillis()); }
+            });
+            activityPosted.set(new Handler(Looper.getMainLooper()).post(task));
+            if (!activityPosted.get()) throw new IllegalStateException("Activity diagnostic main post rejected");
+            try { return task.get(750, TimeUnit.MILLISECONDS); }
+            finally { activityCancellationAttempted.set(true); task.cancel(false); }
+        }));
+        long activityFinished = activityFinishedAt.get(), activityStarted = activityStartedAt.get();
+        JSONObject activityTask = new JSONObject().put("postAccepted", activityPosted.get()).put("startedAtMillis", activityStarted)
+                .put("finishedAtMillis", activityFinished).put("completionObserved", activityFinished >= 0)
+                .put("cancellationAttempted", activityCancellationAttempted.get()).put("observedAtMillis", SystemClock.uptimeMillis());
+        return new JSONObject().put("waitOrdinal", waitOrdinal).put("leaseGeneration", harness.lease.generation)
+                .put("phase", "WINDOW_READINESS").put("failureType", failure.getClass().getName())
+                .put("startedAtMillis", startedAt).put("finishedAtMillis", SystemClock.uptimeMillis())
+                .put("beforeTeardown", true).put("atomicFrameworkSnapshot", false)
+                .put("before", before).put("after", new JSONObject(BoundCensorFixtureService.CONNECTIONS.inspect(harness.lease))
+                        .put("observedAtMillis", SystemClock.uptimeMillis()))
+                .put("heartbeat", mainProgress).put("activityTask", activityTask).put("rawQueryCount", queries.length()).put("queries", queries);
+    }
+
+    private static JSONObject windowInventory(BoundCensorFixtureService service) throws Exception {
+        List<android.view.accessibility.AccessibilityWindowInfo> windows = service.getWindows();
+        JSONArray rows = new JSONArray(); int rootsObtained = 0, rootsRecycled = 0, windowsRecycled = 0;
+        Throwable primary = null;
+        if (windows == null) return new JSONObject().put("listPresent", false).put("rawWindowCount", 0)
+                .put("storedWindowCount", 0).put("truncated", false).put("windows", rows)
+                .put("rootsObtained", 0).put("rootsRecycled", 0).put("windowsRecycled", 0);
+        try {
+            for (int index = 0; index < Math.min(windows.size(), AccessibilityWindowReader.MAXIMUM_WINDOWS); index++) {
+                android.view.accessibility.AccessibilityWindowInfo window = windows.get(index);
+                if (window == null) throw new IllegalStateException("Incomplete diagnostic window inventory");
+                android.graphics.Rect bounds = new android.graphics.Rect(); window.getBoundsInScreen(bounds);
+                android.view.accessibility.AccessibilityNodeInfo root = window.getRoot();
+                if (root != null) rootsObtained++;
+                Throwable rootFailure = null;
+                try {
+                    CharSequence name = root == null ? null : root.getPackageName();
+                    rows.put(new JSONObject().put("index", index).put("id", window.getId()).put("type", window.getType())
+                            .put("active", window.isActive()).put("focused", window.isFocused())
+                            .put("left", bounds.left).put("top", bounds.top).put("right", bounds.right).put("bottom", bounds.bottom)
+                            .put("rootPresent", root != null).put("rootWindowId", root == null ? -1 : root.getWindowId())
+                            .put("rootPackage", nullable(name == null ? null : name.toString())));
+                } catch (Exception | Error failure) { rootFailure = failure; throw failure; }
+                finally {
+                    if (root != null) try { root.recycle(); rootsRecycled++; }
+                    catch (RuntimeException | Error cleanup) {
+                        if (rootFailure == null) throw cleanup;
+                        if (rootFailure != cleanup) rootFailure.addSuppressed(cleanup);
+                    }
+                }
+            }
+        } catch (Exception | Error failure) { primary = failure; throw failure; }
+        finally {
+            Throwable cleanupFailure = null;
+            for (android.view.accessibility.AccessibilityWindowInfo window : windows) if (window != null) try { window.recycle(); windowsRecycled++; }
+            catch (RuntimeException | Error cleanup) {
+                if (cleanupFailure == null) cleanupFailure = cleanup;
+                else if (cleanupFailure != cleanup) cleanupFailure.addSuppressed(cleanup);
+            }
+            if (cleanupFailure != null) {
+                if (primary != null) { if (primary != cleanupFailure) primary.addSuppressed(cleanupFailure); }
+                else if (cleanupFailure instanceof Error) throw (Error) cleanupFailure;
+                else throw (RuntimeException) cleanupFailure;
+            }
+        }
+        return new JSONObject().put("listPresent", true).put("rawWindowCount", windows.size()).put("storedWindowCount", rows.length())
+                .put("truncated", windows.size() > rows.length()).put("windows", rows)
+                .put("rootsObtained", rootsObtained).put("rootsRecycled", rootsRecycled).put("windowsRecycled", windowsRecycled);
+    }
+    private void lifecycleStep(JSONArray steps, int cycle, String phase,
+            FixtureServiceConnection.Lease<BoundCensorFixtureService> lease) throws Exception {
+        int componentState = context.getPackageManager().getComponentEnabledSetting(component);
+        assertEquals("Orderly lifecycle keeps the component installed", PackageManager.COMPONENT_ENABLED_STATE_ENABLED, componentState);
+        steps.put(new JSONObject().put("cycle", cycle).put("phase", phase).put("generation", lease.generation)
+                .put("atMillis", SystemClock.uptimeMillis()).put("boundPid", lease.service.boundPid)
+                .put("infoPresent", lease.service.getServiceInfo() != null)
+                .put("exactCurrent", BoundCensorFixtureService.CONNECTIONS.isCurrent(lease))
+                .put("retired", lease.retired).put("completedCallbacks", lease.completedCallbacks)
+                .put("callbackFailed", lease.failure != null).put("controllerPresent", lease.service.controller != null)
+                .put("componentState", componentState));
     }
 
     @Test public void realWindowCaptureStaysUncensoredUnderComposedMaskAndTouchesPassThrough() throws Exception {
@@ -177,6 +485,620 @@ public final class BoundCensorControllerAndroidTest {
             composed("native-covered", (int) ((box.left + box.right) / 2), (int) ((box.top + box.bottom) / 2), COVER);
             assertBinding();
         }
+    }
+
+    @Test public void actualAdmittedNodeReclassificationUsesFreshPartialFactsWithoutTreeTraversal() throws Exception {
+        admittedNodeBoundary(DirectChange.NONE);
+    }
+    @Test public void softLiteralMutationAtDirectFinalCheckCannotCreateFreshNativeEvidence() throws Exception {
+        admittedNodeBoundary(DirectChange.LITERAL);
+    }
+    @Test public void stopAtDirectFinalCheckCannotAdmitNativeFacts() throws Exception {
+        admittedNodeBoundary(DirectChange.STOP);
+    }
+    @Test public void closeAtDirectFinalCheckWaitsForActualAddressDisposal() throws Exception {
+        admittedNodeBoundary(DirectChange.CLOSE);
+    }
+    @Test public void actualWindowResizeAtDirectFinalCheckRejectsRootFreeScope() throws Exception {
+        admittedNodeBoundary(DirectChange.RESIZE);
+    }
+    @Test public void heldDirectReadCannotKeepPriorEvidenceAlivePastItsOriginalDeadline() throws Exception {
+        admittedNodeBoundary(DirectChange.EXPIRE);
+    }
+    private enum DirectChange { NONE, LITERAL, STOP, CLOSE, RESIZE, EXPIRE }
+    private void admittedNodeBoundary(DirectChange change) throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<CensorEngine.NativeTextInput> heldInput = new AtomicReference<>();
+        try (Harness h = new Harness("native-direct-" + change.name().toLowerCase(java.util.Locale.ROOT), false,
+                () -> { }, () -> { }, (input, boundary) -> {
+            assertNotEquals(Looper.getMainLooper(), Looper.myLooper());
+            if (input.readMode() == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY
+                    && boundary == NativeTextReader.Boundary.BEFORE_FINAL_NODE_REFRESH
+                    && heldInput.compareAndSet(null, input)) { entered.countDown(); hold(release); }
+        }); ActivityScenario<BoundCensorFixtureActivity> activity = ActivityScenario.launch(BoundCensorFixtureActivity.class)) {
+            AccessibilityWindowReader.Window original = h.window();
+            h.start(original, 10, config(2, false, .3f), text(), false);
+            try {
+                await("Real full discovery accepted before address selection", () -> h.nativeFrames.stream()
+                        .anyMatch(f -> f.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE && !f.read.candidates.isEmpty()));
+                NativeTextFrame baseline = h.nativeFrames.stream().filter(f -> f.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE
+                        && !f.read.candidates.isEmpty()).findFirst().get();
+                java.util.Set<String> baselineKeys = Collections.singleton(baseline.read.candidates.get(0).nodeKey);
+                java.util.Map<String, Long> beforeGroups = change == DirectChange.EXPIRE
+                        ? nativeGroups(h, baselineKeys, baseline.read.readStartedAtMillis) : null;
+                if (change == DirectChange.EXPIRE) {
+                    SceneEngine.Region region = baseline.read.candidates.get(0).regions.get(0);
+                    composed("direct-expire-baseline", (int) ((region.left + region.right) / 2),
+                            (int) ((region.top + region.bottom) / 2), COVER);
+                }
+                // This adverse fixture explicitly owns soft revocation; do not let an automatic
+                // hard content event replace the final literal/window check being exercised.
+                main(() -> { h.service.controller = null; h.controller.contentChanged(original.id, false); });
+                assertTrue("Actual admitted-node final boundary was not held", entered.await(8, TimeUnit.SECONDS));
+                CensorEngine.NativeTextInput input = heldInput.get(); assertNotNull(input); assertFalse(input.cancelled());
+                assertEquals(NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY, input.readMode());
+                if (change == DirectChange.EXPIRE) {
+                    NativeTextFrame previous = h.nativeFrames.get(h.nativeFrames.size() - 1);
+                    long originalDeadline = previous.read.candidates.get(0).validatedAtMillis + previous.maximumAgeMillis;
+                    int acceptedBeforeHold = h.nativeFrames.size();
+                    assertTrue("Controlled hold must begin before the old evidence expires", SystemClock.uptimeMillis() <= originalDeadline);
+                    await("Held direct read cannot extend original scene evidence", () -> {
+                        if (SystemClock.uptimeMillis() <= originalDeadline) return false;
+                        try (CensorEngine<PixelFrame>.RenderView view = h.controller.host().acquireRenderView()) {
+                            return view != null && view.snapshot.groups.isEmpty();
+                        }
+                    });
+                    assertEquals("No source can be published by an unfinished direct operation", acceptedBeforeHold, h.nativeFrames.size());
+                    await("Actual surface submits a withdrawal after the original deadline", 3000, () -> !h.posts.isEmpty()
+                            && h.posts.get(h.posts.size() - 1).recordedAtMillis > originalDeadline
+                            && (h.posts.get(h.posts.size() - 1).acceptedPaint == null
+                                || h.posts.get(h.posts.size() - 1).acceptedPaint.members.isEmpty()));
+                    absentMaskPixels("direct-expire-withdrawn", previous.read.candidates.get(0).regions.get(0));
+                    assertTrue("Pixel sampling cannot outlive the controlled held operation", h.nativeCosts.stream().noneMatch(c -> c.request == input.identity));
+                    assertEquals(acceptedBeforeHold, h.nativeFrames.size());
+                }
+                if (change == DirectChange.STOP || change == DirectChange.CLOSE) {
+                    if (change == DirectChange.CLOSE) {
+                        main(h.controller::close);
+                        SystemClock.sleep(150);
+                        assertFalse("Held exact address cannot report managed drain", h.controller.managedResourcesDrained());
+                    } else main(h.controller::stop);
+                    assertTrue(input.cancelled());
+                }
+                else if (change == DirectChange.LITERAL) {
+                    activity.onActivity(value -> value.nativeText.setText("ordinary safe caption"));
+                    main(() -> h.controller.contentChanged(original.id, false));
+                    assertFalse("Soft revocation must leave final exact-node validation active", input.cancelled());
+                } else if (change == DirectChange.RESIZE) {
+                    long revision = input.treeGeneration();
+                    activity.onActivity(value -> value.getWindow().setLayout(original.displayWidth, original.displayHeight / 2));
+                    await("Actual direct-scope same-id window resized", () -> {
+                        AccessibilityWindowReader.Window observed = h.controller.observeWindow(context.getPackageName(), original.id);
+                        return observed != null && observed.id == original.id && !observed.same(original);
+                    });
+                    assertFalse(input.cancelled()); assertEquals(revision, input.treeGeneration());
+                }
+                release.countDown();
+                await("One actual direct reader terminal", () -> h.nativeCosts.stream().anyMatch(c -> c.request == input.identity));
+                if (change == DirectChange.NONE || change == DirectChange.EXPIRE) await("Direct positive admission", () -> h.nativeFrames.stream()
+                        .anyMatch(f -> f.read.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY));
+                NativeReadCost cost = h.nativeCosts.stream().filter(c -> c.request == input.identity).findFirst().get();
+                assertEquals(NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY, cost.readMode);
+                assertEquals(1, h.nativeCosts.stream().filter(c -> c.request == input.identity).count());
+                assertEquals(1, h.nativeCostStarts.stream().filter(c -> c.request == input.identity).count());
+                assertEquals(0, cost.costs.get(NativeReadCost.Stage.CHILD_FETCH.ordinal()).calls);
+                assertEquals(1, cost.costs.get(NativeReadCost.Stage.DISPOSE.ordinal()).calls);
+                if (change == DirectChange.NONE || change == DirectChange.EXPIRE) {
+                    assertEquals(NativeReadCost.Terminal.SUCCESS, cost.terminal);
+                    assertEquals(5, cost.costs.get(NativeReadCost.Stage.PROVIDER_CURRENT.ordinal()).calls);
+                    assertEquals(2, cost.costs.get(NativeReadCost.Stage.TRAVERSAL_CURRENT.ordinal()).calls);
+                    assertEquals(1, cost.costs.get(NativeReadCost.Stage.NODE_REFRESH.ordinal()).calls);
+                    assertEquals(1, cost.costs.get(NativeReadCost.Stage.GLYPH_QUERY.ordinal()).calls);
+                    assertEquals(1, cost.costs.get(NativeReadCost.Stage.GEOMETRY_EXCLUSIVE.ordinal()).calls);
+                    NativeTextFrame direct = h.nativeFrames.stream().filter(f -> f.read.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY
+                            && f.read.readStartedAtMillis == cost.readStartedAtMillis).findFirst().get();
+                    assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, direct.read.coverage);
+                    assertEquals(1, direct.read.visitedNodes); assertEquals(1, direct.read.candidates.size());
+                    assertEquals(baseline.read.candidates.get(0).nodeKey, direct.read.candidates.get(0).nodeKey);
+                    assertEquals(baseline.read.candidates.get(0).contentKey, direct.read.candidates.get(0).contentKey);
+                    assertTrue(direct.read.candidates.get(0).validatedAtMillis > baseline.read.candidates.get(0).validatedAtMillis);
+                    assertTrue(direct.read.confirmationStartedAtMillis >= direct.read.classificationCompletedAtMillis + 48);
+                    if (change == DirectChange.EXPIRE) {
+                        java.util.Map<String, Long> afterGroups = nativeGroups(h, baselineKeys, cost.readStartedAtMillis);
+                        assertNotEquals("True expiry cannot be concealed as group continuity", beforeGroups, afterGroups);
+                        SceneEngine.Region region = direct.read.candidates.get(0).regions.get(0);
+                        composed("direct-expire-reclassified", (int) ((region.left + region.right) / 2),
+                                (int) ((region.top + region.bottom) / 2), COVER);
+                    }
+                } else {
+                    if (change == DirectChange.RESIZE) {
+                        assertTrue(cost.terminal == NativeReadCost.Terminal.FAILURE || cost.terminal == NativeReadCost.Terminal.CANCELLED);
+                        assertTrue(cost.costs.get(NativeReadCost.Stage.PROVIDER_CURRENT.ordinal()).failedCalls > 0);
+                    } else assertEquals(change == DirectChange.STOP || change == DirectChange.CLOSE
+                            ? NativeReadCost.Terminal.CANCELLED : NativeReadCost.Terminal.FAILURE, cost.terminal);
+                    assertTrue(h.nativeFrames.stream().noneMatch(f -> f.read.readStartedAtMillis == cost.readStartedAtMillis));
+                    assertTrue(h.nativeEvidence.stream().noneMatch(r -> r.source.readStartedAtMillis == cost.readStartedAtMillis));
+                }
+                assertEquals(0, h.models.get());
+                assertEquals(0, h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.CAPTURE_DISPATCHED).count());
+                main(h.controller::stop);
+                assertBinding();
+            } finally { release.countDown(); main(() -> h.service.controller = h.controller); }
+        }
+    }
+
+    @Test public void actualWindowReadinessDiagnosticSeparatesFullWindowFromControlledNonFullRefusalWithoutStartingEngine() throws Exception {
+        try (Harness h = new Harness("native-window-readiness", false, () -> { });
+                ActivityScenario<BoundCensorFixtureActivity> activity = ActivityScenario.launch(BoundCensorFixtureActivity.class)) {
+            AccessibilityWindowReader.Window baseline = h.window();
+            assertEquals(1, h.windowWaits.size()); assertEquals("SUCCESS", h.windowWaits.get(0).getString("outcome"));
+            activity.onActivity(value -> value.getWindow().setLayout(baseline.displayWidth, baseline.displayHeight / 2));
+            await("Actual Reader observes the controlled non-full window before testing its refusal", () -> {
+                AccessibilityWindowReader.Window read = h.controller.observeWindow(context.getPackageName(), -1);
+                return read != null && read.id == baseline.id && (read.left != 0 || read.top != 0
+                        || read.width != read.displayWidth || read.height != read.displayHeight);
+            });
+            try { h.window(); fail("A controlled non-full window must not pass the unchanged readiness predicate"); }
+            catch (AssertionError expected) {
+                if (expected.getSuppressed().length != 0) throw expected;
+                assertEquals("Actual focused application window", expected.getMessage());
+            }
+            assertEquals(2, h.windowWaits.size()); JSONObject refusal = h.windowWaits.get(1);
+            assertEquals("FAILURE", refusal.getString("outcome")); assertEquals(0, refusal.getInt("droppedPollCount"));
+            JSONArray polls = refusal.getJSONArray("polls"); JSONObject descriptor = polls.getJSONObject(polls.length() - 1).getJSONObject("descriptor");
+            assertEquals(baseline.id, descriptor.getInt("id")); assertTrue(descriptor.getInt("left") != 0 || descriptor.getInt("top") != 0
+                    || descriptor.getInt("width") != descriptor.getInt("displayWidth") || descriptor.getInt("height") != descriptor.getInt("displayHeight"));
+            JSONObject diagnostic = refusal.getJSONObject("failureObservation");
+            assertEquals(h.lease.generation, diagnostic.getLong("leaseGeneration"));
+            assertTrue("Waiting worker termination cannot replace actual nested main-task completion",
+                    diagnostic.getJSONObject("activityTask").getBoolean("completionObserved"));
+            JSONArray queries = diagnostic.getJSONArray("queries"); assertEquals(4, queries.length());
+            for (int index = 0; index < queries.length(); index++) {
+                assertEquals("SUCCESS", queries.getJSONObject(index).getString("status"));
+                assertTrue("Diagnostic worker must actually terminate", queries.getJSONObject(index).getBoolean("workerFinished"));
+            }
+            assertTrue(h.nativeCostStarts.isEmpty()); assertTrue(h.nativeCosts.isEmpty()); assertTrue(h.nativeFrames.isEmpty());
+            assertTrue(h.nativeEvidence.isEmpty()); assertTrue(h.batches.isEmpty()); assertTrue(h.posts.isEmpty());
+            assertEquals(0, h.prepared.get()); assertEquals(0, h.models.get()); assertBinding();
+        }
+    }
+
+    @Test public void admittedNativeSuccessHandsOffSealedAddressesWithoutAnotherTerminalCooldown() throws Exception {
+        actualNativePacing(false);
+    }
+
+    @Test public void failedNativeSuccessorClearsPriorSuccessPacingAndKeepsTerminalBackoff() throws Exception {
+        actualNativePacing(true);
+    }
+
+    private void actualNativePacing(boolean failSecond) throws Exception {
+        CountDownLatch firstEntered = new CountDownLatch(1), secondEntered = new CountDownLatch(1), thirdEntered = new CountDownLatch(1);
+        CountDownLatch firstRelease = new CountDownLatch(1), secondRelease = new CountDownLatch(1), thirdRelease = new CountDownLatch(1);
+        AtomicReference<CensorEngine.NativeTextInput> first = new AtomicReference<>(), second = new AtomicReference<>(), third = new AtomicReference<>();
+        AtomicLong firstHeldAt = new AtomicLong(-1), secondHeldAt = new AtomicLong(-1);
+        List<JSONObject> boundaries = new CopyOnWriteArrayList<>();
+        String label = failSecond ? "native-success-pacing-failure" : "native-success-pacing-handoff";
+        Harness h = new Harness(label, false, () -> { }, () -> { }, (input, boundary) -> {
+            try { boundaries.add(new JSONObject().put("request", input.identity).put("boundary", boundary.name())
+                    .put("atMillis", SystemClock.uptimeMillis()).put("readMode", input.readMode().name())
+                    .put("epoch", input.epoch).put("geometry", input.geometry).put("hardGeneration", input.hardGeneration)); }
+            catch (org.json.JSONException failure) { throw new IllegalStateException(failure); }
+            if (boundary == NativeTextReader.Boundary.OPENED && second.get() != null
+                    && input.identity != second.get().identity && third.compareAndSet(null, input)) {
+                thirdEntered.countDown(); hold(thirdRelease);
+            }
+            if (boundary == NativeTextReader.Boundary.SCAN_END) {
+                if (first.compareAndSet(null, input)) {
+                    firstHeldAt.set(SystemClock.uptimeMillis()); firstEntered.countDown(); hold(firstRelease);
+                } else if (input.identity != first.get().identity && second.compareAndSet(null, input)) {
+                    secondHeldAt.set(SystemClock.uptimeMillis()); secondEntered.countDown(); hold(secondRelease);
+                    if (failSecond) throw new IllegalStateException("Controlled native pacing failure before SCAN_END scope query");
+                }
+            }
+        });
+        long firstReleasedAt = -1, secondReleasedAt = -1; boolean passed = false; Throwable primaryFailure = null;
+        try (Harness owned = h;
+                ActivityScenario<NativeTextMotionFixtureActivity> activity = ActivityScenario.launch(NativeTextMotionFixtureActivity.class)) {
+            activity.onActivity(value -> {
+                value.getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                        android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                value.getWindow().setDecorFitsSystemWindows(false);
+            });
+            AccessibilityWindowReader.Window window = h.window();
+            main(() -> h.service.controller = null);
+            Throwable bodyFailure = null;
+            try {
+                h.start(window, 10, config(2, false, .3f), text(), false);
+                assertTrue("Actual first FULL reaches its held scan-end boundary", firstEntered.await(8, TimeUnit.SECONDS));
+                assertEquals(NativeTextResult.ReadMode.FULL_DISCOVERY, first.get().readMode());
+                await("Held first read passes the actual start-spacing budget", () -> SystemClock.uptimeMillis() - firstHeldAt.get() >= 300);
+                assertEquals(1, h.nativeCostStarts.size()); assertTrue(h.nativeFrames.isEmpty()); assertTrue(h.nativeCosts.isEmpty());
+                firstReleasedAt = SystemClock.uptimeMillis(); firstRelease.countDown();
+                assertTrue("Actual successor reaches fresh same-node classification", secondEntered.await(8, TimeUnit.SECONDS));
+                assertEquals(2, h.nativeCostStarts.size()); assertEquals(1, h.nativeFrames.size());
+                NativeTextFrame baseline = h.nativeFrames.get(0);
+                assertEquals(first.get().identity, baseline.requestIdentity); assertEquals(2, baseline.read.candidates.size());
+                assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, baseline.read.coverage);
+                assertEquals(NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY, second.get().readMode());
+                NativeReadCost.Start next = h.nativeCostStarts.stream().filter(value -> value.request == second.get().identity).findFirst().get();
+                assertTrue(next.invokedAtMillis >= baseline.source.receivedAtMillis);
+                assertTrue("Actual next invocation does not pay another120ms after admitted success",
+                        next.invokedAtMillis - baseline.source.receivedAtMillis < 120);
+                if (failSecond) await("Held failed successor passes its start-spacing budget",
+                        () -> SystemClock.uptimeMillis() - secondHeldAt.get() >= 300);
+                assertEquals(1, h.nativeCosts.size()); assertEquals(1, h.nativeEvidence.size());
+                secondReleasedAt = SystemClock.uptimeMillis(); secondRelease.countDown();
+                assertTrue("Exactly one real third read follows terminal processing", thirdEntered.await(8, TimeUnit.SECONDS));
+                assertEquals(3, h.nativeCostStarts.size()); assertEquals(2, h.nativeCosts.size());
+                NativeReadCost ended = h.nativeCosts.stream().filter(value -> value.request == second.get().identity).findFirst().get();
+                NativeReadCost.Start following = h.nativeCostStarts.stream().filter(value -> value.request == third.get().identity).findFirst().get();
+                assertTrue("Actual read starts retain120ms spacing", ended.readStartedAtMillis - baseline.source.readStartedAtMillis >= 120);
+                if (failSecond) {
+                    assertEquals(NativeReadCost.Terminal.FAILURE, ended.terminal);
+                    assertTrue("A diagnostic terminal precedes actual Engine terminal, so this is a lower bound",
+                            following.invokedAtMillis - ended.terminalAtMillis >= 120);
+                    assertEquals(1, h.nativeFrames.size()); assertEquals(1, h.nativeEvidence.size());
+                    assertEquals(1, ended.costs.get(NativeReadCost.Stage.DISPOSE.ordinal()).calls);
+                } else {
+                    assertEquals(NativeReadCost.Terminal.SUCCESS, ended.terminal);
+                    assertEquals(2, h.nativeFrames.size()); assertEquals(2, h.nativeEvidence.size());
+                    NativeTextFrame admitted = h.nativeFrames.get(1);
+                    assertEquals(second.get().identity, admitted.requestIdentity);
+                    assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, admitted.read.coverage);
+                    assertEquals(1, admitted.read.candidates.size());
+                    NativeTextResult.Candidate selected = admitted.read.candidates.get(0);
+                    assertTrue(baseline.read.candidates.stream().anyMatch(candidate -> candidate.nodeKey.equals(selected.nodeKey)
+                            && candidate.contentKey.equals(selected.contentKey) && candidate.category.equals(selected.category)
+                            && candidate.textSource == selected.textSource && candidate.matchStart == selected.matchStart
+                            && candidate.matchEnd == selected.matchEnd && candidate.normalizedLength == selected.normalizedLength));
+                    assertEquals(0, ended.costs.get(NativeReadCost.Stage.CHILD_FETCH.ordinal()).calls);
+                    assertEquals(5, ended.costs.get(NativeReadCost.Stage.PROVIDER_CURRENT.ordinal()).calls);
+                    assertEquals(1, ended.costs.get(NativeReadCost.Stage.NODE_REFRESH.ordinal()).calls);
+                    assertEquals(1, ended.costs.get(NativeReadCost.Stage.GLYPH_QUERY.ordinal()).calls);
+                }
+                main(h.controller::stop); thirdRelease.countDown();
+                await("Held third parent has exactly one actual cancellation terminal", () -> h.nativeCosts.size() == 3);
+                assertEquals(NativeReadCost.Terminal.CANCELLED, h.nativeCosts.stream()
+                        .filter(value -> value.request == third.get().identity).findFirst().get().terminal);
+                main(h.controller::close); await("Actual pacing controller managed closure", h.controller::managedResourcesDrained);
+                assertEquals(3, h.nativeCostStarts.size()); assertEquals(3, h.nativeCosts.size());
+                assertEquals(3, h.nativeCostStarts.stream().map(value -> value.request).distinct().count());
+                assertEquals(h.nativeCostStarts.stream().map(value -> value.request).collect(java.util.stream.Collectors.toSet()),
+                        h.nativeCosts.stream().map(value -> value.request).collect(java.util.stream.Collectors.toSet()));
+                assertEquals(0, h.models.get()); assertEquals(0, h.prepared.get());
+                assertEquals(0, h.controller.host().nativeCostDiagnosticFailures()); assertBinding(); passed = true;
+            } catch (Exception | Error failure) { bodyFailure = failure; throw failure; }
+            finally {
+                firstRelease.countDown(); secondRelease.countDown(); thirdRelease.countDown();
+                try { main(() -> h.service.controller = h.controller); }
+                catch (Exception | Error restoreFailure) {
+                    if (bodyFailure == null) throw restoreFailure;
+                    if (bodyFailure != restoreFailure) bodyFailure.addSuppressed(restoreFailure);
+                }
+            }
+        } catch (Exception | Error failure) { primaryFailure = failure; throw failure; }
+        finally {
+            try {
+                JSONArray frames = new JSONArray();
+                for (NativeTextFrame frame : h.nativeFrames) {
+                    JSONArray identities = new JSONArray();
+                    for (NativeTextResult.Candidate candidate : frame.read.candidates) identities.put(new JSONObject()
+                            .put("nodeKey", candidate.nodeKey).put("contentKey", candidate.contentKey).put("category", candidate.category));
+                    frames.put(new JSONObject()
+                            .put("telemetry", new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeRead(1, frame)
+                                .substring("REPLACEMENT_NATIVE ".length())))
+                            .put("request", frame.requestIdentity).put("source", frame.source.sequence)
+                            .put("geometry", frame.source.geometry)
+                            .put("receivedAtMillis", frame.source.receivedAtMillis).put("identities", identities));
+                }
+                JSONObject receipt = new JSONObject().put("schemaVersion", 1).put("label", label).put("pid", Process.myPid())
+                        .put("eventDeliveryIsolation", "CONTROLLER_POINTER_DETACHED").put("injectedSecondFailure", failSecond)
+                        .put("firstRequest", first.get() == null ? -1 : first.get().identity)
+                        .put("secondRequest", second.get() == null ? -1 : second.get().identity)
+                        .put("thirdRequest", third.get() == null ? -1 : third.get().identity)
+                        .put("firstHeldAtMillis", firstHeldAt.get()).put("firstReleasedAtMillis", firstReleasedAt)
+                        .put("secondHeldAtMillis", secondHeldAt.get()).put("secondReleasedAtMillis", secondReleasedAt)
+                        .put("bodyPassed", passed).put("managedDrain", h.controller.managedResourcesDrained())
+                        .put("rawBoundaryCount", boundaries.size()).put("boundaries", new JSONArray(boundaries))
+                        .put("rawFrameCount", frames.length()).put("frames", frames).put("pixelPerformanceAcceptance", false);
+                try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-success-pacing-" + System.nanoTime() + ".json"))) {
+                    stream.write(receipt.toString().getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception | Error exportFailure) {
+                if (primaryFailure == null) throw exportFailure;
+                if (primaryFailure != exportFailure) primaryFailure.addSuppressed(exportFailure);
+            }
+        }
+    }
+
+    @Test public void stableGenerationRotatesKnownAddressesThenDiscoversAnUnseenNode() throws Exception {
+        stableReadSelection(false);
+    }
+
+    @Test public void failedStableDiscoveryRefillsOnlyOneRetainedAddressPass() throws Exception {
+        stableReadSelection(true);
+    }
+
+    private void stableReadSelection(boolean failFirstRediscovery) throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<CensorEngine.NativeTextInput> firstDirect = new AtomicReference<>();
+        AtomicInteger fulls = new AtomicInteger(); AtomicLong failedFull = new AtomicLong(-1);
+        List<JSONObject> boundaries = new CopyOnWriteArrayList<>();
+        String label = failFirstRediscovery ? "native-stable-selection-failed-full" : "native-stable-selection";
+        Harness h = new Harness(label, false, () -> { }, () -> { }, (input, boundary) -> {
+            try {
+                boundaries.add(new JSONObject().put("request", input.identity).put("epoch", input.epoch)
+                        .put("geometry", input.geometry).put("hardGeneration", input.hardGeneration)
+                        .put("scanGeneration", input.scanGeneration()).put("treeGeneration", input.treeGeneration())
+                        .put("readMode", input.readMode().name()).put("boundary", boundary.name())
+                        .put("atMillis", SystemClock.uptimeMillis()).put("cancelled", input.cancelled()));
+            } catch (org.json.JSONException failure) { throw new IllegalStateException(failure); }
+            if (boundary == NativeTextReader.Boundary.OPENED) {
+                if (input.readMode() == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY
+                        && firstDirect.compareAndSet(null, input)) { entered.countDown(); hold(release); }
+                if (input.readMode() == NativeTextResult.ReadMode.FULL_DISCOVERY && fulls.incrementAndGet() == 2
+                        && failFirstRediscovery) {
+                    failedFull.set(input.identity);
+                    throw new IllegalStateException("Controlled stable FULL failure before provider current check");
+                }
+            }
+        });
+        long addedStart = -1, addedEnd = -1; boolean passed = false; Throwable primaryFailure = null;
+        try (Harness owned = h;
+                ActivityScenario<NativeTextMotionFixtureActivity> activity = ActivityScenario.launch(NativeTextMotionFixtureActivity.class)) {
+            activity.onActivity(value -> {
+                value.getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                        android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                value.getWindow().setDecorFitsSystemWindows(false);
+            });
+            AccessibilityWindowReader.Window window = h.window();
+            // Explicit adverse event isolation, not production behavior. Framework cache invalidation
+            // remains active; only forwarding to this controller is detached before the first read.
+            main(() -> h.service.controller = null);
+            try {
+                h.start(window, 10, config(2, false, .3f), text(), false);
+                assertTrue("Stable-generation DIRECT must follow the initial full admission", entered.await(8, TimeUnit.SECONDS));
+                assertEquals(1, h.nativeFrames.size()); NativeTextFrame baseline = h.nativeFrames.get(0);
+                assertEquals(2, baseline.read.candidates.size()); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, baseline.read.coverage);
+                addedStart = SystemClock.uptimeMillis();
+                activity.onActivity(value -> {
+                    androidx.appcompat.widget.AppCompatTextView unseen = new androidx.appcompat.widget.AppCompatTextView(value);
+                    unseen.setId(android.R.id.custom); unseen.setText(NativeTextMotionFixtureActivity.CAPTION);
+                    unseen.setTextSize(20); unseen.setTextColor(Color.BLACK); unseen.setPadding(0, 0, 0, 0);
+                    unseen.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+                    android.widget.FrameLayout.LayoutParams params = new android.widget.FrameLayout.LayoutParams(800, -2);
+                    params.leftMargin = 32; params.topMargin = 300; value.surface.addView(unseen, params); value.demand();
+                });
+                addedEnd = SystemClock.uptimeMillis(); release.countDown();
+                int expectedReads = failFirstRediscovery ? 7 : 4;
+                await("The next bounded successful FULL discovers the unseen ordinary node", () -> h.nativeFrames.stream().anyMatch(frame ->
+                        frame.requestIdentity == expectedReads && frame.read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY
+                        && frame.read.candidates.size() == 3));
+                main(h.controller::stop);
+                assertEquals(failFirstRediscovery ? 6 : 4, h.nativeFrames.size());
+                assertTrue(h.nativeCostStarts.size() >= expectedReads);
+                java.util.Set<String> known = new java.util.HashSet<>();
+                for (NativeTextResult.Candidate candidate : baseline.read.candidates) known.add(candidate.nodeKey);
+                assertEquals(2, known.size());
+                for (int offset : failFirstRediscovery ? new int[]{1, 4} : new int[]{1}) {
+                    java.util.Set<String> rotated = new java.util.HashSet<>();
+                    for (int index = offset; index < offset + 2; index++) {
+                        long request = h.nativeCostStarts.get(index).request;
+                        NativeTextFrame frame = h.nativeFrames.stream().filter(value -> value.requestIdentity == request).findFirst().get();
+                        assertEquals(NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY, frame.read.readMode);
+                        assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, frame.read.coverage);
+                        assertEquals(1, frame.read.candidates.size()); rotated.add(frame.read.candidates.get(0).nodeKey);
+                    }
+                    assertEquals(known, rotated);
+                }
+                for (NativeTextFrame frame : h.nativeFrames) {
+                    assertEquals(baseline.read.scanGeneration, frame.read.scanGeneration);
+                    assertEquals(baseline.read.scanGeneration, frame.read.confirmationGeneration);
+                    assertEquals(baseline.read.hardGeneration, frame.read.hardGeneration);
+                }
+                if (failFirstRediscovery) {
+                    assertEquals(4, failedFull.get());
+                    assertTrue(h.nativeFrames.stream().noneMatch(frame -> frame.requestIdentity == failedFull.get()));
+                    assertEquals(NativeReadCost.Terminal.FAILURE, h.nativeCosts.stream()
+                            .filter(cost -> cost.request == failedFull.get()).findFirst().get().terminal);
+                }
+                assertEquals(0, h.models.get()); assertEquals(0, h.prepared.get());
+                assertEquals(0, h.traces.stream().filter(trace -> trace.stage == CensorEngine.Stage.CAPTURE_DISPATCHED).count());
+                assertBinding(); passed = true;
+            } finally { release.countDown(); main(() -> h.service.controller = h.controller); }
+        } catch (Exception | Error failure) { primaryFailure = failure; throw failure; }
+        finally {
+            try {
+                JSONArray frames = new JSONArray();
+                for (NativeTextFrame frame : h.nativeFrames) {
+                    JSONObject nativeRead = new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeRead(1, frame)
+                            .substring("REPLACEMENT_NATIVE ".length()));
+                    JSONArray identities = new JSONArray();
+                    for (NativeTextResult.Candidate candidate : frame.read.candidates) {
+                        JSONArray regions = new JSONArray();
+                        for (SceneEngine.Region region : candidate.regions) regions.put(new JSONObject().put("left", region.left)
+                                .put("top", region.top).put("right", region.right).put("bottom", region.bottom));
+                        identities.put(new JSONObject().put("nodeKey", candidate.nodeKey).put("contentKey", candidate.contentKey)
+                                .put("category", candidate.category).put("regions", regions));
+                    }
+                    frames.put(new JSONObject().put("telemetry", nativeRead).put("identities", identities));
+                }
+                JSONObject receipt = new JSONObject().put("schemaVersion", 1).put("label", label).put("pid", Process.myPid())
+                        .put("eventDeliveryIsolation", "CONTROLLER_POINTER_DETACHED").put("injectedFullFailure", failFirstRediscovery)
+                        .put("failedFullRequest", failedFull.get()).put("firstDirectRequest", firstDirect.get() == null ? -1 : firstDirect.get().identity)
+                        .put("addedStartedAtMillis", addedStart).put("addedFinishedAtMillis", addedEnd).put("bodyPassed", passed)
+                        .put("managedDrain", h.controller.managedResourcesDrained()).put("rawBoundaryCount", boundaries.size())
+                        .put("boundaries", new JSONArray(boundaries)).put("rawFrameCount", frames.length()).put("frames", frames)
+                        .put("pixelPerformanceAcceptance", false);
+                try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-stable-selection-" + System.nanoTime() + ".json"))) {
+                    stream.write(receipt.toString().getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception | Error exportFailure) {
+                if (primaryFailure == null) throw exportFailure;
+                if (primaryFailure != exportFailure) primaryFailure.addSuppressed(exportFailure);
+            }
+        }
+    }
+
+    @Test public void suppliedDuplicateIdentityDoesNotAliasDistinctViewsOrRebindReplacement() throws Exception {
+        try (Harness h = new Harness("native-supplied-duplicate-lineage", false, () -> { });
+                ActivityScenario<NativeTextFixtureActivity> activity = ActivityScenario.launch(NativeTextFixtureActivity.class)) {
+            activity.onActivity(value -> {
+                value.getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                        android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                value.getWindow().setDecorFitsSystemWindows(false);
+                if (value.getActionBar() != null) value.getActionBar().hide();
+                value.first.providerIdentity = value.second.providerIdentity = "same-supplied-id";
+                value.first.setText("send nudes"); value.second.setText("send nudes");
+            });
+            AccessibilityWindowReader.Window window = h.window();
+            main(() -> h.service.controller = null);
+            h.start(window, 10, config(2, false, .3f), text(), false);
+            await("Two actual equal-supplied-ID Views classified", () -> h.nativeFrames.stream().anyMatch(f -> f.read.candidates.size() == 2));
+            NativeTextFrame initial = h.nativeFrames.stream().filter(f -> f.read.candidates.size() == 2).findFirst().get();
+            NativeTextResult.Candidate upper = initial.read.candidates.get(0).regions.get(0).top < initial.read.candidates.get(1).regions.get(0).top
+                    ? initial.read.candidates.get(0) : initial.read.candidates.get(1);
+            NativeTextResult.Candidate lower = initial.read.candidates.get(0) == upper ? initial.read.candidates.get(1) : initial.read.candidates.get(0);
+            assertEquals(upper.contentKey, lower.contentKey); assertNotEquals(upper.nodeKey, lower.nodeKey);
+            java.util.Set<String> initialKeys = new java.util.HashSet<>(java.util.Arrays.asList(upper.nodeKey, lower.nodeKey));
+            java.util.Map<String, Long> groups = nativeGroups(h, initialKeys, initial.read.readStartedAtMillis); assertEquals(2, groups.size());
+            long commandAt = SystemClock.uptimeMillis();
+            main(() -> h.controller.contentChanged(window.id, false));
+            await("Both exact admitted addresses reclassified independently", () -> h.nativeFrames.stream()
+                    .filter(f -> f.read.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY && f.read.readStartedAtMillis >= commandAt)
+                    .map(f -> f.read.candidates.get(0).nodeKey).distinct().count() == 2);
+            assertEquals("Unchanged real Views keep distinct continuing groups", groups, nativeGroups(h, initialKeys, commandAt));
+            long firstDirect = h.nativeCostStarts.stream().filter(c -> c.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY
+                    && c.invokedAtMillis >= commandAt).mapToLong(c -> c.request).min().getAsLong();
+            await("Full discovery cannot be starved by endless soft event demand", () -> {
+                main(() -> h.controller.contentChanged(window.id, false));
+                return h.nativeCostStarts.stream().anyMatch(c -> c.request > firstDirect && c.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY);
+            });
+            long nextFull = h.nativeCostStarts.stream().filter(c -> c.request > firstDirect && c.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY)
+                    .mapToLong(c -> c.request).min().getAsLong();
+            assertTrue("At most one two-address rotation can precede the next full attempt", h.nativeCostStarts.stream()
+                    .filter(c -> c.request >= firstDirect && c.request < nextFull && c.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY).count() <= 2);
+            long replacedAt = SystemClock.uptimeMillis();
+            activity.onActivity(value -> {
+                android.widget.LinearLayout parent = (android.widget.LinearLayout) value.first.getParent();
+                android.view.ViewGroup.LayoutParams layout = value.first.getLayoutParams();
+                int index = parent.indexOfChild(value.first); parent.removeView(value.first);
+                value.first = value.new ProviderText("same-supplied-id"); value.first.setText("send nudes"); parent.addView(value.first, index, layout);
+            });
+            main(() -> h.controller.contentChanged(window.id, false));
+            await("A new actual View cannot inherit the old supplied-ID lineage", () -> h.nativeFrames.stream().anyMatch(f ->
+                    f.read.readStartedAtMillis >= replacedAt && f.read.candidates.size() == 2
+                    && f.read.candidates.stream().noneMatch(c -> upper.nodeKey.equals(c.nodeKey))
+                    && f.read.candidates.stream().anyMatch(c -> lower.nodeKey.equals(c.nodeKey))));
+            NativeTextFrame replacedFrame = h.nativeFrames.stream().filter(f -> f.read.readStartedAtMillis >= replacedAt
+                    && f.read.candidates.size() == 2 && f.read.candidates.stream().noneMatch(c -> upper.nodeKey.equals(c.nodeKey)))
+                    .findFirst().get();
+            java.util.Set<String> replacementKeys = new java.util.HashSet<>();
+            for (NativeTextResult.Candidate candidate : replacedFrame.read.candidates) replacementKeys.add(candidate.nodeKey);
+            java.util.Map<String, Long> replacement = nativeGroups(h, replacementKeys, replacedAt);
+            assertEquals(2, replacement.size()); assertFalse(replacement.containsKey(upper.nodeKey));
+            String newKey = replacement.keySet().stream().filter(k -> !lower.nodeKey.equals(k)).findFirst().get();
+            assertNotEquals(groups.get(upper.nodeKey), replacement.get(newKey));
+            main(h.controller::stop); assertBinding();
+        }
+    }
+    private static java.util.Map<String, Long> nativeGroups(Harness h, java.util.Set<String> expectedKeys, long sourceStartedNotBefore) throws Exception {
+        AtomicReference<java.util.Map<String, Long>> selected = new AtomicReference<>();
+        await("Each rendered native group has its actual admitted Source/candidate", () -> {
+            java.util.Map<String, Long> result = new java.util.HashMap<>();
+            try (CensorEngine<PixelFrame>.RenderView view = h.controller.host().acquireRenderView()) {
+                if (view == null) return false;
+                for (SceneEngine.Group group : view.snapshot.groups) for (SceneEngine.Mask member : group.members) {
+                    if (!member.nativeValidated || !member.nativeNodeIdentityKnown) return false;
+                    NativeTextFrame source = h.nativeFrames.stream().filter(f -> f.source.epoch == member.evidenceSource.epoch
+                            && f.source.sequence == member.evidenceSource.sequence).findFirst().orElse(null);
+                    if (source == null || source.read.readStartedAtMillis < sourceStartedNotBefore) return false;
+                    NativeTextResult.Candidate candidate = source.read.candidates.stream()
+                            .filter(c -> c.regions.contains(member.evidenceRegion)).findFirst().orElse(null);
+                    if (candidate == null) return false;
+                    Long before = result.put(candidate.nodeKey, member.textGroup);
+                    if (before != null && before != member.textGroup) return false;
+                }
+            }
+            if (!result.keySet().equals(expectedKeys)) return false; selected.set(result); return true;
+        });
+        return selected.get();
+    }
+
+    @Test public void cancellationDuringActualLocalTraversalCannotAdmitNativeFacts() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<CensorEngine.NativeTextInput> heldInput = new AtomicReference<>();
+        try (Harness h = new Harness("native-local-traversal-cancel", false, () -> { }, () -> { }, (input, boundary) -> {
+            assertNotEquals(Looper.getMainLooper(), Looper.myLooper());
+            if (boundary == NativeTextReader.Boundary.TRAVERSAL && heldInput.compareAndSet(null, input)) {
+                entered.countDown(); hold(release);
+            }
+        }); ActivityScenario<BoundCensorFixtureActivity> activity = ActivityScenario.launch(BoundCensorFixtureActivity.class)) {
+            h.start(h.window(), 10, config(2, false, .3f), text(), false);
+            try {
+                assertTrue("Actual local traversal never entered", entered.await(8, TimeUnit.SECONDS));
+                CensorEngine.NativeTextInput input = heldInput.get(); assertNotNull(input); assertFalse(input.cancelled());
+                main(h.controller::stop); assertTrue(input.cancelled()); release.countDown();
+                await("One actual cancelled reader terminal", () -> h.nativeCosts.stream().anyMatch(c -> c.request == input.identity));
+                NativeReadCost cost = h.nativeCosts.stream().filter(c -> c.request == input.identity).findFirst().get();
+                assertEquals(NativeReadCost.Terminal.CANCELLED, cost.terminal);
+                assertEquals(1, h.nativeCosts.stream().filter(c -> c.request == input.identity).count());
+                assertEquals(1, h.nativeCostStarts.stream().filter(c -> c.request == input.identity).count());
+                assertTrue(cost.costs.get(NativeReadCost.Stage.TRAVERSAL_CURRENT.ordinal()).failedCalls > 0);
+                assertTrue(cost.costs.get(NativeReadCost.Stage.DISPOSE.ordinal()).calls > 0);
+                assertNoNativeAdmission(h); assertBinding();
+            } finally { release.countDown(); }
+        }
+    }
+
+    @Test public void actualWindowResizeBeforeScanEndRejectsTreeWithoutAContentFence() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<CensorEngine.NativeTextInput> heldInput = new AtomicReference<>();
+        try (Harness h = new Harness("native-scan-end-real-window-resize", false, () -> { }, () -> { }, (input, boundary) -> {
+            assertNotEquals(Looper.getMainLooper(), Looper.myLooper());
+            if (boundary == NativeTextReader.Boundary.SCAN_END && heldInput.compareAndSet(null, input)) {
+                entered.countDown(); hold(release);
+            }
+        }); ActivityScenario<BoundCensorFixtureActivity> activity = ActivityScenario.launch(BoundCensorFixtureActivity.class)) {
+            AccessibilityWindowReader.Window original = h.window();
+            h.start(original, 10, config(2, false, .3f), text(), false);
+            try {
+                assertTrue("Actual scan-end boundary never entered", entered.await(8, TimeUnit.SECONDS));
+                CensorEngine.NativeTextInput input = heldInput.get(); assertNotNull(input); assertFalse(input.cancelled());
+                long revision = input.treeGeneration();
+                // Isolate fresh WindowReader validity from content-event cancellation in this debug service only.
+                main(() -> h.service.controller = null);
+                activity.onActivity(value -> value.getWindow().setLayout(original.displayWidth, original.displayHeight / 2));
+                AtomicReference<AccessibilityWindowReader.Window> resized = new AtomicReference<>();
+                await("Actual same-id application window has new bounds", () -> {
+                    AccessibilityWindowReader.Window observed = h.controller.observeWindow(context.getPackageName(), original.id);
+                    if (observed == null || observed.id != original.id || observed.same(original)) return false;
+                    resized.set(observed); return true;
+                });
+                assertNotNull(resized.get()); assertFalse(input.cancelled()); assertEquals(revision, input.treeGeneration());
+                release.countDown();
+                await("Held tree reaches its actual rejecting terminal", () -> h.nativeCosts.stream().anyMatch(c -> c.request == input.identity));
+                main(h.controller::stop);
+                NativeReadCost cost = h.nativeCosts.stream().filter(c -> c.request == input.identity).findFirst().get();
+                assertNotEquals(NativeReadCost.Terminal.SUCCESS, cost.terminal);
+                assertNotEquals(NativeReadCost.Terminal.RESOURCE_FAILURE, cost.terminal);
+                assertEquals(1, h.nativeCosts.stream().filter(c -> c.request == input.identity).count());
+                assertEquals(1, h.nativeCostStarts.stream().filter(c -> c.request == input.identity).count());
+                assertTrue(cost.costs.get(NativeReadCost.Stage.PROVIDER_CURRENT.ordinal()).failedCalls > 0);
+                assertTrue(cost.costs.get(NativeReadCost.Stage.TRAVERSAL_CURRENT.ordinal()).calls > 0);
+                assertTrue(cost.costs.get(NativeReadCost.Stage.DISPOSE.ordinal()).calls > 0);
+                assertNoNativeAdmission(h); assertBinding();
+            } finally { release.countDown(); main(() -> h.service.controller = h.controller); }
+        }
+    }
+
+    private static void assertNoNativeAdmission(Harness h) {
+        assertTrue(h.nativeFrames.isEmpty()); assertTrue(h.nativeEvidence.isEmpty()); assertTrue(h.batches.isEmpty());
+        assertTrue(h.posts.stream().noneMatch(p -> p.acceptedPaint != null && !p.acceptedPaint.members.isEmpty()));
+        assertEquals(0, h.models.get());
+        assertEquals(0, h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.CAPTURE_DISPATCHED).count());
+        AccessibilityCensorController.WindowCoverage coverage = h.controller.viewportCoverage();
+        assertFalse(coverage.windowQualified); assertTrue(coverage.regions.isEmpty());
     }
 
     @Test public void actualCanvasOcrRunsThroughRealWindowAdapterAndWorkerSurface() throws Exception {
@@ -342,6 +1264,9 @@ public final class BoundCensorControllerAndroidTest {
         final List<CensorEngine.Trace> traces = new CopyOnWriteArrayList<>();
         final List<SceneEngine.Batch> batches = new CopyOnWriteArrayList<>();
         final List<NativeTextFrame> nativeFrames = new CopyOnWriteArrayList<>();
+        final List<NativeReadCost.Start> nativeCostStarts = new CopyOnWriteArrayList<>();
+        final List<NativeReadCost> nativeCosts = new CopyOnWriteArrayList<>();
+        final List<CensorEngine.EvidenceReceipt> nativeEvidence = new CopyOnWriteArrayList<>();
         final List<SnapshotCensorSurface.Post> posts = new CopyOnWriteArrayList<>();
         final AtomicInteger models = new AtomicInteger();
         final AtomicInteger prepared = new AtomicInteger();
@@ -355,12 +1280,18 @@ public final class BoundCensorControllerAndroidTest {
         final List<JSONObject> windowRejections = new CopyOnWriteArrayList<>();
         final AtomicBoolean resourceFailure = new AtomicBoolean();
         final BoundCensorFixtureService service;
+        final FixtureServiceConnection.Lease<BoundCensorFixtureService> lease;
+        final List<JSONObject> windowWaits = new java.util.ArrayList<>();
         AccessibilityCensorController controller;
         Harness(String label, boolean actualModel, Runnable acquired) {
             this(label, actualModel, acquired, () -> { });
         }
         Harness(String label, boolean actualModel, Runnable acquired, Runnable nativeSelected) {
-            this.label = label; service = BoundCensorFixtureService.current; assertNotNull(service);
+            this(label, actualModel, acquired, nativeSelected, (input, boundary) -> { });
+        }
+        Harness(String label, boolean actualModel, Runnable acquired, Runnable nativeSelected,
+                AccessibilityCensorController.NativeBoundaryControl nativeBoundary) {
+            this.label = label; assertBinding(); lease = boundLease; service = lease.service;
             AccessibilityCensorController.Observer observer = new AccessibilityCensorController.Observer() {
                 @Override public void trace(CensorEngine.Trace trace) {
                     traces.add(trace);
@@ -377,6 +1308,9 @@ public final class BoundCensorControllerAndroidTest {
                 }
                 @Override public void batchAccepted(SceneEngine.Batch batch) { batches.add(batch); }
                 @Override public void nativeTextAccepted(NativeTextFrame frame) { nativeFrames.add(frame); }
+                @Override public void nativeReadCostStarted(NativeReadCost.Start value) { nativeCostStarts.add(value); }
+                @Override public void nativeReadCost(NativeReadCost value) { nativeCosts.add(value); }
+                @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { nativeEvidence.add(receipt); }
                 @Override public void providerReady(SceneEngine.Lane lane, String name, long millis) { if (lane == SceneEngine.Lane.FAST) provider.set(name); }
                 @Override public void resourceFailure() { resourceFailure.set(true); }
                 @Override public void posted(SnapshotCensorSurface.Post post) { posts.add(post); }
@@ -416,7 +1350,7 @@ public final class BoundCensorControllerAndroidTest {
                         }
                         @Override public void close() { assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); }
                     });
-                }, acquired, nativeSelected);
+                }, acquired, nativeSelected, nativeBoundary);
                 service.controller = controller;
             });
         }
@@ -425,15 +1359,67 @@ public final class BoundCensorControllerAndroidTest {
         }
         AccessibilityWindowReader.Window window(String packageName) throws Exception {
             AtomicReference<AccessibilityWindowReader.Window> value = new AtomicReference<>();
-            await("Actual focused application window", () -> {
-                AccessibilityWindowReader.Window read = controller.observeWindow(packageName, -1);
-                // The fixture owns a full-display application window. Activity RESUMED alone can
-                // precede the platform's launch-animation bounds; never pass those moving bounds
-                // to a strict controller and then weaken its mismatch fence when it rejects them.
-                if (read == null || read.left != 0 || read.top != 0 || read.width != read.displayWidth
-                        || read.height != read.displayHeight) return false;
-                value.set(read); return true;
-            }); return value.get();
+            List<JSONObject> polls = new java.util.ArrayList<>(); AtomicInteger count = new AtomicInteger();
+            int ordinal = windowWaits.size() + 1; long started = SystemClock.uptimeMillis();
+            long waitEndedAt = -1;
+            Throwable primary = null; JSONObject failureObservation = null;
+            try {
+                await("Actual focused application window", () -> {
+                    long begin = SystemClock.uptimeMillis(); boolean currentBefore = BoundCensorFixtureService.CONNECTIONS.isCurrent(lease);
+                    AccessibilityWindowReader.Window read = null; Throwable readFailure = null;
+                    try {
+                        read = controller.observeWindow(packageName, -1);
+                    } catch (RuntimeException | Error failure) { readFailure = failure; throw failure; }
+                    finally {
+                        long end = SystemClock.uptimeMillis(); boolean currentAfter = BoundCensorFixtureService.CONNECTIONS.isCurrent(lease);
+                        try {
+                            JSONObject descriptor = read == null ? null : new JSONObject().put("id", read.id).put("packageName", read.packageName)
+                                    .put("displayWidth", read.displayWidth).put("displayHeight", read.displayHeight).put("left", read.left).put("top", read.top)
+                                    .put("width", read.width).put("height", read.height);
+                            JSONObject row = new JSONObject().put("ordinal", count.incrementAndGet()).put("leaseGeneration", lease.generation)
+                                    .put("startedAtMillis", begin).put("finishedAtMillis", end).put("leaseCurrentBefore", currentBefore)
+                                    .put("leaseCurrentAfter", currentAfter).put("descriptor", nullable(descriptor))
+                                    .put("readFailureType", nullable(readFailure == null ? null : readFailure.getClass().getName()));
+                            if (polls.size() < 2048) polls.add(row); else polls.set(2047, row);
+                        } catch (org.json.JSONException observationFailure) {
+                            if (readFailure == null) throw new IllegalStateException(observationFailure);
+                            readFailure.addSuppressed(observationFailure);
+                        }
+                    }
+                    // Unchanged actual Reader/full-display predicate and15s deadline. Observations
+                    // never supply a replacement descriptor or turn a later inventory into success.
+                    if (read == null || read.left != 0 || read.top != 0 || read.width != read.displayWidth
+                            || read.height != read.displayHeight) return false;
+                    value.set(read); return true;
+                });
+                waitEndedAt = SystemClock.uptimeMillis();
+                return value.get();
+            } catch (Exception | Error failure) {
+                waitEndedAt = SystemClock.uptimeMillis(); primary = failure;
+                try { failureObservation = windowFailureObservation(this, ordinal, failure); }
+                catch (Exception | Error diagnosticFailure) {
+                    if (failure != diagnosticFailure) failure.addSuppressed(diagnosticFailure);
+                }
+                throw failure;
+            } finally {
+                try {
+                    JSONObject receipt = new JSONObject().put("schemaVersion", 1).put("clockDomain", "UPTIME_MILLIS")
+                            .put("label", label).put("pid", Process.myPid()).put("waitOrdinal", ordinal).put("leaseGeneration", lease.generation)
+                            .put("targetPackage", packageName).put("startedAtMillis", started).put("maximumWaitMillis", 15000)
+                            .put("waitEndedAtMillis", waitEndedAt)
+                            .put("finishedAtMillis", SystemClock.uptimeMillis()).put("beforeTeardown", true).put("atomicFrameworkSnapshot", false)
+                            .put("outcome", primary == null ? "SUCCESS" : "FAILURE").put("failureType", nullable(primary == null ? null : primary.getClass().getName()))
+                            .put("rawPollCount", count.get()).put("storedPollCount", polls.size()).put("droppedPollCount", count.get() - polls.size())
+                            .put("polls", new JSONArray(polls)).put("failureObservation", nullable(failureObservation)).put("pixelPerformanceAcceptance", false);
+                    windowWaits.add(receipt);
+                    try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-window-readiness-" + System.nanoTime() + ".json"))) {
+                        stream.write(receipt.toString().getBytes(StandardCharsets.UTF_8));
+                    }
+                } catch (Exception | Error exportFailure) {
+                    if (primary == null) throw exportFailure;
+                    if (primary != exportFailure) primary.addSuppressed(exportFailure);
+                }
+            }
         }
         AccessibilityCensorController.Configuration configuration(AccessibilityWindowReader.Window window, long token,
                 DetectorConfig detector, TextSmutConfig text, boolean reverse) {
@@ -465,7 +1451,7 @@ public final class BoundCensorControllerAndroidTest {
                     .put("main", post.mainThread).put("recordedAtMillis", post.recordedAtMillis).put("returnedAtMillis", post.postReturnedAtMillis)
                     .put("uiAdmittedAtMillis", post.uiAdmittedAtMillis).put("compositorAtMillis", post.compositorAtMillis)
                     .put("token", post.acceptedPaint == null ? -1 : post.acceptedPaint.scope.geometry));
-            JSONObject receipt = new JSONObject().put("schemaVersion", 1).put("label", label).put("pid", Process.myPid()).put("actualService", true)
+            JSONObject receipt = new JSONObject().put("schemaVersion", 2).put("label", label).put("pid", Process.myPid()).put("actualService", true)
                     .put("suppressionDisabled", true).put("legacyInactive", true).put("managedDrain", controller.managedResourcesDrained())
                     .put("rawTraceCount", traces.size()).put("traces", raw).put("rawPostCount", posts.size()).put("posts", posted)
                     .put("nativeAccepted", nativeFrames.size()).put("batches", batches.size()).put("pixelTimeKnown", false)
@@ -473,6 +1459,12 @@ public final class BoundCensorControllerAndroidTest {
                     .put("preparations", new JSONArray(preparations))
                     .put("windowRejections", new JSONArray(windowRejections))
                     .put("modelQualityAcceptance", false).put("pixelPerformanceAcceptance", false);
+            JSONArray starts = new JSONArray(), costs = new JSONArray();
+            for (NativeReadCost.Start value : nativeCostStarts) starts.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCostStart(1, value).substring("REPLACEMENT_NATIVE_COST_START ".length())));
+            for (NativeReadCost value : nativeCosts) costs.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCost(1, value).substring("REPLACEMENT_NATIVE_COST ".length())));
+            receipt.put("rawNativeCostStartCount", starts.length()).put("nativeCostStarts", starts)
+                    .put("rawNativeCostCount", costs.length()).put("nativeCosts", costs).put("rawNativeEvidenceCount", nativeEvidence.size())
+                    .put("nativeCostDiagnosticFailures", controller.host().nativeCostDiagnosticFailures());
             try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-surface-metrics-" + System.nanoTime() + ".json"))) {
                 stream.write(receipt.toString().getBytes(StandardCharsets.UTF_8));
             }
@@ -523,6 +1515,24 @@ public final class BoundCensorControllerAndroidTest {
     private File directory() {
         File directory = context.getExternalFilesDir("censor-tap-fixtures-20261011"); assertNotNull(directory);
         assertTrue(directory.isDirectory() || directory.mkdirs()); return directory;
+    }
+    private void absentMaskPixels(String label, SceneEngine.Region region) throws Exception {
+        AtomicReference<Bitmap> retained = new AtomicReference<>();
+        try {
+            await("Literal composed mask withdrawal " + label, 3000, () -> {
+                Bitmap pixels = ui.takeScreenshot(); if (pixels == null) return false;
+                Bitmap before = retained.getAndSet(pixels); if (before != null) before.recycle();
+                int left = Math.max(0, (int) Math.floor(region.left) - 4), top = Math.max(0, (int) Math.floor(region.top) - 4);
+                int right = Math.min(pixels.getWidth(), (int) Math.ceil(region.right) + 4);
+                int bottom = Math.min(pixels.getHeight(), (int) Math.ceil(region.bottom) + 4);
+                assertTrue(left < right && top < bottom);
+                for (int y = top; y < bottom; y++) for (int x = left; x < right; x++)
+                    if (pixels.getPixel(x, y) == COVER) return false;
+                return true;
+            });
+        } finally {
+            Bitmap pixels = retained.get(); if (pixels != null) try { save(pixels, label); } finally { pixels.recycle(); }
+        }
     }
     private void save(Bitmap pixels, String label) throws Exception {
         try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-mask-" + label + "-" + System.nanoTime() + ".png"))) {

@@ -24,6 +24,9 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import com.subhub.app.appmode.AppModeManager;
 import com.subhub.app.appmode.AppTimerManager;
 import com.subhub.app.censor.engine.CensorEngine;
+import com.subhub.app.censor.engine.NativeTextFrame;
+import com.subhub.app.censor.engine.NativeTextResult;
+import com.subhub.app.censor.engine.ScrollMotionLedger;
 import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.detection.BBox;
@@ -31,6 +34,8 @@ import com.subhub.app.detection.Detection;
 import com.subhub.app.detection.DetectionEngine;
 import com.subhub.app.detection.DetectorConfig;
 import com.subhub.app.diagnostics.CensorLabCensorSession;
+import com.subhub.app.diagnostics.CensorLabRecorder;
+import com.subhub.app.diagnostics.ReplacementEngineTelemetry;
 import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.penance.PenanceManager;
 import com.subhub.app.penance.PenanceInfraction;
@@ -47,6 +52,7 @@ import com.subhub.app.settings.*;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.*;
+import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -64,6 +70,7 @@ import java.util.function.Consumer;
 public final class ProductCensorSessionAndroidTest {
     private static final String TARGET = "com.subhub.app.test";
     private static final int COVER = 0xffff0080;
+    @Rule public final TestName testName = new TestName();
     private Instrumentation instrumentation;
     private UiAutomation ui;
     private Context context;
@@ -90,6 +97,26 @@ public final class ProductCensorSessionAndroidTest {
     private final List<CensorEngine.EvidenceReceipt> evidence = new CopyOnWriteArrayList<>();
     private final List<CensorProductSession.AccountingResult> accountResults = new CopyOnWriteArrayList<>();
     private final List<CensorProductSession.DwellResult> dwellResults = new CopyOnWriteArrayList<>();
+    private final List<ScrollMotionLedger.Receipt> scrollReceipts = new CopyOnWriteArrayList<>();
+    private final List<NativeTextFrame> nativeFrames = new CopyOnWriteArrayList<>();
+    private final List<com.subhub.app.censor.engine.NativeReadCost.Start> nativeCostStarts = new CopyOnWriteArrayList<>();
+    private final List<com.subhub.app.censor.engine.NativeReadCost> nativeCosts = new CopyOnWriteArrayList<>();
+    private final List<JSONObject> productInputBoundaries = new CopyOnWriteArrayList<>();
+    private final AtomicReference<Hold> nativeReadHold = new AtomicReference<>();
+    private final AtomicReference<Hold> nativeHoldAfterAccepted = new AtomicReference<>();
+    private final AtomicInteger nativeProviderEntries = new AtomicInteger();
+    private final JSONArray productScrollSteps = new JSONArray();
+    private Map<String, RectF> productGlyphBaseline;
+    private File productScrollEvidence;
+    private boolean productScrollPassed, ownedLabStarted;
+    private long sustainedStartedAt = -1, sustainedEndedAt = -1;
+    private int acceptedDuringSustainedDemand;
+    private int acceptedPositiveNodesOnlyDuringSustainedDemand;
+    private long stationaryStartedAt = -1, stationaryEndedAt = -1;
+    private int acceptedDuringStationaryRenewal;
+    private boolean productInputCaptureEnabled;
+    private final AtomicInteger productInputBoundaryFailures = new AtomicInteger();
+    private Map<String, ?> savedLabPreferences;
     private final AtomicReference<Runnable> afterCommittedCount = new AtomicReference<>();
     private final AtomicInteger storageFaultCalls = new AtomicInteger();
     private boolean controlledStorageResult;
@@ -108,6 +135,13 @@ public final class ProductCensorSessionAndroidTest {
         assertFalse("No enabled production capture intent may be borrowed", previousEnabled != 0 && previousServices != null
                 && (previousServices.contains("ScreenshotAccessibilityService") || previousServices.contains("ScreenCapture")));
         assertFalse("No live capture owner may be borrowed", ScreenshotAccessibilityService.isRunning());
+        String scrollRun = InstrumentationRegistry.getArguments().getString("product_scroll_run");
+        if (scrollRun != null) {
+            assertTrue(scrollRun.matches("[A-Za-z0-9_-]{1,80}"));
+            File base = new File(context.getFilesDir(), "replacement-product-scroll/" + scrollRun);
+            assertTrue(base.isDirectory() || base.mkdirs()); productScrollEvidence = new File(base, testName.getMethodName());
+            assertFalse("Exclusive current product evidence", productScrollEvidence.exists()); assertTrue(productScrollEvidence.mkdir());
+        }
         settingsOwned = true;
         // Save only in test memory. No provider authorization or guest wallet may participate.
         for (String name : OWNED_STORES) savedStores.put(name, copy(context.getSharedPreferences(name, Context.MODE_PRIVATE).getAll()));
@@ -134,6 +168,25 @@ public final class ProductCensorSessionAndroidTest {
             assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); readCount.incrementAndGet();
             Hold held = readHold.getAndSet(null); if (held != null) held.run();
         });
+        ProductCensorQualification.fixtureNativeReadSelected(() -> {
+            assertNotEquals(Looper.getMainLooper(), Looper.myLooper()); nativeProviderEntries.incrementAndGet();
+            Hold held = nativeReadHold.getAndSet(null); if (held != null) held.run();
+        });
+        ProductCensorQualification.fixtureInputObserver((type, contentTypes, windowId, sourceAt, receivedAt, route, completed) -> {
+            if (productScrollEvidence == null || session == null || !productInputCaptureEnabled) return;
+            try {
+                CensorEngine<PixelFrame> engine = actualEngineForControl();
+                java.lang.reflect.Field generation = CensorEngine.class.getDeclaredField("nativeGeneration"); generation.setAccessible(true);
+                synchronized (engine) {
+                    ScrollMotionLedger.Scope scope = engine.scrollScope();
+                    productInputBoundaries.add(new JSONObject().put("type", type).put("contentTypes", contentTypes)
+                            .put("windowId", windowId).put("sourceAtMillis", sourceAt).put("receivedAtMillis", receivedAt)
+                            .put("route", route).put("completed", completed).put("epoch", engine.currentEpoch())
+                            .put("nativeGeneration", generation.getLong(engine)).put("nativeTreeGeneration", engine.nativeTreeGeneration())
+                            .put("scopeWindowId", scope == null ? -1 : scope.windowId));
+                }
+            } catch (Exception failure) { productInputBoundaryFailures.incrementAndGet(); faults.add(failure); }
+        });
         ProductCensorQualification.fixtureObserver(new CensorProductSession.Observer() {
             @Override public void trace(CensorEngine.Trace value) { traces.add(value); }
             @Override public void prepared(long request, PixelFrame.Kind kind, long nanos, int bytes) { preparations.add(kind); }
@@ -142,6 +195,13 @@ public final class ProductCensorSessionAndroidTest {
             @Override public void modelUnavailable(SceneEngine.Lane lane) { unavailable.add(lane); }
             @Override public void sessionFailure(Throwable fault) { faults.add(fault); }
             @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { evidence.add(receipt); }
+            @Override public void nativeTextAccepted(NativeTextFrame frame) {
+                nativeFrames.add(frame); Hold held = nativeHoldAfterAccepted.getAndSet(null);
+                if (held != null) nativeReadHold.set(held);
+            }
+            @Override public void nativeReadCostStarted(com.subhub.app.censor.engine.NativeReadCost.Start value) { nativeCostStarts.add(value); }
+            @Override public void nativeReadCost(com.subhub.app.censor.engine.NativeReadCost value) { nativeCosts.add(value); }
+            @Override public void scrollReceived(ScrollMotionLedger.Receipt receipt) { scrollReceipts.add(receipt); }
             @Override public void accounting(CensorProductSession.AccountingResult result) {
                 assertNotEquals("No accounting disk work on main", Looper.getMainLooper(), Looper.myLooper());
                 accountResults.add(result);
@@ -163,6 +223,10 @@ public final class ProductCensorSessionAndroidTest {
         // Registration can enable Accessibility and bind a remembered component. Save and
         // reject pre-existing authority first; prepare this owned route before registration.
         ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        if (productScrollEvidence != null) {
+            android.accessibilityservice.AccessibilityServiceInfo info = ui.getServiceInfo();
+            info.flags |= android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS; ui.setServiceInfo(info);
+        }
         target(false);
     }
     @After public void closeActualOwnerBeforeRestoringExactGuestState() throws Exception {
@@ -171,6 +235,8 @@ public final class ProductCensorSessionAndroidTest {
         for (Hold owned : ownedHolds) owned.release.countDown();
         Hold held = readHold.getAndSet(null); if (held != null) held.release.countDown();
         held = modelHold.getAndSet(null); if (held != null) held.release.countDown();
+        Throwable primaryTeardownFailure = null;
+        Throwable evidenceFailure = null;
         try {
             CensorProductSession current = session == null ? ProductCensorQualification.current() : session;
             if (current != null) {
@@ -179,7 +245,18 @@ public final class ProductCensorSessionAndroidTest {
                 ProductCensorQualification.disconnected(current);
             }
             writeMetrics();
+        } catch (Exception | Error failure) {
+            primaryTeardownFailure = failure; throw failure;
         } finally {
+            if (productScrollEvidence != null) {
+                try { finishProductScrollEvidence(); }
+                catch (Exception | Error failure) {
+                    if (primaryTeardownFailure == null) evidenceFailure = failure;
+                    else primaryTeardownFailure.addSuppressed(failure);
+                }
+            }
+            if (ownedLabStarted && CensorLabRecorder.isActive()) CensorLabRecorder.stop(context);
+            if (savedLabPreferences != null) restore(context.getSharedPreferences("censor_lab_sessions", Context.MODE_PRIVATE), savedLabPreferences);
             // The test's Accessibility registration otherwise forces the global enabled state.
             // All capture and metadata work is already drained before this supported switch.
             ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
@@ -192,6 +269,7 @@ public final class ProductCensorSessionAndroidTest {
             new StatsRepository(context).sessionStamp();
             restore(preferences, savedPreferences); restore(qualification, savedQualification);
             ProductCensorQualification.fixtureModels(null); ProductCensorQualification.fixtureSelectionObserved(() -> { });
+            ProductCensorQualification.fixtureNativeReadSelected(() -> { }); ProductCensorQualification.fixtureInputObserver(null);
             ProductCensorQualification.fixtureObserver(null);
             ProductCensorQualification.fixtureStatistics(StatsRepository::new);
             ProductCensorQualification.fixturePenance(PenanceManager::new);
@@ -201,6 +279,655 @@ public final class ProductCensorSessionAndroidTest {
             assertEquals(saved.getValue(), context.getSharedPreferences(saved.getKey(), Context.MODE_PRIVATE).getAll());
         assertEquals(previousServices, Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES));
         assertEquals(previousEnabled, Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0));
+        if (evidenceFailure instanceof Exception) throw (Exception) evidenceFailure;
+        if (evidenceFailure instanceof Error) throw (Error) evidenceFailure;
+    }
+
+    @Test public void actualServiceScrollRoutePreservesOrdinaryNativeGroupsAndIndependentGlyphPoses() throws Exception {
+        requireProductScrollGate();
+        assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
+                .putBoolean(SettingsRepository.KEY_TEXT_SMUT_ENABLED, true).commit());
+        context.startActivity(targetIntent().putExtra("nativeScrollFixture", true).putExtra("label", "porn"));
+        startOwnedScrollLab(); connect();
+        main(() -> productInputCaptureEnabled = true);
+        Map<String, Long> baseline = captureProductScrollPose("baseline", 0, null);
+        CensorEngine.ActiveScope original = session.controller().activeScope();
+        long stationaryGeneration = actualNativeGeneration();
+        stationaryStartedAt = SystemClock.uptimeMillis(); long stationaryUntil = stationaryStartedAt + 1600;
+        while (SystemClock.uptimeMillis() < stationaryUntil) Thread.sleep(10);
+        stationaryEndedAt = SystemClock.uptimeMillis();
+        for (NativeTextFrame frame : nativeFrames)
+            if (positiveCompleteNativeFrame(frame) && frame.source.readStartedAtMillis >= stationaryStartedAt
+                    && frame.source.receivedAtMillis <= stationaryEndedAt)
+                acceptedDuringStationaryRenewal++;
+        assertTrue("Actual native-only stationary renewals without query/event demand", acceptedDuringStationaryRenewal >= 3);
+        assertEquals("Stationary producer proof has no independent semantic event demand", stationaryGeneration, actualNativeGeneration());
+        for (JSONObject boundary : productInputBoundaries)
+            if (boundary.getLong("receivedAtMillis") >= stationaryStartedAt && boundary.getLong("receivedAtMillis") <= stationaryEndedAt)
+                assertFalse("No eligible event-driven work inside the autonomous renewal interval",
+                        boundary.getString("route").equals("SCROLL") || boundary.getString("route").equals("CONTENT")
+                                || boundary.getString("route").equals("FOREGROUND") || boundary.getString("route").equals("REQUEST"));
+        int previous = 0;
+        for (int position : new int[]{100, 260, 80, 300, 0}) {
+            ScrollMotionLedger.Receipt receipt = actualProductScroll(position, position - previous, original);
+            assertTrue(receipt.admission == ScrollMotionLedger.Admission.BASELINE
+                    || receipt.admission == ScrollMotionLedger.Admission.RECORDED || receipt.admission == ScrollMotionLedger.Admission.UNKNOWN);
+            assertScrollBranchPreservesNativeGeneration(receipt.sample.sourceAtMillis);
+            captureProductScrollPose("scroll-" + position, position, baseline); previous = position;
+        }
+        sustainedStartedAt = SystemClock.uptimeMillis(); long until = sustainedStartedAt + 2200;
+        int index = 1, lastPosition = 0; int[] reversal = {0, 160, 320, 160};
+        while (SystemClock.uptimeMillis() < until) {
+            lastPosition = reversal[index++ % reversal.length];
+            context.startActivity(targetIntent().putExtra("scrollToY", lastPosition)); Thread.sleep(15);
+        }
+        sustainedEndedAt = SystemClock.uptimeMillis();
+        for (NativeTextFrame frame : nativeFrames) {
+            if (frame.read.candidates.isEmpty() || frame.source.readStartedAtMillis < sustainedStartedAt
+                    || frame.source.receivedAtMillis > sustainedEndedAt) continue;
+            if (frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE) acceptedDuringSustainedDemand++;
+            else acceptedPositiveNodesOnlyDuringSustainedDemand++;
+        }
+        assertTrue("Full confirmations actually accepted inside continuing service-scroll interval", acceptedDuringSustainedDemand >= 5);
+        if (lastPosition != 0) actualProductScroll(0, -lastPosition, original);
+        for (ScrollMotionLedger.Receipt receipt : scrollReceipts) assertScrollBranchPreservesNativeGeneration(receipt.sample.sourceAtMillis);
+        captureProductScrollPose("sustained-final", 0, baseline);
+        assertFalse("No bookkeeping helper creates native demand in this service-route gate", explicitNativeDemand);
+        assertTrue("Several actual complete-tree confirmed frames", nativeFrames.stream().filter(
+                ProductCensorSessionAndroidTest::positiveCompleteNativeFrame).count() >= 6);
+        assertTrue(evidence.stream().allMatch(row -> row.source.kind == SceneEngine.SourceKind.NATIVE_TEXT));
+        assertTrue(batches.isEmpty()); assertTrue(original.same(session.controller().activeScope()));
+        assertTrue(faults.isEmpty()); assertBinding(); productScrollPassed = true;
+    }
+
+    @Test public void actualServiceScrollReceiptsKeepImageAdmissionSeparateAndCannotInventEvidence() throws Exception {
+        requireProductScrollGate();
+        context.startActivity(targetIntent().putExtra("motionFixture", true)); startOwnedScrollLab(); connect(); awaitPaint();
+        await("Actual acquired IMAGE batch", () -> !batches.isEmpty());
+        SceneEngine.Source origin = batches.get(0).source; assertEquals(SceneEngine.SourceKind.IMAGE, origin.kind);
+        CensorEngine<PixelFrame> engine = actualEngineForControl();
+        CensorEngine.ActiveScope original = session.controller().activeScope();
+        long receivedAt = origin.receivedAtMillis, pixelAt = origin.pixelAtMillis;
+        JSONObject baselinePresentation = actualImagePresentation(engine);
+        assertTrue("Actual nonempty image member baseline before held inference", baselinePresentation.getJSONArray("members").length() > 0);
+        Hold held = hold(); modelHold.set(held); main(session::demandCapture);
+        assertTrue("Next actual visual inference is held, not replaced", held.entered.await(8, TimeUnit.SECONDS));
+        int evidenceBefore = evidence.size(), batchesBefore = batches.size();
+        long admission = -1; int previous = 0;
+        int visibleImageComparisons = 0;
+        for (int position : new int[]{100, 260, 80}) {
+            ScrollMotionLedger.Receipt receipt = actualProductScroll(position, position - previous, original);
+            assertTrue(receipt.sample.owner > 0); assertTrue(receipt.sample.producer > 0);
+            ScrollMotionLedger.Continuation continuation = engine.scrollContinuation(origin, receipt.sample.owner, receipt.sample.producer);
+            assertSame("Original acquired source, never receipt-rebased", origin, continuation.origin);
+            assertTrue(continuation.originAdmittedAtMillis >= receivedAt);
+            if (admission == -1) admission = continuation.originAdmittedAtMillis;
+            else assertEquals("Immutable IMAGE administrative checkpoint across reversal", admission, continuation.originAdmittedAtMillis);
+            assertFalse(continuation.originPixelPhaseKnown); assertFalse(continuation.initialBiasKnown);
+            assertFalse(continuation.physicalErrorKnown); assertFalse(continuation.memberApplicabilityKnown);
+            assertEquals(receivedAt, origin.receivedAtMillis); assertEquals(pixelAt, origin.pixelAtMillis);
+            assertEquals("Scroll ingestion is not another detector result", batchesBefore, batches.size());
+            assertEquals("Scroll ingestion is not positive evidence or confirmation", evidenceBefore, evidence.size());
+            JSONObject currentPresentation = actualImagePresentation(engine);
+            visibleImageComparisons += assertImagePresentationUnchanged(baselinePresentation, currentPresentation);
+            JSONObject step = new JSONObject().put("label", "image-scroll-" + position).put("position", position)
+                    .put("origin", viewportSource(origin)).put("originAdmittedAtMillis", admission)
+                    .put("continuationRefusal", continuation.refusal.name()).put("intervals", continuation.intervals)
+                    .put("omittedStraddlingIntervals", continuation.omittedStraddlingIntervals)
+                    .put("xAvailable", continuation.x.available).put("yAvailable", continuation.y.available)
+                    .put("yDisplacement", continuation.y.available ? continuation.y.displacement() : JSONObject.NULL)
+                    .put("yMinimum", continuation.y.available ? continuation.y.minimumObservedDisplacement() : JSONObject.NULL)
+                    .put("yMaximum", continuation.y.available ? continuation.y.maximumObservedDisplacement() : JSONObject.NULL)
+                    .put("evidenceBefore", evidenceBefore).put("evidenceAfter", evidence.size())
+                    .put("batchesBefore", batchesBefore).put("batchesAfter", batches.size())
+                    .put("baselinePresentation", baselinePresentation).put("currentPresentation", currentPresentation);
+            productScrollSteps.put(step); previous = position;
+        }
+        assertTrue("At least one retained visible IMAGE member compared through an actual scroll receipt", visibleImageComparisons > 0);
+        held.release.countDown(); assertTrue(original.same(session.controller().activeScope()));
+        assertTrue(nativeFrames.isEmpty()); assertTrue(faults.isEmpty()); assertBinding(); productScrollPassed = true;
+    }
+
+    @Test public void actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal() throws Exception {
+        requireProductScrollGate();
+        assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
+                .putBoolean(SettingsRepository.KEY_TEXT_SMUT_ENABLED, true).commit());
+        context.startActivity(targetIntent().putExtra("nativeScrollFixture", true).putExtra("label", "porn"));
+        startOwnedScrollLab(); connect(); main(() -> productInputCaptureEnabled = true);
+        Map<String, Long> baseline = capturePositiveNodePaintPose("baseline", 0, null, false, null);
+        CensorEngine.ActiveScope original = session.controller().activeScope();
+        sustainedStartedAt = SystemClock.uptimeMillis(); rapidProductScroll(2200, 160);
+        sustainedEndedAt = SystemClock.uptimeMillis();
+        for (NativeTextFrame frame : nativeFrames) {
+            if (frame.read.candidates.isEmpty() || frame.source.readStartedAtMillis < sustainedStartedAt
+                    || frame.source.receivedAtMillis > sustainedEndedAt) continue;
+            if (frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE) acceptedDuringSustainedDemand++;
+            else acceptedPositiveNodesOnlyDuringSustainedDemand++;
+        }
+        captureControlledPositiveNodePose("positive-forward", 320, 160, baseline);
+        rapidProductScroll(1200, 320);
+        captureControlledPositiveNodePose("positive-reversal", 80, -240, baseline);
+        assertTrue("Actual positive-node reads contained inside sustained service demand, not renamed full scans",
+                acceptedPositiveNodesOnlyDuringSustainedDemand >= 5);
+        for (ScrollMotionLedger.Receipt receipt : scrollReceipts) assertScrollBranchPreservesNativeGeneration(receipt.sample.sourceAtMillis);
+        assertFalse(explicitNativeDemand); assertTrue(batches.isEmpty());
+        assertTrue(evidence.stream().allMatch(row -> row.source.kind == SceneEngine.SourceKind.NATIVE_TEXT));
+        assertTrue(original.same(session.controller().activeScope())); assertTrue(faults.isEmpty()); assertBinding();
+        productScrollPassed = true;
+    }
+
+    private void rapidProductScroll(long durationMillis, int finalPosition) throws Exception {
+        long until = SystemClock.uptimeMillis() + durationMillis; int index = 1;
+        int[] reversal = {0, 160, 320, 160};
+        while (SystemClock.uptimeMillis() < until) {
+            context.startActivity(targetIntent().putExtra("scrollToY", reversal[index++ % reversal.length])); Thread.sleep(15);
+        }
+        lastRapidCommand = ++nextTargetCommand;
+        context.startActivity(targetIntent().putExtra("scrollToY", finalPosition).putExtra("nativeCommand", lastRapidCommand));
+    }
+
+    private long nextTargetCommand, lastRapidCommand;
+    private boolean targetCommandApplied(long command, int position) {
+        android.view.accessibility.AccessibilityNodeInfo root = ui.getRootInActiveWindow(); if (root == null) return false;
+        try {
+            if (!TARGET.contentEquals(root.getPackageName()) || root.getWindowId() != session.window().id) return false;
+            List<android.view.accessibility.AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId("android:id/custom");
+            try {
+                return nodes.size() == 1 && nodes.get(0).refresh()
+                        && nodes.get(0).getExtras().getLong(ProductTargetFixtureActivity.NATIVE_COMMAND, -1) == command
+                        && nodes.get(0).getExtras().getInt(ProductTargetFixtureActivity.NATIVE_SCROLL_Y, -1) == position;
+            } finally { for (android.view.accessibility.AccessibilityNodeInfo node : nodes) node.recycle(); }
+        } finally { root.recycle(); }
+    }
+    private long awaitControlledStartingPose(int position) throws Exception {
+        AtomicLong serviceSource = new AtomicLong(-1);
+        await("Final target command and real starting glyph/service scroll pose precede the endpoint hold", () -> {
+            if (!targetCommandApplied(lastRapidCommand, position)) return false;
+            Map<String, RectF> glyphs = productProviderGlyphs(); if (glyphs == null) return false;
+            for (String name : glyphs.keySet()) {
+                RectF expected = new RectF(productGlyphBaseline.get(name)); if (name.equals("moving")) expected.offset(0, -position);
+                if (!expected.equals(glyphs.get(name))) return false;
+            }
+            if (scrollReceipts.isEmpty()) return false;
+            ScrollMotionLedger.Receipt latest = scrollReceipts.get(scrollReceipts.size() - 1);
+            if (!latest.sample.y.absoluteKnown || latest.sample.y.absolute != position
+                    || latest.sample.scope.windowId != session.window().id) return false;
+            serviceSource.set(latest.sample.sourceAtMillis); return true;
+        });
+        return serviceSource.get();
+    }
+
+    /** Controlled endpoint only: these settled screenshots do not qualify continuous motion. */
+    private void captureControlledPositiveNodePose(String label, int position, int delta,
+            Map<String, Long> identities) throws Exception {
+        long startingServiceSource = awaitControlledStartingPose(position - delta);
+        long startingObservedAt = SystemClock.uptimeMillis();
+        Hold selected = hold(), successor = hold();
+        assertTrue(nativeReadHold.compareAndSet(null, selected));
+        try {
+            assertTrue("Autonomous serial provider entry is held after beginRead", selected.entered.await(8, TimeUnit.SECONDS));
+            CensorEngine<PixelFrame> engine = actualEngineForControl(); JSONObject control = new JSONObject();
+            synchronized (engine) {
+                ScrollMotionLedger.Scope scope = engine.scrollScope(); assertNotNull(scope);
+                control.put("heldObservedAtMillis", SystemClock.uptimeMillis()).put("epoch", scope.epoch)
+                        .put("windowId", scope.windowId).put("hardGeneration", actualNativeGeneration())
+                        .put("heldDirtyGeneration", engine.nativeTreeGeneration())
+                        .put("providerEntryOrdinal", nativeProviderEntries.get());
+            }
+            control.put("settledBeforeCommandId", lastRapidCommand).put("settledBeforePosition", position - delta)
+                    .put("settledServiceScrollSourceAtMillis", startingServiceSource).put("settledBeforeObservedAtMillis", startingObservedAt);
+            // Keep the first admitted endpoint available long enough to independently sample it.
+            // This does not extend its original candidate TTL or count as sustained demand.
+            assertTrue(nativeHoldAfterAccepted.compareAndSet(null, successor));
+            control.put("commandAtMillis", SystemClock.uptimeMillis());
+            ScrollMotionLedger.Receipt receipt = actualProductScroll(position, delta, session.controller().activeScope(), control.getLong("commandAtMillis"));
+            await("Real independent SUBTREE revision reaches the service while the serial read is held",
+                    () -> engine.nativeTreeGeneration() > control.optLong("heldDirtyGeneration"));
+            synchronized (engine) {
+                assertEquals("Soft endpoint change cannot cancel the real native operation",
+                        control.getLong("hardGeneration"), actualNativeGeneration());
+                control.put("revisedDirtyGeneration", engine.nativeTreeGeneration());
+            }
+            control.put("scrollSourceAtMillis", receipt.sample.sourceAtMillis)
+                    .put("scrollReceivedAtMillis", receipt.sample.receivedAtMillis)
+                    .put("releasedAtMillis", SystemClock.uptimeMillis());
+            selected.release.countDown();
+            capturePositiveNodePaintPose(label, position, identities, true, control);
+        } finally { selected.release.countDown(); successor.release.countDown(); }
+    }
+
+    private Intent targetIntent() {
+        return new Intent().setComponent(new ComponentName(TARGET, ProductTargetFixtureActivity.class.getName()))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+    }
+    private static boolean positiveCompleteNativeFrame(NativeTextFrame frame) {
+        return frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE && !frame.read.candidates.isEmpty();
+    }
+    private void assertScrollBranchPreservesNativeGeneration(long sourceAt) throws Exception {
+        JSONObject before = null, after = null;
+        for (JSONObject row : productInputBoundaries) {
+            if (!row.getString("route").equals("SCROLL") || row.getLong("sourceAtMillis") != sourceAt) continue;
+            if (row.getBoolean("completed")) { assertNull("One literal terminal route", after); after = row; }
+            else { assertNull("One literal entry route", before); before = row; }
+        }
+        assertNotNull("Actual synchronous service scroll entry", before); assertNotNull("Actual synchronous service scroll terminal", after);
+        assertEquals(before.getLong("epoch"), after.getLong("epoch"));
+        assertEquals("The SCROLLED branch cannot manufacture semantic cancellation; independent CONTENT events remain fenced",
+                before.getLong("nativeGeneration"), after.getLong("nativeGeneration"));
+        assertEquals("SCROLLED cannot mint a dirty-tree revision", before.getLong("nativeTreeGeneration"), after.getLong("nativeTreeGeneration"));
+        assertEquals("SCROLLED cannot change protected window authority", before.getInt("scopeWindowId"), after.getInt("scopeWindowId"));
+    }
+    private long actualNativeGeneration() throws Exception {
+        CensorEngine<PixelFrame> engine = actualEngineForControl();
+        java.lang.reflect.Field field = CensorEngine.class.getDeclaredField("nativeGeneration"); field.setAccessible(true);
+        synchronized (engine) { return field.getLong(engine); }
+    }
+    private JSONObject actualImagePresentation(CensorEngine<PixelFrame> engine) throws Exception {
+        JSONArray members = new JSONArray(); long sampledAt = SystemClock.uptimeMillis(), nextChange = -1;
+        try (CensorEngine<PixelFrame>.RenderView view = engine.acquireRenderView()) {
+            if (view != null) {
+                nextChange = view.snapshot.nextChangeAtMillis;
+                for (SceneEngine.Group group : view.snapshot.groups) for (SceneEngine.Mask member : group.members) {
+                    assertFalse(member.nativeValidated);
+                    members.put(new JSONObject().put("identity", member.identity).put("displayRegion", regionMetadata(member.displayRegion))
+                            .put("geometrySource", viewportSource(member.geometrySource)).put("evidenceSource", viewportSource(member.evidenceSource))
+                            .put("evidenceRegion", regionMetadata(member.evidenceRegion)).put("confirmed", member.confirmed)
+                            .put("estimatedMotion", member.estimatedMotion).put("imageEstimated", member.imageEstimated));
+                }
+            }
+        }
+        JSONArray subjects = new JSONArray();
+        if (!evidence.isEmpty()) for (SceneEngine.AcceptedSubject subject : evidence.get(evidence.size() - 1).subjects) {
+            JSONArray witnesses = new JSONArray();
+            for (SceneEngine.EvidenceWitness witness : subject.witnesses)
+                witnesses.put(new JSONObject().put("kind", witness.kind.name()).put("producerIdentity", witness.producerIdentity)
+                        .put("sourceSequence", witness.sourceSequence));
+            subjects.put(new JSONObject().put("identity", subject.identity).put("validUntilMillis", subject.validUntilMillis)
+                    .put("confirmedForConsumption", subject.confirmedForConsumption).put("witnesses", witnesses));
+        }
+        return new JSONObject().put("sampledAtMillis", sampledAt).put("nextChangeAtMillis", nextChange)
+                .put("rawMemberCount", members.length()).put("members", members).put("rawSubjectCount", subjects.length()).put("subjects", subjects);
+    }
+    private int assertImagePresentationUnchanged(JSONObject baseline, JSONObject current) throws Exception {
+        assertEquals("Scroll receipts cannot renew evidence witnesses/confirmation/deadlines", baseline.getJSONArray("subjects").toString(), current.getJSONArray("subjects").toString());
+        JSONArray old = baseline.getJSONArray("members"), fresh = current.getJSONArray("members");
+        for (int index = 0; index < fresh.length(); index++) {
+            JSONObject member = fresh.getJSONObject(index); JSONObject expected = null;
+            for (int previous = 0; previous < old.length(); previous++)
+                if (old.getJSONObject(previous).getLong("identity") == member.getLong("identity")) expected = old.getJSONObject(previous);
+            assertNotNull("Scroll receipts cannot manufacture another visible member", expected);
+            assertEquals("No viewport-wide translation or changed source provenance", expected.toString(), member.toString());
+        }
+        // Ordinary expiry/withdrawal may remove a displayed member; it cannot translate or renew one.
+        return fresh.length();
+    }
+    private void requireProductScrollGate() { assertNotNull("Owned product_scroll_run namespace required", productScrollEvidence); }
+    private void startOwnedScrollLab() throws Exception {
+        assertFalse("Never borrow an active Lab session", CensorLabRecorder.isActive());
+        SharedPreferences lab = context.getSharedPreferences("censor_lab_sessions", Context.MODE_PRIVATE);
+        savedLabPreferences = copy(lab.getAll()); assertFalse("No abandoned owned session may be deleted", lab.contains("active_session"));
+        File sessions = new File(context.getFilesDir(), "censor-lab/sessions");
+        File[] children = sessions.listFiles(); assertTrue("This gate never prunes earlier Lab evidence", children == null || children.length < 3);
+        CensorLabRecorder.start(context); ownedLabStarted = true;
+    }
+    private ScrollMotionLedger.Receipt actualProductScroll(int position, int delta, CensorEngine.ActiveScope scope) throws Exception {
+        return actualProductScroll(position, delta, scope, -1);
+    }
+    private ScrollMotionLedger.Receipt actualProductScroll(int position, int delta, CensorEngine.ActiveScope scope, long endpointCommandAt) throws Exception {
+        int before = scrollReceipts.size();
+        android.view.accessibility.AccessibilityEvent event = ui.executeAndWaitForEvent(
+                () -> context.startActivity(targetIntent().putExtra("scrollToY", position)),
+                value -> value.getEventType() == android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED
+                        && TARGET.contentEquals(value.getPackageName()) && value.getWindowId() == session.window().id
+                        && (endpointCommandAt < 0 || (value.getEventTime() >= endpointCommandAt && value.getScrollY() == position
+                            && (delta > 0 ? value.getScrollDeltaY() > 0 : value.getScrollDeltaY() < 0))), 12000);
+        final long eventAt;
+        try {
+            assertEquals("android.widget.ScrollView", event.getClassName().toString());
+            assertEquals("Actual View scroll position", position, event.getScrollY());
+            if (endpointCommandAt < 0) assertEquals("Actual View scroll displacement", delta, event.getScrollDeltaY());
+            else assertTrue("A coalesced endpoint displacement keeps actual signed direction",
+                    delta > 0 ? event.getScrollDeltaY() > 0 : event.getScrollDeltaY() < 0);
+            eventAt = event.getEventTime();
+        } finally { event.recycle(); }
+        AtomicReference<ScrollMotionLedger.Receipt> selected = new AtomicReference<>();
+        await("Framework event reached actual product ledger observer", () -> {
+            List<ScrollMotionLedger.Receipt> current = new ArrayList<>(scrollReceipts);
+            for (ScrollMotionLedger.Receipt receipt : current.subList(before, current.size()))
+                if (receipt.sample.sourceAtMillis == eventAt && receipt.sample.y.absoluteKnown && receipt.sample.y.absolute == position
+                        && receipt.sample.y.deltaKnown && (endpointCommandAt < 0 ? receipt.sample.y.delta == delta
+                            : delta > 0 ? receipt.sample.y.delta > 0 : receipt.sample.y.delta < 0)) { selected.set(receipt); return true; }
+            return false;
+        });
+        ScrollMotionLedger.Receipt result = selected.get();
+        assertEquals(scope.epoch, result.sample.scope.epoch); assertEquals(scope.geometry, result.sample.scope.geometry);
+        assertEquals(scope.protectionScope, result.sample.scope.protection); assertEquals(session.window().id, result.sample.scope.windowId);
+        assertTrue(result.sample.sourceAtMillis <= result.sample.receivedAtMillis);
+        assertTrue(result.sample.receivedAtMillis <= result.sample.readStartedAtMillis);
+        assertTrue(result.sample.readStartedAtMillis <= result.sample.readFinishedAtMillis);
+        assertTrue(result.sample.readFinishedAtMillis <= result.admittedAtMillis);
+        assertTrue(result.sample.owner > 0); assertTrue(result.sample.producer > 0); return result;
+    }
+
+    /** Independent provider glyph locations, not node rectangles or screenshot-derived offsets. */
+    private Map<String, RectF> productProviderGlyphs() {
+        AccessibilityWindowReader.Window active = session.window();
+        if (active == null || !session.isActive()) return null; // Binding precedes asynchronous target selection.
+        android.view.accessibility.AccessibilityNodeInfo root = ui.getRootInActiveWindow(); if (root == null) return null;
+        Map<String, RectF> result = new LinkedHashMap<>();
+        try {
+            if (!TARGET.contentEquals(root.getPackageName()) || root.getWindowId() != active.id) return null;
+            for (String name : new String[]{"moving", "fixed"}) {
+                List<android.view.accessibility.AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(
+                        name.equals("moving") ? "android:id/text1" : "android:id/text2");
+                try {
+                    if (nodes.size() != 1) return null;
+                    android.view.accessibility.AccessibilityNodeInfo node = nodes.get(0);
+                    if (!node.refresh() || !"porn".contentEquals(node.getText())) return null;
+                    assertNull("Ordinary View lacks a supplied persistent unique ID", node.getUniqueId());
+                    String key = android.view.accessibility.AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY;
+                    android.os.Bundle args = new android.os.Bundle();
+                    args.putInt(android.view.accessibility.AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_START_INDEX, 0);
+                    args.putInt(android.view.accessibility.AccessibilityNodeInfo.EXTRA_DATA_TEXT_CHARACTER_LOCATION_ARG_LENGTH, 4);
+                    if (!node.refreshWithExtraData(key, args) || !"porn".contentEquals(node.getText())) return null;
+                    android.os.Parcelable[] locations = node.getExtras().getParcelableArray(key);
+                    if (locations == null || locations.length != 4) return null;
+                    RectF union = null;
+                    for (android.os.Parcelable location : locations) {
+                        if (!(location instanceof RectF)) return null;
+                        RectF glyph = (RectF) location;
+                        if (glyph.isEmpty() || !Float.isFinite(glyph.left) || !Float.isFinite(glyph.top)
+                                || !Float.isFinite(glyph.right) || !Float.isFinite(glyph.bottom)) return null;
+                        if (union == null) union = new RectF(glyph); else union.union(glyph);
+                    }
+                    result.put(name, union);
+                } finally { for (android.view.accessibility.AccessibilityNodeInfo node : nodes) if (node != null && node != root) node.recycle(); }
+            }
+            return result;
+        } finally { root.recycle(); }
+    }
+    private static SceneEngine.Region expectedProductLine(RectF glyphs) {
+        // Exact production line contract: floor/ceil glyph union plus two px edge padding.
+        return new SceneEngine.Region(Math.floor(glyphs.left) - 2, Math.floor(glyphs.top) - 2,
+                Math.ceil(glyphs.right) + 2, Math.ceil(glyphs.bottom) + 2);
+    }
+    private static boolean sameProductLine(SceneEngine.Region a, SceneEngine.Region b) {
+        return a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom;
+    }
+    private static boolean productColor(int actual, int expected) {
+        return Math.abs(Color.red(actual) - Color.red(expected)) <= 2 && Math.abs(Color.green(actual) - Color.green(expected)) <= 2
+                && Math.abs(Color.blue(actual) - Color.blue(expected)) <= 2;
+    }
+    private static boolean productLinePixels(Bitmap image, SceneEngine.Region line, float density) {
+        int left = (int) line.left, top = (int) line.top, right = (int) line.right, bottom = (int) line.bottom;
+        if (left < 8 || top < 8 || right + 8 >= image.getWidth() || bottom + 8 >= image.getHeight()) return false;
+        // The existing Box appearance is an 8dp round-rect, not a filled square rectangle.
+        int radius = (int) Math.ceil(Math.min(8 * density, Math.min(right - left, bottom - top) / 2f));
+        if (right - left <= 2 * radius + 6 || radius < 8) return false;
+        for (int y : new int[]{top + 2, (top + bottom) / 2, bottom - 3})
+            for (int x : new int[]{left + radius + 2, (left + right) / 2, right - radius - 3})
+                if (!productColor(image.getPixel(x, y), COVER)) return false;
+        for (int[] outside : new int[][]{{left - 6, (top + bottom) / 2}, {right + 6, (top + bottom) / 2},
+                {(left + right) / 2, top - 6}, {(left + right) / 2, bottom + 6}})
+            if (!productColor(image.getPixel(outside[0], outside[1]), ProductTargetFixtureActivity.UNDERLYING)) return false;
+        for (int[] corner : new int[][]{{left + 2, top + 2}, {right - 3, top + 2}, {left + 2, bottom - 3}, {right - 3, bottom - 3}})
+            if (!productColor(image.getPixel(corner[0], corner[1]), ProductTargetFixtureActivity.UNDERLYING)) return false;
+        return true;
+    }
+    private Map<String, Long> captureProductScrollPose(String label, int position, Map<String, Long> identities) throws Exception {
+        Bitmap latest = null; long deadline = SystemClock.uptimeMillis() + 12000;
+        try {
+            while (SystemClock.uptimeMillis() < deadline) {
+                Map<String, RectF> provider = productProviderGlyphs(); if (provider == null) { Thread.sleep(10); continue; }
+                AtomicReference<AccessibilityCensorController.WindowCoverage> observed = new AtomicReference<>();
+                main(() -> observed.set(session.controller().viewportCoverage()));
+                AccessibilityCensorController.WindowCoverage coverage = observed.get();
+                if (!coverage.windowQualified || coverage.regions.size() != 2 || !session.controller().coverageCurrent(coverage)) {
+                    Thread.sleep(10); continue;
+                }
+                Map<String, Long> groups = new LinkedHashMap<>(); Map<String, SceneEngine.Region> lines = new LinkedHashMap<>();
+                for (Map.Entry<String, RectF> entry : provider.entrySet()) {
+                    SceneEngine.Region expected = expectedProductLine(entry.getValue());
+                    for (AccessibilityCensorController.WindowRegion region : coverage.regions)
+                        if (region.member.nativeValidated && sameProductLine(expected, region.displayRegion)) {
+                            assertNull("Exactly one classified member for each independent provider line", groups.put(entry.getKey(), region.member.textGroup));
+                            lines.put(entry.getKey(), region.displayRegion);
+                        }
+                }
+                if (groups.size() != 2) { Thread.sleep(10); continue; }
+                if (latest != null) latest.recycle(); latest = ui.takeScreenshot();
+                float density = context.getResources().getDisplayMetrics().density;
+                if (latest == null || !productLinePixels(latest, lines.get("moving"), density) || !productLinePixels(latest, lines.get("fixed"), density)
+                        || !provider.equals(productProviderGlyphs())) { Thread.sleep(10); continue; }
+                if (productGlyphBaseline == null) productGlyphBaseline = new LinkedHashMap<>(provider);
+                for (String name : provider.keySet()) {
+                    RectF expected = new RectF(productGlyphBaseline.get(name)); if (name.equals("moving")) expected.offset(0, -position);
+                    assertEquals("Independent glyph displacement, never frozen mask-derived geometry", expected, provider.get(name));
+                    SceneEngine.Region line = lines.get(name);
+                    assertTrue("Literal independently located line has a live displayed hit map", CensorTapTracker.shared().matchesPoint(
+                            (float) ((line.left + line.right) / 2), (float) ((line.top + line.bottom) / 2),
+                            latest.getWidth(), latest.getHeight(), SystemClock.uptimeMillis()));
+                }
+                if (identities != null) assertEquals("Unchanged exact nodes retain separate group IDs through actual service events", identities, groups);
+                assertNotEquals(groups.get("moving"), groups.get("fixed"));
+                JSONArray regions = new JSONArray();
+                for (String name : provider.keySet()) {
+                    RectF glyph = provider.get(name);
+                    regions.put(new JSONObject().put("fixtureMember", name).put("textGroup", groups.get(name))
+                            .put("glyphs", new JSONArray().put(glyph.left).put(glyph.top).put(glyph.right).put(glyph.bottom))
+                            .put("line", regionMetadata(lines.get(name))));
+                }
+                JSONObject step = new JSONObject().put("label", label).put("position", position).put("rawRegionCount", regions.length())
+                        .put("regions", regions).put("canvas", viewportSource(coverage.receipt.canvas))
+                        .put("validBeforeMillis", coverage.receipt.validBeforeMillis).put("queriedAtMillis", coverage.receipt.queriedAtMillis)
+                        .put("nativeSemanticGeneration", actualNativeGeneration())
+                        .put("independentGlyphsStableAcrossScreenshot", true).put("literalPixelsPassed", true).put("literalHitMapPassed", true);
+                productScrollSteps.put(step); saveProductPixels(label + ".png", latest); return groups;
+            }
+            if (latest != null) saveProductPixels(label + "-failed.png", latest);
+            fail("Current product masks/pixels agree with independent provider glyphs: " + label); return null;
+        } finally { if (latest != null) latest.recycle(); }
+    }
+    private void saveProductPixels(String name, Bitmap image) throws Exception {
+        File target = new File(productScrollEvidence, name); assertFalse("Preserve old pixels", target.exists());
+        try (FileOutputStream stream = new FileOutputStream(target)) { assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, stream)); }
+    }
+
+    private static final class NativePaintObservation {
+        final SnapshotCensorSurface.Post post;
+        final long sampledAtMillis;
+        final Map<String, SceneEngine.Mask> members = new LinkedHashMap<>();
+        final Map<String, NativeTextFrame> frames = new LinkedHashMap<>();
+        final Map<String, NativeTextResult.Candidate> candidates = new LinkedHashMap<>();
+        NativePaintObservation(SnapshotCensorSurface.Post post) { this.post = post; sampledAtMillis = SystemClock.uptimeMillis(); }
+    }
+    /** Actual accepted Surface paint, not complete-tree viewport/dwell authority. */
+    private NativePaintObservation currentNativePaint(Map<String, RectF> glyphs, boolean requirePartial) {
+        if (posts.isEmpty()) return null;
+        SnapshotCensorSurface.Post post = posts.get(posts.size() - 1); CensorEngine.PaintReceipt paint = post.acceptedPaint;
+        if (paint == null || !paint.scope.same(session.controller().activeScope()) || paint.members.size() != 2) return null;
+        NativePaintObservation result = new NativePaintObservation(post); boolean partial = false;
+        long now = result.sampledAtMillis;
+        for (Map.Entry<String, RectF> entry : glyphs.entrySet()) {
+            SceneEngine.Region expected = expectedProductLine(entry.getValue()); SceneEngine.Mask selected = null;
+            for (SceneEngine.Mask member : paint.members) {
+                if (!member.nativeValidated || !member.nativeNodeIdentityKnown || !sameProductLine(expected, member.displayRegion)) continue;
+                if (selected != null) return null; selected = member;
+            }
+            if (selected == null || selected.estimatedMotion || selected.imageEstimated || selected.heldGeometry
+                    || selected.geometrySource != selected.evidenceSource) return null;
+            NativeTextFrame origin = null;
+            for (NativeTextFrame frame : nativeFrames) if (frame.source == selected.evidenceSource) {
+                if (origin != null) return null; origin = frame;
+            }
+            if (origin == null || origin.read.coverage != selected.nativeCoverage) return null;
+            NativeTextResult.Candidate candidate = null;
+            for (NativeTextResult.Candidate value : origin.read.candidates)
+                if (value.exactGeometry && value.regions.size() == 1 && sameProductLine(value.regions.get(0), selected.evidenceRegion)) {
+                    if (candidate != null) return null; candidate = value;
+                }
+            if (candidate == null || !sameProductLine(selected.evidenceRegion, selected.displayRegion)
+                    || paint.atMillis >= origin.candidateValidUntilMillis(candidate) || now >= origin.candidateValidUntilMillis(candidate)) return null;
+            partial |= selected.nativeCoverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY;
+            result.members.put(entry.getKey(), selected); result.frames.put(entry.getKey(), origin); result.candidates.put(entry.getKey(), candidate);
+        }
+        return !requirePartial || partial ? result : null;
+    }
+    private JSONObject nativePaintMetadata(NativePaintObservation observed) throws Exception {
+        JSONObject post = new JSONObject(ReplacementEngineTelemetry.post(1, observed.post).substring("REPLACEMENT_POST ".length()));
+        post.remove("connection"); JSONArray members = new JSONArray();
+        for (String name : observed.members.keySet()) {
+            SceneEngine.Mask member = observed.members.get(name); NativeTextFrame frame = observed.frames.get(name);
+            NativeTextResult.Candidate candidate = observed.candidates.get(name);
+            members.put(new JSONObject().put("fixtureMember", name).put("identity", member.identity).put("textGroup", member.textGroup)
+                    .put("nativeCoverage", member.nativeCoverage.name()).put("dwellPositive", member.dwellPositive)
+                    .put("nodeKey", candidate.nodeKey).put("contentKey", candidate.contentKey)
+                    .put("evidenceSource", viewportSource(member.evidenceSource)).put("geometrySource", viewportSource(member.geometrySource))
+                    .put("displayRegion", regionMetadata(member.displayRegion)).put("evidenceRegion", regionMetadata(member.evidenceRegion))
+                    .put("validatedAtMillis", candidate.validatedAtMillis).put("validUntilMillis", frame.candidateValidUntilMillis(candidate)));
+        }
+        return new JSONObject().put("post", post).put("paintAtMillis", observed.post.acceptedPaint.atMillis)
+                .put("sampledAtMillis", observed.sampledAtMillis).put("rawMemberCount", members.length()).put("members", members);
+    }
+    private Map<String, Long> capturePositiveNodePaintPose(String label, int position, Map<String, Long> identities,
+            boolean requirePartial, JSONObject controlledRead) throws Exception {
+        Bitmap latest = null; long deadline = SystemClock.uptimeMillis() + 12000;
+        try {
+            while (SystemClock.uptimeMillis() < deadline) {
+                Map<String, RectF> glyphs = productProviderGlyphs(); if (glyphs == null) { Thread.sleep(10); continue; }
+                NativePaintObservation before = currentNativePaint(glyphs, requirePartial);
+                if (before == null) { Thread.sleep(10); continue; }
+                if (controlledRead != null) {
+                    NativeTextFrame held = before.frames.get("moving");
+                    if (held.source.readStartedAtMillis > controlledRead.getLong("heldObservedAtMillis")
+                            || held.source.receivedAtMillis < controlledRead.getLong("releasedAtMillis")) {
+                        Thread.sleep(10); continue;
+                    }
+                    assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, held.read.coverage);
+                    assertEquals(controlledRead.getLong("hardGeneration"), held.read.hardGeneration);
+                    assertTrue(held.read.scanGeneration <= controlledRead.getLong("heldDirtyGeneration"));
+                    assertTrue(held.read.confirmationGeneration >= controlledRead.getLong("revisedDirtyGeneration"));
+                }
+                if (latest != null) latest.recycle(); latest = ui.takeScreenshot();
+                Map<String, RectF> afterGlyphs = productProviderGlyphs();
+                if (latest == null || !glyphs.equals(afterGlyphs)) { Thread.sleep(10); continue; }
+                NativePaintObservation after = currentNativePaint(afterGlyphs, false);
+                if (after == null) { Thread.sleep(10); continue; }
+                Map<String, Long> groups = new LinkedHashMap<>(); boolean pixels = true;
+                float density = context.getResources().getDisplayMetrics().density;
+                for (String name : glyphs.keySet()) {
+                    SceneEngine.Mask first = before.members.get(name), current = after.members.get(name);
+                    assertEquals("A same-pose Source renewal must not reassign the exact native group", first.textGroup, current.textGroup);
+                    assertEquals("Renewal retains exact node identity", before.candidates.get(name).nodeKey, after.candidates.get(name).nodeKey);
+                    assertEquals(before.candidates.get(name).contentKey, after.candidates.get(name).contentKey);
+                    groups.put(name, current.textGroup);
+                    pixels &= productLinePixels(latest, current.displayRegion, density);
+                }
+                if (!pixels) { Thread.sleep(10); continue; }
+                if (productGlyphBaseline == null) productGlyphBaseline = new LinkedHashMap<>(glyphs);
+                JSONArray independent = new JSONArray();
+                for (String name : glyphs.keySet()) {
+                    RectF expected = new RectF(productGlyphBaseline.get(name)); if (name.equals("moving")) expected.offset(0, -position);
+                    assertEquals("Independent glyph displacement rejects a frozen line", expected, glyphs.get(name));
+                    SceneEngine.Region line = after.members.get(name).displayRegion;
+                    assertTrue("Existing displayed hit map agrees independently; no fee or dwell authority inferred", CensorTapTracker.shared().matchesPoint(
+                            (float) ((line.left + line.right) / 2), (float) ((line.top + line.bottom) / 2),
+                            latest.getWidth(), latest.getHeight(), SystemClock.uptimeMillis()));
+                    RectF glyph = glyphs.get(name);
+                    independent.put(new JSONObject().put("fixtureMember", name).put("glyphs",
+                            new JSONArray().put(glyph.left).put(glyph.top).put(glyph.right).put(glyph.bottom)));
+                }
+                assertNotEquals(groups.get("moving"), groups.get("fixed"));
+                productScrollSteps.put(new JSONObject().put("label", label).put("position", position).put("requirePartial", requirePartial)
+                        .put("settledPoseSample", true).put("controlledRead", controlledRead == null ? JSONObject.NULL : controlledRead)
+                        .put("beforePaint", nativePaintMetadata(before)).put("currentPaint", nativePaintMetadata(after))
+                        .put("independentGlyphs", independent).put("independentGlyphsStableAcrossScreenshot", true)
+                        .put("literalPixelsPassed", true).put("literalHitMapPassed", true).put("physicalPaintSourceClockKnown", false));
+                saveProductPixels(label + ".png", latest);
+                if (identities != null) assertEquals("Separate exact-node groups survive forward/reversal", identities, groups);
+                return groups;
+            }
+            if (latest != null) saveProductPixels(label + "-failed.png", latest);
+            fail("Accepted native paint agrees with independently refreshed glyphs/pixels: " + label); return null;
+        } catch (Exception | Error failure) {
+            if (latest != null && !new File(productScrollEvidence, label + ".png").exists()
+                    && !new File(productScrollEvidence, label + "-failed.png").exists()) {
+                try { saveProductPixels(label + "-failed.png", latest); }
+                catch (Exception | Error retentionFailure) { failure.addSuppressed(retentionFailure); }
+            }
+            throw failure;
+        } finally { if (latest != null) latest.recycle(); }
+    }
+
+    private void finishProductScrollEvidence() throws Exception {
+        CensorLabRecorder.CompletedSession completed = ownedLabStarted ? CensorLabRecorder.stop(context) : null;
+        if (completed != null) {
+            java.nio.file.Files.copy(completed.trace.toPath(), new File(productScrollEvidence, "trace.ndjson").toPath());
+            java.nio.file.Files.copy(completed.manifest.toPath(), new File(productScrollEvidence, "manifest.json").toPath());
+        }
+        JSONArray receipts = new JSONArray();
+        for (ScrollMotionLedger.Receipt receipt : scrollReceipts) {
+            JSONObject serialized = new JSONObject(ReplacementEngineTelemetry.scroll(1, receipt).substring("REPLACEMENT_SCROLL ".length()));
+            serialized.remove("connection"); receipts.put(serialized); // Local serializer, not an invented service connection ID.
+        }
+        JSONArray frames = new JSONArray(); int completeFrames = 0, partialFrames = 0;
+        for (NativeTextFrame frame : nativeFrames) {
+            if (frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE) completeFrames++;
+            else partialFrames++;
+            JSONArray candidates = new JSONArray();
+            for (com.subhub.app.censor.engine.NativeTextResult.Candidate candidate : frame.read.candidates) {
+                JSONArray lines = new JSONArray(); for (SceneEngine.Region line : candidate.regions) lines.put(regionMetadata(line));
+                candidates.put(new JSONObject().put("nodeKey", candidate.nodeKey == null ? JSONObject.NULL : candidate.nodeKey)
+                        .put("contentKey", candidate.contentKey).put("exactGeometry", candidate.exactGeometry)
+                        .put("rawLineCount", candidate.regions.size()).put("lines", lines));
+            }
+            JSONObject read = new JSONObject(ReplacementEngineTelemetry.nativeRead(1, frame).substring("REPLACEMENT_NATIVE ".length()));
+            read.remove("connection");
+            frames.put(new JSONObject().put("source", viewportSource(frame.source)).put("validUntilMillis", frame.validUntilMillis)
+                    .put("rawCandidateCount", frame.read.candidates.size()).put("candidates", candidates).put("read", read));
+        }
+        assertEquals(scrollReceipts.size(), receipts.length()); assertEquals(nativeFrames.size(), frames.length());
+        if (productScrollPassed && !nativeFrames.isEmpty()) {
+            if (testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
+                assertTrue("A soft fence may omit a complete evidence callback, never invent one", evidence.size() <= nativeFrames.size());
+                java.util.Set<SceneEngine.Source> seen = new java.util.HashSet<>();
+                for (CensorEngine.EvidenceReceipt receipt : evidence) {
+                    assertTrue("Unique actual native evidence Source", seen.add(receipt.source));
+                    assertTrue("Evidence is an exact callback-source subset", nativeFrames.stream().anyMatch(frame -> frame.source == receipt.source));
+                }
+            } else assertEquals(nativeFrames.size(), evidence.size());
+        }
+        JSONArray costStarts = new JSONArray(), costs = new JSONArray();
+        for (com.subhub.app.censor.engine.NativeReadCost.Start start : nativeCostStarts) {
+            JSONObject row = new JSONObject(ReplacementEngineTelemetry.nativeCostStart(1, start).substring("REPLACEMENT_NATIVE_COST_START ".length()));
+            row.remove("connection"); costStarts.put(row);
+        }
+        for (com.subhub.app.censor.engine.NativeReadCost cost : nativeCosts) {
+            JSONObject row = new JSONObject(ReplacementEngineTelemetry.nativeCost(1, cost).substring("REPLACEMENT_NATIVE_COST ".length()));
+            row.remove("connection"); costs.put(row);
+        }
+        JSONObject result = new JSONObject().put("schemaVersion", 3).put("method", testName.getMethodName())
+                .put("rawNativeCostStartCount", nativeCostStarts.size()).put("nativeCostStarts", costStarts)
+                .put("rawNativeCostCount", nativeCosts.size()).put("nativeCosts", costs)
+                .put("nativeCostDiagnosticFailures", session == null ? JSONObject.NULL : Long.valueOf(actualEngineForControl().nativeCostDiagnosticFailures()))
+                .put("nativeAssertionPassed", productScrollPassed).put("actualProductionService", session != null)
+                .put("sameInstrumentationPid", session != null && ((ScreenshotAccessibilityService) session.service()).qualificationBoundPid() == Process.myPid())
+                .put("legacyCensorRuntimeAbsent", session != null && ((ScreenshotAccessibilityService) session.service()).legacyCensorRuntimeAbsentForQualification())
+                .put("managedDrain", session != null && session.managedResourcesDrained()).put("explicitNativeDemand", explicitNativeDemand)
+                .put("rawScrollReceiptCount", scrollReceipts.size()).put("fixtureSerializedReceipts", receipts)
+                .put("rawNativeFrameCount", nativeFrames.size()).put("nativeFrames", frames).put("rawEvidenceCount", evidence.size())
+                .put("rawCompleteNativeFrameCount", completeFrames).put("rawPositiveNodeOnlyFrameCount", partialFrames)
+                .put("sustainedStartedAtMillis", sustainedStartedAt).put("sustainedEndedAtMillis", sustainedEndedAt)
+                .put("acceptedDuringSustainedDemand", acceptedDuringSustainedDemand)
+                .put("acceptedPositiveNodesOnlyDuringSustainedDemand", acceptedPositiveNodesOnlyDuringSustainedDemand)
+                .put("stationaryStartedAtMillis", stationaryStartedAt).put("stationaryEndedAtMillis", stationaryEndedAt)
+                .put("acceptedDuringStationaryRenewal", acceptedDuringStationaryRenewal)
+                .put("rawInputBoundaryCount", productInputBoundaries.size()).put("inputBoundaries", new JSONArray(productInputBoundaries))
+                .put("rawInputBoundaryFailureCount", productInputBoundaryFailures.get())
+                .put("steps", productScrollSteps).put("ownedLabCompleted", completed != null)
+                .put("physicalMotionQualified", false).put("imageMemberApplicabilityQualified", false).put("pixelPerformanceAcceptance", false);
+        File target = new File(productScrollEvidence, "gate-result.json"); assertFalse(target.exists());
+        try (FileOutputStream stream = new FileOutputStream(target)) { stream.write(result.toString(2).getBytes(StandardCharsets.UTF_8)); }
     }
 
     @Test public void currentNativeObservationsChargeOneViewportEpisodeWithoutDetectionBatching() throws Exception {
@@ -491,9 +1218,14 @@ public final class ProductCensorSessionAndroidTest {
     }
 
     @Test public void nativeViewportExpiresWithoutQueriesStartingFreshProviderReads() throws Exception {
-        nativeOnly("porn"); connect(); AccessibilityCensorController.WindowCoverage original = awaitNativeViewport();
+        nativeOnly("porn"); Hold renewal = hold();
+        // Arm the next real provider entry synchronously after the first actual accepted read.
+        nativeHoldAfterAccepted.set(renewal);
+        connect(); AccessibilityCensorController.WindowCoverage original = awaitNativeViewport();
+        assertTrue("Real producer-driven renewal reaches held provider", renewal.entered.await(8, TimeUnit.SECONDS));
         long source = original.receipt.regions.get(0).evidenceSource.sequence;
         int reads = evidence.size();
+        assertEquals(1, reads); assertEquals(2, nativeProviderEntries.get());
         assertTrue(original.receipt.validBeforeMillis < Long.MAX_VALUE);
         for (int i = 0; i < 20; i++) {
             AccessibilityCensorController.WindowCoverage queried = session.controller().viewportCoverage();
@@ -505,7 +1237,7 @@ public final class ProductCensorSessionAndroidTest {
         assertFalse(session.controller().coverageCurrent(original)); assertTrue(expired.regions.isEmpty());
         assertTrue(expired.receipt.state == CensorEngine.CoverageState.EXPIRED
                 || expired.receipt.state == CensorEngine.CoverageState.NO_ELIGIBLE_REGIONS);
-        assertEquals(reads, evidence.size()); assertNoDownstream(); assertBinding();
+        assertEquals(reads, evidence.size()); assertEquals(2, nativeProviderEntries.get()); assertNoDownstream(); assertBinding();
     }
 
     @Test public void realProductionServiceUsesOneReplacementAndComposedSurfaceWithoutLegacyWorkers() throws Exception {
@@ -1339,6 +2071,7 @@ public final class ProductCensorSessionAndroidTest {
         } finally { if (latest != null) latest.recycle(); }
     }
     private File directory() {
+        if (productScrollEvidence != null) return productScrollEvidence;
         File directory = context.getExternalFilesDir("censor-tap-fixtures-20261011"); assertNotNull(directory);
         assertTrue(directory.isDirectory() || directory.mkdirs()); return directory;
     }

@@ -380,6 +380,8 @@ public final class SceneEngine {
         /** No physical localization bound is supplied by this scene's current input contracts. */
         public final boolean physicalErrorKnown = false;
         public final boolean nativeValidated;
+        /** Null for IMAGE members; individually confirmed partial facts are not whole-tree authority. */
+        public final NativeTextResult.Coverage nativeCoverage;
         public final boolean nativeNodeIdentityKnown;
         /** Accepted positive, not merely retained geometry. Does not itself admit a dwell charge. */
         public final boolean dwellPositive;
@@ -402,8 +404,10 @@ public final class SceneEngine {
             estimatedMotion = projected.estimated;
             imageEstimated = projected.imageEstimated;
             nativeValidated = track.nativeCandidate != null;
+            nativeCoverage = nativeValidated ? track.nativeCoverage : null;
             nativeNodeIdentityKnown = nativeValidated && track.nativeCandidate.nodeKey != null;
             dwellPositive = track.negativeSources.isEmpty()
+                    && (!nativeValidated || nativeCoverage == NativeTextResult.Coverage.COMPLETE_TREE)
                     && (track.latestLane != Lane.FAST || track.evidenceSource.sequence >= latestFastSequence);
             this.heldGeometry = heldGeometry;
             displayRegion = projected.region;
@@ -444,6 +448,7 @@ public final class SceneEngine {
         public final List<EvidenceWitness> witnesses;
         /** Separate from the two-QUALITY confirmation used exclusively for retention. */
         public final boolean confirmedForConsumption;
+        public final NativeTextResult.Coverage nativeCoverage;
         public final boolean alreadyConsumed;
         public final long validUntilMillis;
 
@@ -451,10 +456,14 @@ public final class SceneEngine {
             identity = track.identity; partition = track.partition; textGroup = track.textGroup;
             category = track.category; source = track.evidenceSource; region = track.evidenceRegion;
             evidenceLane = track.latestLane;
-            List<EvidenceWitness> ordered = new ArrayList<>(track.sourceWitnesses);
+            // Intermediate paint never exposes even a previously completed acquisition's credit.
+            List<EvidenceWitness> ordered = track.nativeFrame != null && track.nativeFrame.observationOrdinal > 0
+                    ? new ArrayList<>() : new ArrayList<>(track.sourceWitnesses);
             ordered.sort((a, b) -> Long.compare(a.sourceSequence, b.sourceSequence));
             witnesses = immutable(ordered);
-            confirmedForConsumption = witnesses.size() == CONSUMPTION_SOURCE_COUNT;
+            nativeCoverage = track.nativeCandidate == null ? null : track.nativeCoverage;
+            confirmedForConsumption = witnesses.size() == CONSUMPTION_SOURCE_COUNT
+                    && (nativeCoverage == null || nativeCoverage == NativeTextResult.Coverage.COMPLETE_TREE);
             alreadyConsumed = track.evidenceConsumed;
             this.validUntilMillis = validUntilMillis;
         }
@@ -559,6 +568,8 @@ public final class SceneEngine {
         boolean fastVisible;
         boolean confirmed;
         NativeTextResult.Candidate nativeCandidate;
+        NativeTextFrame nativeFrame;
+        NativeTextResult.Coverage nativeCoverage;
         int nativeLine;
         long nativeValidUntilMillis;
 
@@ -628,6 +639,8 @@ public final class SceneEngine {
     private long imageEligibilityTarget;
     private long nextNativeGroup;
     private final Map<Long, NativeTextFrame> nativeFrames = new HashMap<>();
+    /** One scene-owned metadata pin per still-admitted native origin, separate from the caller's latest basis. */
+    private final Map<Long, Source> nativeOrigins = new HashMap<>();
     private final List<Track> tracks = new ArrayList<>();
     private final List<Batch> qualityHistory = new ArrayList<>();
     private final Map<Long, Long> imageTextVersions = new HashMap<>();
@@ -661,6 +674,7 @@ public final class SceneEngine {
         constructedImageMasks.clear();
         imageEligibilityTarget = 0;
         nativeFrames.clear();
+        nativeOrigins.clear();
         tracks.clear();
         qualityHistory.clear();
         imageTextVersions.clear();
@@ -869,6 +883,7 @@ public final class SceneEngine {
         motionConflict = true;
         tracks.clear(); motions.clear(); qualityHistory.clear(); delivered.clear(); ready = null;
         imagePresentations.clear(); constructedImageMasks.clear(); nativeFrames.clear();
+        reconcileNativeOrigins();
         // Resource pins/descriptors remain owned until the runtime performs its own epoch reset.
         revision++;
         return MotionAdmission.CONFLICT;
@@ -1043,6 +1058,7 @@ public final class SceneEngine {
             // Native publication is a complete set, never an individually evictable line subset.
             tracks.removeIf(track -> track.nativeCandidate != null);
             nativeFrames.clear();
+            reconcileNativeOrigins();
             capacityDrops++;
         }
         trimTracks();
@@ -1058,27 +1074,54 @@ public final class SceneEngine {
         if (changed) { pruneDistinctRelations(); revision++; }
     }
 
-    /** Consult the admitted whole set, including capacity retirement, not a runtime's old receipt. */
+    /** Only a still-valid complete read can establish global OCR-suppression authority. */
     public synchronized boolean hasNativeTextCoverage(long partition, long nowMillis) {
         NativeTextFrame frame = nativeFrames.get(partition);
-        return frame != null && !frame.read.candidates.isEmpty() && nowMillis <= frame.validUntilMillis;
+        if (frame == null || frame.read.coverage != NativeTextResult.Coverage.COMPLETE_TREE
+                || frame.read.candidates.isEmpty()) return false;
+        for (NativeTextResult.Candidate candidate : frame.read.candidates) {
+            if (nowMillis > frame.candidateValidUntilMillis(candidate)) return false;
+        }
+        return true;
     }
 
-    /** Successful atomic admission owns one metadata pin, released by the runtime's native basis. */
+    /**
+     * Atomic full replacement or exact selected-node upsert. Success transfers one additional
+     * caller-owned metadata pin; the scene separately retains each origin of unobserved live nodes.
+     */
     public synchronized boolean admitNativeFrame(NativeTextFrame frame) {
         Objects.requireNonNull(frame);
         Source source = frame.source;
         if (motionConflict || source.epoch != epoch || source.kind != SourceKind.NATIVE_TEXT) return false;
+        boolean partial = frame.read.coverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY;
+        if (partial && frame.read.candidates.isEmpty()) return false;
+        Set<String> selectedNodes = new HashSet<>();
+        for (NativeTextResult.Candidate candidate : frame.read.candidates) {
+            if (source.receivedAtMillis > frame.candidateValidUntilMillis(candidate)) return false;
+            if (candidate.nodeKey != null) selectedNodes.add(candidate.nodeKey);
+        }
         NativeTextFrame previous = nativeFrames.get(frame.partition);
-        if (previous != null && (source.sequence <= previous.source.sequence
-                || source.readFinishedAtMillis < previous.source.readFinishedAtMillis)) return false;
+        if (previous != null && !nativeFollows(frame, previous)) return false;
         int retained = 0;
         List<Track> old = new ArrayList<>();
         for (Track track : tracks) {
             if (track.nativeCandidate != null && track.partition == frame.partition) {
-                if (source.sequence <= track.evidenceSource.sequence
-                        || source.readFinishedAtMillis < track.evidenceSource.readFinishedAtMillis) return false;
-                old.add(track);
+                if (!nativeFollows(frame, track.nativeFrame)) return false;
+                if (frame.followsObservation(track.nativeFrame)) {
+                    if (!partial && !selectedNodes.contains(track.nativeCandidate.nodeKey)) return false;
+                    for (NativeTextResult.Candidate candidate : frame.read.candidates) {
+                        if (!Objects.equals(candidate.nodeKey, track.nativeCandidate.nodeKey)) continue;
+                        if (candidate.validatedAtMillis < track.nativeCandidate.validatedAtMillis
+                                || (candidate.validatedAtMillis == track.nativeCandidate.validatedAtMillis
+                                    && (!candidate.sameContent(track.nativeCandidate) || !candidate.samePose(track.nativeCandidate))))
+                            return false;
+                    }
+                }
+                if (partial && (!compatibleCanvas(track.evidenceSource, source)
+                        || track.evidenceSource.windowId != source.windowId
+                        || !track.evidenceSource.protectionScope.equals(source.protectionScope))) return false;
+                if (!partial || selectedNodes.contains(track.nativeCandidate.nodeKey)) old.add(track);
+                else retained++;
             } else retained++;
         }
         if (frame.read.regionCount() > policy.maximumBatchItems
@@ -1088,12 +1131,19 @@ public final class SceneEngine {
         }
         // All frame/provenance/shape/track-capacity checks precede registration and possible eviction.
         if (!register(source) || !pin(source)) return false;
+        if (!frame.read.candidates.isEmpty() && !nativeOrigins.containsKey(source.sequence)) {
+            if (!pin(source)) throw new IllegalStateException("admitted native origin lost");
+            nativeOrigins.put(source.sequence, source);
+        }
         List<Track> replacement = new ArrayList<>();
         Set<Long> used = new HashSet<>();
         for (NativeTextResult.Candidate candidate : frame.read.candidates) {
             long group = 0;
+            boolean consumedGroup = false;
             for (Track track : old) {
-                if (nativeMatches(track, candidate, source)) { group = track.textGroup; break; }
+                if (nativeMatches(track, candidate, source)) {
+                    group = track.textGroup; consumedGroup |= track.evidenceConsumed;
+                }
             }
             if (group == 0) group = ++nextNativeGroup;
             for (int line = 0; line < candidate.regions.size(); line++) {
@@ -1105,28 +1155,59 @@ public final class SceneEngine {
                             && nativeMatches(track, candidate, source)) { match = track; break; }
                 }
                 Batch batch = new Batch(source, Lane.TEXT, Collections.singletonList(observation), Collections.emptyList());
-                EvidenceWitness witness = frame.requestIdentity > 0
+                EvidenceWitness witness = frame.observationOrdinal == 0 && frame.requestIdentity > 0
                         ? new EvidenceWitness(SourceKind.NATIVE_TEXT, frame.requestIdentity, source.sequence) : null;
                 if (match == null) match = new Track(++nextIdentity, batch, observation, witness);
-                else match.update(batch, observation, witness);
+                else {
+                    if (!nativeHistoryContinues(match, frame)) match.sourceWitnesses.clear();
+                    match.update(batch, observation, witness);
+                }
                 match.nativeCandidate = candidate; match.nativeLine = line;
-                match.nativeValidUntilMillis = frame.validUntilMillis;
+                match.nativeFrame = frame;
+                match.nativeCoverage = frame.read.coverage;
+                match.evidenceConsumed |= consumedGroup;
+                match.nativeValidUntilMillis = frame.candidateValidUntilMillis(candidate);
                 match.distinctFrom.clear(); match.qualitySources.clear(); match.negativeSources.clear();
                 used.add(match.identity); replacement.add(match);
             }
         }
-        tracks.removeIf(track -> track.nativeCandidate != null && track.partition == frame.partition);
+        tracks.removeAll(old);
         tracks.addAll(replacement);
         nativeFrames.put(frame.partition, frame);
+        reconcileNativeOrigins();
         pruneDistinctRelations();
         revision++;
         return true;
     }
 
+    /** Preserve only completed history through one exact in-progress FULL, never partial credit. */
+    private boolean nativeHistoryContinues(Track track, NativeTextFrame next) {
+        if (next.observationOrdinal > 0) {
+            return !expired(track, next.source.receivedAtMillis)
+                    && (track.nativeCoverage == NativeTextResult.Coverage.COMPLETE_TREE
+                        || next.followsObservation(track.nativeFrame));
+        }
+        if (track.nativeFrame.observationOrdinal > 0) {
+            return !expired(track, next.source.receivedAtMillis)
+                    && next.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE
+                    && next.followsObservation(track.nativeFrame);
+        }
+        // Ordinary terminal partials retain their conservative, coverage-changing reset rule.
+        return track.nativeCoverage == next.read.coverage;
+    }
+
+    private static boolean nativeFollows(NativeTextFrame frame, NativeTextFrame previous) {
+        if (previous == null || frame.source.sequence <= previous.source.sequence) return false;
+        // Preserve nonoverlapping legacy admission, including conservative producer deduplication.
+        // Only an overlapping interval needs the new exact-parent observation capability.
+        return frame.source.readStartedAtMillis >= previous.source.readFinishedAtMillis || frame.followsObservation(previous);
+    }
+
     private static boolean nativeMatches(Track track, NativeTextResult.Candidate candidate, Source source) {
         NativeTextResult.Candidate old = track.nativeCandidate;
         if (old == null || !old.sameContent(candidate) || track.evidenceSource.windowId != source.windowId
-                || !compatibleCanvas(track.evidenceSource, source)) return false;
+                || !compatibleCanvas(track.evidenceSource, source)
+                || !track.evidenceSource.protectionScope.equals(source.protectionScope)) return false;
         if (old.nodeKey != null) return old.nodeKey.equals(candidate.nodeKey);
         return candidate.nodeKey == null && old.samePose(candidate);
     }
@@ -1134,7 +1215,48 @@ public final class SceneEngine {
     public synchronized void clearNative(long partition) {
         boolean removed = tracks.removeIf(track -> track.nativeCandidate != null && track.partition == partition);
         if (nativeFrames.remove(partition) != null || removed) revision++;
+        reconcileNativeOrigins();
         pruneDistinctRelations();
+    }
+
+    /** A hard content fence retires unconsumed confirmation authority, not past charges or paint age. */
+    public synchronized void fenceNativeEvidence(long partition) {
+        boolean changed = false;
+        for (Track track : tracks) {
+            if (track.nativeCandidate != null && track.partition == partition && !track.sourceWitnesses.isEmpty()) {
+                track.sourceWitnesses.clear(); changed = true;
+            }
+        }
+        if (changed) revision++;
+    }
+
+    private void reconcileNativeOrigins() {
+        Set<Long> live = new HashSet<>();
+        for (Track track : tracks) if (track.nativeCandidate != null) live.add(track.evidenceSource.sequence);
+        for (Iterator<Map.Entry<Long, Source>> iterator = nativeOrigins.entrySet().iterator(); iterator.hasNext();) {
+            Map.Entry<Long, Source> entry = iterator.next();
+            if (!live.contains(entry.getKey())) { unpin(entry.getValue()); iterator.remove(); }
+        }
+    }
+
+    /** Metadata only, bounded by source capacity and the still-admitted native set. */
+    public synchronized Set<Source> activeNativeOrigins() {
+        return Collections.unmodifiableSet(new HashSet<>(nativeOrigins.values()));
+    }
+
+    /** Prospective optional-source reservation; refusing a replacement never releases old pins. */
+    public synchronized Set<Source> nativeOriginsRetainedBy(NativeTextFrame replacement) {
+        Set<String> selected = new HashSet<>();
+        for (NativeTextResult.Candidate candidate : replacement.read.candidates) if (candidate.nodeKey != null) selected.add(candidate.nodeKey);
+        Set<Source> retained = new HashSet<>();
+        for (Track track : tracks) {
+            if (track.nativeCandidate == null) continue;
+            boolean replaced = track.partition == replacement.partition
+                    && (replacement.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE
+                        || selected.contains(track.nativeCandidate.nodeKey));
+            if (!replaced) retained.add(track.evidenceSource);
+        }
+        return Collections.unmodifiableSet(retained);
     }
 
     /** Current canonical positive inventory at one source; the accepted input is only its trigger. */
@@ -1163,7 +1285,9 @@ public final class SceneEngine {
                     || current.textGroup != subject.textGroup || !current.evidenceRegion.visible(source)
                     || nowMillis > subject.validUntilMillis || expired(current, nowMillis)) return null;
             if (subject.confirmedForConsumption && !subject.alreadyConsumed && !current.evidenceConsumed) {
-                if (current.sourceWitnesses.size() != CONSUMPTION_SOURCE_COUNT) return null;
+                if (current.sourceWitnesses.size() != CONSUMPTION_SOURCE_COUNT
+                        || (current.nativeCandidate != null
+                            && current.nativeCoverage != NativeTextResult.Coverage.COMPLETE_TREE)) return null;
                 selected.add(current); consumed.add(subject);
             }
         }
@@ -1312,6 +1436,7 @@ public final class SceneEngine {
         for (List<Mask> group : grouped) groups.add(new Group(group));
         ready = new Snapshot(source, groups, unresolved, tentative, revision, capacityDrops,
                 sourceEvictions, nextChangeAt, redundantEstimated);
+        reconcileNativeOrigins();
         pruneDistinctRelations();
         return ready;
     }

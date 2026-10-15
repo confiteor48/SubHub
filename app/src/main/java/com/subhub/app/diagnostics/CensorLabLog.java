@@ -9,7 +9,7 @@ public final class CensorLabLog {
             "FRAME_MOTION", "INFERENCE_GATE",
             "OVERLAY_PUBLISH", "QUALITY_", "SCROLL_", "SETTLED_",
             "SCENE_", "SOURCE_FRAME_", "STARTUP", "TEXT_", "WORLD_CACHE_",
-            "REPLACEMENT_TRACE ", "REPLACEMENT_POST "
+            "REPLACEMENT_TRACE ", "REPLACEMENT_POST ", "REPLACEMENT_SCROLL ", "REPLACEMENT_NATIVE ", "REPLACEMENT_NATIVE_COST ", "REPLACEMENT_NATIVE_COST_START "
     };
 
     private CensorLabLog() {}

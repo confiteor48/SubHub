@@ -518,9 +518,25 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         final long connection = PRODUCT_CONNECTIONS.incrementAndGet();
         if (connection <= 0) throw new IllegalStateException("Replacement connection capacity");
         productSession = ProductCensorQualification.connect(this, tapTracker, new CensorProductSession.Observer() {
+            @Override public void nativeReadCostStarted(com.subhub.app.censor.engine.NativeReadCost.Start value) {
+                if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
+                        com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCostStart(connection, value));
+            }
+            @Override public void nativeReadCost(com.subhub.app.censor.engine.NativeReadCost value) {
+                if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
+                        com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCost(connection, value));
+            }
+            @Override public void nativeTextAccepted(com.subhub.app.censor.engine.NativeTextFrame value) {
+                if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
+                        com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeRead(connection, value));
+            }
             @Override public void trace(com.subhub.app.censor.engine.CensorEngine.Trace value) {
                 if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
                         com.subhub.app.diagnostics.ReplacementEngineTelemetry.trace(connection, value));
+            }
+            @Override public void scrollReceived(com.subhub.app.censor.engine.ScrollMotionLedger.Receipt value) {
+                if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
+                        com.subhub.app.diagnostics.ReplacementEngineTelemetry.scroll(connection, value));
             }
             @Override public void posted(com.subhub.app.censor.android.SnapshotCensorSurface.Post value) {
                 if (CensorLabRecorder.isActive()) CensorLabLog.i(TAG,
@@ -5480,22 +5496,33 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         int type = event.getEventType();
         String packageName = event.getPackageName() == null ? "" : event.getPackageName().toString();
         boolean window = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || type == AccessibilityEvent.TYPE_WINDOWS_CHANGED;
-        if (!packageName.isEmpty()) guardForegroundPackage = packageName;
-        if (window || (HardcoreSettingsGuard.isSettingsPackage(packageName)
-                && (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || type == AccessibilityEvent.TYPE_VIEW_CLICKED))) {
-            queueHardcoreSettingsGuardRefresh(window ? 0L : 32L);
+        String route = window ? "FOREGROUND" : type == AccessibilityEvent.TYPE_VIEW_SCROLLED && packageName.equals(foregroundPackage) ? "SCROLL"
+                : type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ? (packageName.equals(foregroundPackage) ? "CONTENT" : "REQUEST")
+                : type == AccessibilityEvent.TYPE_VIEW_CLICKED ? "CLICK" : "NONE";
+        long receivedAt = SystemClock.uptimeMillis();
+        ProductCensorQualification.observeFixtureInput(session, type, event.getContentChangeTypes(), event.getWindowId(),
+                event.getEventTime(), receivedAt, route, false);
+        try {
+            if (!packageName.isEmpty()) guardForegroundPackage = packageName;
+            if (window || (HardcoreSettingsGuard.isSettingsPackage(packageName)
+                    && (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || type == AccessibilityEvent.TYPE_VIEW_CLICKED))) {
+                queueHardcoreSettingsGuardRefresh(window ? 0L : 32L);
+            }
+            if (window) {
+                String className = event.getClassName() == null ? "" : event.getClassName().toString();
+                session.foregroundEvent(packageName, className, event.getWindowId(), type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+            } else if ((type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || type == AccessibilityEvent.TYPE_VIEW_SCROLLED)
+                    && packageName.equals(foregroundPackage)) {
+                if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) session.scrolled(event);
+                else session.contentChanged(event.getWindowId(), event.getContentChangeTypes());
+            } else if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && !packageName.equals(foregroundPackage)) {
+                session.request();
+            } else if (type == AccessibilityEvent.TYPE_VIEW_CLICKED) recordCensoredTap(event, packageName);
+            // No event/receipt timestamp is promoted to measured image motion or source pixel time.
+        } finally {
+            ProductCensorQualification.observeFixtureInput(session, type, event.getContentChangeTypes(), event.getWindowId(),
+                    event.getEventTime(), receivedAt, route, true);
         }
-        if (window) {
-            String className = event.getClassName() == null ? "" : event.getClassName().toString();
-            session.foregroundEvent(packageName, className, event.getWindowId(), type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
-        } else if ((type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || type == AccessibilityEvent.TYPE_VIEW_SCROLLED)
-                && packageName.equals(foregroundPackage)) {
-            if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) session.scrolled(event.getWindowId());
-            session.contentChanged(event.getWindowId());
-        } else if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && !packageName.equals(foregroundPackage)) {
-            session.request();
-        } else if (type == AccessibilityEvent.TYPE_VIEW_CLICKED) recordCensoredTap(event, packageName);
-        // No event/receipt timestamp is promoted to measured image motion or source pixel time.
     }
 
     private void acceptApplicationWindow(int windowId) {

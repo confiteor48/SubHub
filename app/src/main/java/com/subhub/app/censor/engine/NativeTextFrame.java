@@ -10,6 +10,9 @@ public final class NativeTextFrame {
     public final long validUntilMillis;
     /** Independent native job clocks; -1 means no runtime job provenance was supplied. */
     public final long requestIdentity, queuedAtMillis, startedAtMillis;
+    public final long maximumAgeMillis;
+    /** Zero is a terminal result. Positive ordinals are nonterminal whole-node observations. */
+    public final int observationOrdinal;
 
     public NativeTextFrame(SceneEngine.Source source, long partition, NativeTextResult read, long maximumAgeMillis) {
         this(source, partition, read, maximumAgeMillis, -1, -1, -1);
@@ -17,6 +20,11 @@ public final class NativeTextFrame {
 
     public NativeTextFrame(SceneEngine.Source source, long partition, NativeTextResult read, long maximumAgeMillis,
             long requestIdentity, long queuedAtMillis, long startedAtMillis) {
+        this(source, partition, read, maximumAgeMillis, requestIdentity, queuedAtMillis, startedAtMillis, 0);
+    }
+
+    public NativeTextFrame(SceneEngine.Source source, long partition, NativeTextResult read, long maximumAgeMillis,
+            long requestIdentity, long queuedAtMillis, long startedAtMillis, int observationOrdinal) {
         this.source = Objects.requireNonNull(source); this.read = Objects.requireNonNull(read);
         if (source.kind != SceneEngine.SourceKind.NATIVE_TEXT || maximumAgeMillis <= 0
                 || source.width != read.width || source.height != read.height || source.windowId != read.windowId
@@ -27,9 +35,39 @@ public final class NativeTextFrame {
                 || startedAtMillis < queuedAtMillis || startedAtMillis > source.readStartedAtMillis))) {
             throw new IllegalArgumentException("native frame provenance");
         }
+        if (observationOrdinal < 0 || observationOrdinal > NativeTextResult.MAXIMUM_CANDIDATES
+                || (observationOrdinal > 0 && (requestIdentity <= 0
+                    || read.coverage != NativeTextResult.Coverage.POSITIVE_NODES_ONLY
+                    || read.readMode != NativeTextResult.ReadMode.FULL_DISCOVERY || read.candidates.size() != 1)))
+            throw new IllegalArgumentException("native observation provenance");
         this.partition = partition;
+        this.maximumAgeMillis = maximumAgeMillis;
         this.requestIdentity = requestIdentity; this.queuedAtMillis = queuedAtMillis; this.startedAtMillis = startedAtMillis;
+        this.observationOrdinal = observationOrdinal;
         validUntilMillis = source.readFinishedAtMillis >= Long.MAX_VALUE - maximumAgeMillis
                 ? Long.MAX_VALUE : source.readFinishedAtMillis + maximumAgeMillis;
+    }
+
+    /** Parent intervals may overlap only within this exact acquisition, never by clock retagging. */
+    boolean followsObservation(NativeTextFrame previous) {
+        return previous != null && previous.observationOrdinal > 0
+                && (observationOrdinal == 0 || observationOrdinal > previous.observationOrdinal)
+                && requestIdentity > 0 && requestIdentity == previous.requestIdentity
+                && queuedAtMillis == previous.queuedAtMillis && startedAtMillis == previous.startedAtMillis
+                && partition == previous.partition && maximumAgeMillis == previous.maximumAgeMillis
+                && source.epoch == previous.source.epoch && source.geometry == previous.source.geometry
+                && source.width == previous.source.width && source.height == previous.source.height
+                && source.windowId == previous.source.windowId && source.protectionScope.equals(previous.source.protectionScope)
+                && source.readStartedAtMillis == previous.source.readStartedAtMillis
+                && source.readFinishedAtMillis >= previous.source.readFinishedAtMillis
+                && read.hardGeneration == previous.read.hardGeneration && read.scanGeneration == previous.read.scanGeneration
+                && read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY && read.readMode == previous.read.readMode;
+    }
+
+    /** A sibling finishing later cannot renew this independently validated partial node. */
+    public long candidateValidUntilMillis(NativeTextResult.Candidate candidate) {
+        if (!read.candidates.contains(Objects.requireNonNull(candidate))) throw new IllegalArgumentException("foreign native candidate");
+        long at = candidate.validatedAtMillis == -1 ? source.readFinishedAtMillis : candidate.validatedAtMillis;
+        return at >= Long.MAX_VALUE - maximumAgeMillis ? Long.MAX_VALUE : at + maximumAgeMillis;
     }
 }
