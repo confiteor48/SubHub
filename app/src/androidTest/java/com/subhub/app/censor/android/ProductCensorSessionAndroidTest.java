@@ -111,6 +111,12 @@ public final class ProductCensorSessionAndroidTest {
     private boolean productScrollPassed, ownedLabStarted;
     private boolean sustainedNativeGate, sustainedAddedVisible;
     private boolean windowCostGate;
+    private boolean naturalCohortRenewalGate;
+    private final List<NativeArrivalObservation> naturalNativeArrivals = new CopyOnWriteArrayList<>();
+    private final JSONArray naturalRenewalCommands = new JSONArray();
+    private long naturalRenewalStartedAt = -1, naturalRenewalEndedAt = -1;
+    private long naturalCallbackBoundaryAt = -1;
+    private JSONObject naturalFinalCommand;
     private boolean nativeCutoffGate;
     private long nativeCutoffEpoch = -1, nativeCutoffRequest = -1, nativeCutoffTicket = -1;
     private final JSONArray nativeCutoffEvents = new JSONArray();
@@ -221,6 +227,7 @@ public final class ProductCensorSessionAndroidTest {
             @Override public void sessionFailure(Throwable fault) { faults.add(fault); }
             @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { evidence.add(receipt); }
             @Override public void nativeTextAccepted(NativeTextFrame frame) {
+                if (naturalCohortRenewalGate) naturalNativeArrivals.add(new NativeArrivalObservation(frame, SystemClock.uptimeMillis()));
                 nativeFrames.add(frame); Hold held = nativeHoldAfterAccepted.getAndSet(null);
                 if (held != null) nativeReadHold.set(held);
             }
@@ -285,6 +292,13 @@ public final class ProductCensorSessionAndroidTest {
                 catch (Exception | Error failure) {
                     if (primaryTeardownFailure == null) evidenceFailure = failure;
                     else primaryTeardownFailure.addSuppressed(failure);
+                }
+                // Preserve this new falsifier even if an older serializer/assertion failed.
+                if (naturalCohortRenewalGate) try { finishNaturalCohortEvidence(); }
+                catch (Exception | Error failure) {
+                    if (primaryTeardownFailure != null) primaryTeardownFailure.addSuppressed(failure);
+                    else if (evidenceFailure != null) evidenceFailure.addSuppressed(failure);
+                    else evidenceFailure = failure;
                 }
             }
             if (ownedLabStarted && CensorLabRecorder.isActive()) CensorLabRecorder.stop(context);
@@ -565,6 +579,100 @@ public final class ProductCensorSessionAndroidTest {
             assertNotNull("Retirement cannot run concurrently with this native callback", reflected(nativeCutoffHost, "textReader"));
             nativeCutoffEvent("CLOSE_RETURN");
         } catch (Exception | Error failure) { faults.add(failure); throw new AssertionError("Native cutoff control failed", failure); }
+    }
+
+    /** Natural acquisition falsifier only: early Source publications are never independent parents. */
+    @Test public void actualServiceNaturalCohortRenewalPreservesOriginalParentsAndNodeDeadlines() throws Exception {
+        requireProductScrollGate(); naturalCohortRenewalGate = true;
+        assertTrue(preferences.edit().putStringSet(SettingsRepository.KEY_ENABLED_CATEGORIES, Collections.emptySet())
+                .putBoolean(SettingsRepository.KEY_TEXT_SMUT_ENABLED, true).commit());
+        context.startActivity(targetIntent().putExtra("nativeScrollFixture", true).putExtra("label", "porn"));
+        startOwnedScrollLab(); connect();
+        main(() -> productInputCaptureEnabled = true); sustainedResourceObserver.enable(SystemClock.uptimeMillis());
+        capturePositiveNodePaintPose("baseline", 0, null, false, null);
+        CensorEngine.ActiveScope original = session.controller().activeScope();
+        naturalRenewalStartedAt = SystemClock.uptimeMillis();
+        long until = naturalRenewalStartedAt + 2200; int index = 1, lastPosition = 0;
+        int[] reversal = {0, 160, 320, 160};
+        while (SystemClock.uptimeMillis() < until) {
+            lastPosition = reversal[index++ % reversal.length]; long issuedAt = SystemClock.uptimeMillis();
+            context.startActivity(targetIntent().putExtra("scrollToY", lastPosition));
+            naturalRenewalCommands.put(new JSONObject().put("ordinal", naturalRenewalCommands.length() + 1)
+                    .put("position", lastPosition).put("issuedAtMillis", issuedAt).put("returnedAtMillis", SystemClock.uptimeMillis()));
+            Thread.sleep(15);
+        }
+        naturalRenewalEndedAt = SystemClock.uptimeMillis();
+        // A passive serial barrier finishes already executing callbacks. It creates no read,
+        // does not await a delayed confirmation and never extends the fixed source cutoff.
+        java.util.concurrent.ScheduledExecutorService nativeExecutor = (java.util.concurrent.ScheduledExecutorService)
+                reflected(reflected(session.controller(), "host"), "nativeReads");
+        naturalCallbackBoundaryAt = nativeExecutor.submit(SystemClock::uptimeMillis).get(12, TimeUnit.SECONDS);
+        Set<String> partialParents = new LinkedHashSet<>(); long firstCohortRequest = -1; boolean subsequentFull = false;
+        for (NativeTextFrame frame : nativeFrames) {
+            if (frame.observationOrdinal != 0 || frame.read.candidates.isEmpty()
+                    || frame.source.readStartedAtMillis < naturalRenewalStartedAt || frame.source.receivedAtMillis > until) continue;
+            com.subhub.app.censor.engine.NativeReadCost terminal = null;
+            for (com.subhub.app.censor.engine.NativeReadCost cost : nativeCosts)
+                if (cost.epoch == frame.source.epoch && cost.request == frame.requestIdentity) {
+                    assertNull("One actual terminal per native parent", terminal); terminal = cost;
+                }
+            assertNotNull("Admitted terminal Source has its actual parent terminal", terminal);
+            assertEquals(com.subhub.app.censor.engine.NativeReadCost.Terminal.SUCCESS, terminal.terminal);
+            if (frame.read.coverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY) {
+                assertTrue("One partial terminal per actual parent", partialParents.add(frame.source.epoch + ":" + frame.requestIdentity));
+                if (frame.read.readMode == NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY) {
+                    assertEquals("Natural cohort really contains two independent nodes", 2, frame.read.candidates.size());
+                    if (firstCohortRequest < 0) firstCohortRequest = frame.requestIdentity;
+                }
+            }
+            if (firstCohortRequest > 0 && frame.requestIdentity > firstCohortRequest
+                    && frame.read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY) subsequentFull = true;
+        }
+        assertTrue("Unchanged first2200ms >=5 independent successful terminal PARTIAL parents", partialParents.size() >= 5);
+        assertTrue("Natural demand actually exercises the new two-address cohort", firstCohortRequest > 0);
+        assertTrue("A successful actual FULL follows the finite cohort pass", subsequentFull);
+        assertOriginalNodeRenewalSupported(false); assertOriginalNodeRenewalSupported(true);
+        long finalCommand = ++nextTargetCommand, finalIssuedAt = SystemClock.uptimeMillis();
+        context.startActivity(targetIntent().putExtra("scrollToY", 0).putExtra("nativeCommand", finalCommand));
+        await("Real tagged final target command is applied independently of queued scroll deltas", () -> targetCommandApplied(finalCommand, 0));
+        naturalFinalCommand = new JSONObject().put("command", finalCommand).put("issuedAtMillis", finalIssuedAt)
+                .put("providerObservedAtMillis", SystemClock.uptimeMillis()).put("position", 0);
+        capturePositiveNodePaintPose("natural-final", 0, null, false, null);
+        assertFalse("No hold or manual native request manufactures natural demand", explicitNativeDemand);
+        assertTrue(ownedHolds.isEmpty()); assertTrue(batches.isEmpty()); assertTrue(faults.isEmpty());
+        assertEquals(0, productInputBoundaryFailures.get()); assertTrue(original.same(session.controller().activeScope()));
+        assertBinding(); productScrollPassed = true;
+    }
+
+    private static final class NativeArrivalObservation {
+        final NativeTextFrame frame; final long callbackAtMillis;
+        NativeArrivalObservation(NativeTextFrame frame, long at) { this.frame = frame; callbackAtMillis = at; }
+    }
+
+    private void assertOriginalNodeRenewalSupported(boolean callbackClock) throws Exception {
+        JSONArray members = productScrollSteps.getJSONObject(0).getJSONObject("currentPaint").getJSONArray("members");
+        assertEquals("Two exact original baseline nodes", 2, members.length());
+        for (int member = 0; member < members.length(); member++) {
+            JSONObject original = members.getJSONObject(member); long deadline = -1;
+            for (NativeArrivalObservation observation : naturalNativeArrivals) {
+                NativeTextFrame frame = observation.frame;
+                long available = callbackClock ? observation.callbackAtMillis : frame.source.receivedAtMillis;
+                if (available > naturalRenewalEndedAt) break;
+                if (available >= naturalRenewalStartedAt)
+                    assertTrue("Original node has unsupported " + (callbackClock ? "callback-available" : "source-receipt")
+                            + " interval: " + original.getString("fixtureMember") + " " + Math.max(naturalRenewalStartedAt, deadline) + ".." + available,
+                            deadline >= available);
+                NativeTextResult.Candidate selected = null;
+                for (NativeTextResult.Candidate candidate : frame.read.candidates)
+                    if (original.getString("nodeKey").equals(candidate.nodeKey)) {
+                        assertNull("One exact original node per Source", selected); selected = candidate;
+                        assertEquals("Original node content never changed", original.getString("contentKey"), candidate.contentKey);
+                    }
+                if (selected != null) deadline = Math.max(deadline, frame.candidateValidUntilMillis(selected));
+                else if (frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE) deadline = Math.min(deadline, available);
+            }
+            assertTrue("Original candidate support reaches actual demand end without renewed age", deadline >= naturalRenewalEndedAt);
+        }
     }
 
     @Test public void actualServiceNativeSustainabilityDiscoversAndWithdrawsNewNodeThroughThirtySeconds() throws Exception {
@@ -1165,7 +1273,7 @@ public final class ProductCensorSessionAndroidTest {
                 float density = context.getResources().getDisplayMetrics().density;
                 for (String name : glyphs.keySet()) {
                     SceneEngine.Mask first = before.members.get(name), current = after.members.get(name);
-                    if (!sustainedNativeGate || before.frames.get(name).candidateValidUntilMillis(before.candidates.get(name))
+                    if ((!sustainedNativeGate && !naturalCohortRenewalGate) || before.frames.get(name).candidateValidUntilMillis(before.candidates.get(name))
                             >= current.evidenceSource.receivedAtMillis)
                         assertEquals("A live same-pose Source renewal must not reassign the exact native group", first.textGroup, current.textGroup);
                     assertEquals("Renewal retains exact node identity", before.candidates.get(name).nodeKey, after.candidates.get(name).nodeKey);
@@ -1221,6 +1329,59 @@ public final class ProductCensorSessionAndroidTest {
         } finally { if (latest != null) latest.recycle(); }
     }
 
+    private void finishNaturalCohortEvidence() throws Exception {
+        ParentBoundResourceObserver.State state = sustainedResourceObserver.state();
+        JSONArray arrivals = new JSONArray(), frames = new JSONArray(), starts = new JSONArray(), costs = new JSONArray();
+        for (NativeArrivalObservation observation : naturalNativeArrivals) arrivals.put(new JSONObject()
+                .put("epoch", observation.frame.source.epoch).put("sequence", observation.frame.source.sequence)
+                .put("request", observation.frame.requestIdentity).put("observationOrdinal", observation.frame.observationOrdinal)
+                .put("callbackAtMillis", observation.callbackAtMillis));
+        for (NativeTextFrame frame : nativeFrames) frames.put(nativeFrameMetadata(frame));
+        for (com.subhub.app.censor.engine.NativeReadCost.Start start : nativeCostStarts) {
+            JSONObject row = new JSONObject(ReplacementEngineTelemetry.nativeCostStart(1, start).substring("REPLACEMENT_NATIVE_COST_START ".length()));
+            row.remove("connection"); starts.put(row);
+        }
+        for (com.subhub.app.censor.engine.NativeReadCost cost : nativeCosts) {
+            JSONObject row = new JSONObject(ReplacementEngineTelemetry.nativeCost(1, cost).substring("REPLACEMENT_NATIVE_COST ".length()));
+            row.remove("connection"); costs.put(row);
+        }
+        JSONObject result = new JSONObject().put("schemaVersion", 1).put("method", testName.getMethodName())
+                .put("clockDomain", "UPTIME_MILLIS").put("nativeAssertionPassed", productScrollPassed)
+                .put("renewalStartedAtMillis", naturalRenewalStartedAt).put("renewalEndedAtMillis", naturalRenewalEndedAt)
+                .put("callbackBoundaryAtMillis", naturalCallbackBoundaryAt)
+                .put("initialWindowMillis", 2200).put("rawCommandCount", naturalRenewalCommands.length()).put("commands", naturalRenewalCommands)
+                .put("rawArrivalCount", arrivals.length()).put("arrivals", arrivals).put("retainedSteps", productScrollSteps)
+                .put("rawNativeFrameCount", frames.length()).put("nativeFrames", frames)
+                .put("rawNativeCostStartCount", starts.length()).put("nativeCostStarts", starts)
+                .put("rawNativeCostCount", costs.length()).put("nativeCosts", costs)
+                .put("finalCommand", naturalFinalCommand == null ? JSONObject.NULL : naturalFinalCommand)
+                .put("resourceObserver", new JSONObject().put("enabledAtMillis", state.enabledAtMillis).put("cutoffAtMillis", state.cutoffAtMillis)
+                        .put("sampledParents", state.sampledParents).put("terminalParents", state.terminalParents)
+                        .put("pendingParents", state.pendingParents).put("admissionsClosed", state.admissionsClosed)
+                        .put("maximumParents", ParentBoundResourceObserver.MAXIMUM_PARENTS))
+                .put("rawResourceSampleCount", sustainedResources.size()).put("resourceSamples", new JSONArray(sustainedResources))
+                .put("rawResourceFailureCount", sustainedResourceFailures.size()).put("resourceFailures", new JSONArray(sustainedResourceFailures))
+                .put("resourcesExportedAtMillis", SystemClock.uptimeMillis()).put("providerHoldsUsed", !ownedHolds.isEmpty())
+                .put("explicitNativeDemand", explicitNativeDemand).put("physicalPixelClockKnown", false)
+                .put("managedDrain", session != null && session.managedResourcesDrained());
+        File target = new File(productScrollEvidence, "native-cohort-renewal.json"); assertFalse(target.exists());
+        try (FileOutputStream stream = new FileOutputStream(target)) { stream.write(result.toString(2).getBytes(StandardCharsets.UTF_8)); }
+    }
+
+    private static JSONObject nativeFrameMetadata(NativeTextFrame frame) throws Exception {
+        JSONArray candidates = new JSONArray();
+        for (NativeTextResult.Candidate candidate : frame.read.candidates) {
+            JSONArray lines = new JSONArray(); for (SceneEngine.Region line : candidate.regions) lines.put(regionMetadata(line));
+            candidates.put(new JSONObject().put("nodeKey", candidate.nodeKey == null ? JSONObject.NULL : candidate.nodeKey)
+                    .put("contentKey", candidate.contentKey).put("exactGeometry", candidate.exactGeometry)
+                    .put("rawLineCount", candidate.regions.size()).put("lines", lines));
+        }
+        JSONObject read = new JSONObject(ReplacementEngineTelemetry.nativeRead(1, frame).substring("REPLACEMENT_NATIVE ".length()));
+        read.remove("connection");
+        return new JSONObject().put("source", viewportSource(frame.source)).put("validUntilMillis", frame.validUntilMillis)
+                .put("rawCandidateCount", frame.read.candidates.size()).put("candidates", candidates).put("read", read);
+    }
+
     private void finishProductScrollEvidence() throws Exception {
         CensorLabRecorder.CompletedSession completed = ownedLabStarted ? CensorLabRecorder.stop(context) : null;
         if (completed != null) {
@@ -1236,21 +1397,11 @@ public final class ProductCensorSessionAndroidTest {
         for (NativeTextFrame frame : nativeFrames) {
             if (frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE) completeFrames++;
             else partialFrames++;
-            JSONArray candidates = new JSONArray();
-            for (com.subhub.app.censor.engine.NativeTextResult.Candidate candidate : frame.read.candidates) {
-                JSONArray lines = new JSONArray(); for (SceneEngine.Region line : candidate.regions) lines.put(regionMetadata(line));
-                candidates.put(new JSONObject().put("nodeKey", candidate.nodeKey == null ? JSONObject.NULL : candidate.nodeKey)
-                        .put("contentKey", candidate.contentKey).put("exactGeometry", candidate.exactGeometry)
-                        .put("rawLineCount", candidate.regions.size()).put("lines", lines));
-            }
-            JSONObject read = new JSONObject(ReplacementEngineTelemetry.nativeRead(1, frame).substring("REPLACEMENT_NATIVE ".length()));
-            read.remove("connection");
-            frames.put(new JSONObject().put("source", viewportSource(frame.source)).put("validUntilMillis", frame.validUntilMillis)
-                    .put("rawCandidateCount", frame.read.candidates.size()).put("candidates", candidates).put("read", read));
+            frames.put(nativeFrameMetadata(frame));
         }
         assertEquals(scrollReceipts.size(), receipts.length()); assertEquals(nativeFrames.size(), frames.length());
         if (productScrollPassed && !nativeFrames.isEmpty()) {
-            if (sustainedNativeGate || windowCostGate || nativeCutoffGate || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
+            if (sustainedNativeGate || windowCostGate || nativeCutoffGate || naturalCohortRenewalGate || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
                 assertTrue("A soft fence may omit a complete evidence callback, never invent one", evidence.size() <= nativeFrames.size());
                 java.util.Set<SceneEngine.Source> seen = new java.util.HashSet<>();
                 for (CensorEngine.EvidenceReceipt receipt : evidence) {
