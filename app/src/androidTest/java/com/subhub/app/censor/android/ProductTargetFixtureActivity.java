@@ -12,6 +12,8 @@ public final class ProductTargetFixtureActivity extends Activity {
     public static final String MOTION_FRAME_COMMIT = "com.subhub.app.test.motionFrameCommit";
     public static final String NATIVE_COMMAND = "com.subhub.app.test.nativeCommand";
     public static final String NATIVE_SCROLL_Y = "com.subhub.app.test.nativeScrollY";
+    public static final String NATIVE_ADDED = "com.subhub.app.test.nativeAdded";
+    public static final String NATIVE_MUTATION = "com.subhub.app.test.nativeMutation";
     private TextView label;
     private FrameLayout root;
     private android.widget.ScrollView scroll;
@@ -20,9 +22,11 @@ public final class ProductTargetFixtureActivity extends Activity {
     private boolean motionFixture;
     private boolean nativeScrollFixture;
     private TextView fixedLabel;
+    private TextView addedLabel;
     private boolean compoundMotionScroll;
     private long motionFrameCommit;
     private long nativeCommand;
+    private long nativeMutation;
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state); getWindow().setWindowAnimations(0); overridePendingTransition(0, 0);
         root = new FrameLayout(this); root.setBackgroundColor(UNDERLYING);
@@ -70,6 +74,19 @@ public final class ProductTargetFixtureActivity extends Activity {
         if (intent.getBooleanExtra("compoundScrollRecord", false)) compoundMotionScroll = true;
         if (scroll != null && intent.hasExtra("scrollToY")) scroll.scrollTo(0, intent.getIntExtra("scrollToY", 0));
         if (nativeScrollFixture && intent.hasExtra("nativeCommand")) nativeCommand = intent.getLongExtra("nativeCommand", 0);
+        if (nativeScrollFixture && intent.hasExtra("nativeAdded")) {
+            nativeMutation = nativeCommand;
+            if (intent.getBooleanExtra("nativeAdded", false) && addedLabel == null) {
+                addedLabel = new TextView(this); addedLabel.setId(android.R.id.message);
+                addedLabel.setText("porn"); addedLabel.setTextColor(0xff000000); addedLabel.setTextSize(20);
+                addedLabel.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+                int width = getResources().getDisplayMetrics().widthPixels;
+                FrameLayout.LayoutParams added = new FrameLayout.LayoutParams(width / 3, -2);
+                added.leftMargin = width / 2; added.topMargin = 850; root.addView(addedLabel, added);
+            } else if (!intent.getBooleanExtra("nativeAdded", false) && addedLabel != null) {
+                root.removeView(addedLabel); addedLabel = null;
+            }
+        }
         if (motionMedia != null && intent.hasExtra("mediaTranslationY"))
             motionMedia.setTranslationY(intent.getIntExtra("mediaTranslationY", 0));
         if (independentScroll != null && intent.hasExtra("independentScrollToY"))
@@ -92,6 +109,8 @@ public final class ProductTargetFixtureActivity extends Activity {
                 super.onInitializeAccessibilityNodeInfo(host, info);
                 info.getExtras().putLong(NATIVE_COMMAND, nativeCommand);
                 info.getExtras().putInt(NATIVE_SCROLL_Y, scroll == null ? -1 : scroll.getScrollY());
+                info.getExtras().putBoolean(NATIVE_ADDED, addedLabel != null);
+                info.getExtras().putLong(NATIVE_MUTATION, nativeMutation);
             }
         });
         int width = getResources().getDisplayMetrics().widthPixels;
