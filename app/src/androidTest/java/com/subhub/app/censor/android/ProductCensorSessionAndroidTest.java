@@ -113,6 +113,8 @@ public final class ProductCensorSessionAndroidTest {
     private boolean windowCostGate;
     private boolean naturalCohortRenewalGate;
     private final List<NativeArrivalObservation> naturalNativeArrivals = new CopyOnWriteArrayList<>();
+    private final AtomicReference<Thread> naturalNativeOwner = new AtomicReference<>();
+    private final List<NativeOwnerObservation> naturalNativeOwners = new CopyOnWriteArrayList<>();
     private final JSONArray naturalRenewalCommands = new JSONArray();
     private long naturalRenewalStartedAt = -1, naturalRenewalEndedAt = -1;
     private long naturalCallbackBoundaryAt = -1;
@@ -232,7 +234,12 @@ public final class ProductCensorSessionAndroidTest {
                 if (held != null) nativeReadHold.set(held);
             }
             @Override public void nativeReadCostStarted(com.subhub.app.censor.engine.NativeReadCost.Start value) {
-                nativeCostStarts.add(value); sampleSustainedResources("START", value.epoch, value.request);
+                nativeCostStarts.add(value);
+                if (naturalCohortRenewalGate) {
+                    naturalNativeOwner.compareAndSet(null, Thread.currentThread());
+                    naturalNativeOwners.add(new NativeOwnerObservation(value));
+                }
+                sampleSustainedResources("START", value.epoch, value.request);
             }
             @Override public void nativeReadCost(com.subhub.app.censor.engine.NativeReadCost value) {
                 nativeCosts.add(value); sampleSustainedResources("TERMINAL", value.epoch, value.request);
@@ -641,7 +648,26 @@ public final class ProductCensorSessionAndroidTest {
         assertFalse("No hold or manual native request manufactures natural demand", explicitNativeDemand);
         assertTrue(ownedHolds.isEmpty()); assertTrue(batches.isEmpty()); assertTrue(faults.isEmpty());
         assertEquals(0, productInputBoundaryFailures.get()); assertTrue(original.same(session.controller().activeScope()));
+        assertFalse("Actual native owner observations are required", naturalNativeOwners.isEmpty());
+        for (NativeOwnerObservation observation : naturalNativeOwners) {
+            assertSame("One captured serial native owner", naturalNativeOwner.get(), observation.thread);
+            assertFalse("Native priority is observed on its owner, not main", observation.mainThread);
+            assertEquals("Actual kernel priority, not requested Java Thread priority", Process.THREAD_PRIORITY_DEFAULT, observation.priority);
+        }
         assertBinding(); productScrollPassed = true;
+    }
+
+    private static final class NativeOwnerObservation {
+        final com.subhub.app.censor.engine.NativeReadCost.Start start;
+        final Thread thread;
+        final int tid, priority;
+        final long sampledAtMillis;
+        final boolean mainThread;
+        NativeOwnerObservation(com.subhub.app.censor.engine.NativeReadCost.Start start) {
+            this.start = start; thread = Thread.currentThread(); tid = Process.myTid();
+            priority = Process.getThreadPriority(tid); sampledAtMillis = SystemClock.uptimeMillis();
+            mainThread = Looper.myLooper() == Looper.getMainLooper();
+        }
     }
 
     private static final class NativeArrivalObservation {
@@ -1332,6 +1358,12 @@ public final class ProductCensorSessionAndroidTest {
     private void finishNaturalCohortEvidence() throws Exception {
         ParentBoundResourceObserver.State state = sustainedResourceObserver.state();
         JSONArray arrivals = new JSONArray(), frames = new JSONArray(), starts = new JSONArray(), costs = new JSONArray();
+        JSONArray owners = new JSONArray();
+        for (NativeOwnerObservation observation : naturalNativeOwners) owners.put(new JSONObject()
+                .put("epoch", observation.start.epoch).put("request", observation.start.request)
+                .put("invokedAtMillis", observation.start.invokedAtMillis).put("sampledAtMillis", observation.sampledAtMillis)
+                .put("tid", observation.tid).put("kernelPriority", observation.priority).put("threadName", observation.thread.getName())
+                .put("sameCapturedOwner", observation.thread == naturalNativeOwner.get()).put("mainThread", observation.mainThread));
         for (NativeArrivalObservation observation : naturalNativeArrivals) arrivals.put(new JSONObject()
                 .put("epoch", observation.frame.source.epoch).put("sequence", observation.frame.source.sequence)
                 .put("request", observation.frame.requestIdentity).put("observationOrdinal", observation.frame.observationOrdinal)
@@ -1345,7 +1377,9 @@ public final class ProductCensorSessionAndroidTest {
             JSONObject row = new JSONObject(ReplacementEngineTelemetry.nativeCost(1, cost).substring("REPLACEMENT_NATIVE_COST ".length()));
             row.remove("connection"); costs.put(row);
         }
-        JSONObject result = new JSONObject().put("schemaVersion", 1).put("method", testName.getMethodName())
+        JSONObject result = new JSONObject().put("schemaVersion", 2).put("method", testName.getMethodName())
+                .put("rawNativeOwnerSampleCount", owners.length()).put("nativeOwnerSamples", owners)
+                .put("nativeOwnerCaptured", naturalNativeOwner.get() != null)
                 .put("clockDomain", "UPTIME_MILLIS").put("nativeAssertionPassed", productScrollPassed)
                 .put("renewalStartedAtMillis", naturalRenewalStartedAt).put("renewalEndedAtMillis", naturalRenewalEndedAt)
                 .put("callbackBoundaryAtMillis", naturalCallbackBoundaryAt)

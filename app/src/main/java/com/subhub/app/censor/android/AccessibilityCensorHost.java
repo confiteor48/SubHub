@@ -139,7 +139,7 @@ public final class AccessibilityCensorHost implements AutoCloseable {
         this.observer = Objects.requireNonNull(observer);
         this.textProvider = textProvider;
         nativeReads = textProvider == null ? null : Executors.newSingleThreadScheduledExecutor(action -> new Thread(() -> {
-            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); action.run();
+            Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT); action.run();
         }, "Censor-native-text"));
         Executor presentation = this::post;
         CensorEngine.Timer timer = (action, delay) -> {
