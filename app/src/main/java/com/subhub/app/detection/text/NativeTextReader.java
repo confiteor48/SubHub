@@ -48,7 +48,11 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
         /** Optional controlled lifecycle boundary; never substitutes for a scope/evidence check. */
         default void beforeConfirmationScheduled(CensorEngine.NativeTextInput input, Scope scope) { }
     }
-    public enum Boundary { OPENED, TRAVERSAL, SCAN_END, CONFIRMATION_ENTRY, BEFORE_FINAL_NODE_REFRESH, RESULT_END }
+    public enum Boundary {
+        OPENED, TRAVERSAL, SCAN_END, CONFIRMATION_ENTRY, BEFORE_FINAL_NODE_REFRESH,
+        /** One actual scope query: the previous complete group's end and this group's pre-refresh. */
+        GROUP_END_BEFORE_FINAL_NODE_REFRESH, RESULT_END
+    }
 
     public static class Scope {
         public final int width, height, windowId;
@@ -322,7 +326,16 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
                     valid(Boundary.TRAVERSAL);
                     SmutTextClassifier.Match match = classify(probe.text);
                     if (!match.isMatched()) throw new Incomplete();
-                    valid(Boundary.BEFORE_FINAL_NODE_REFRESH);
+                    boolean previousGroup = mode == NativeTextResult.ReadMode.FULL_DISCOVERY && !confirmed.isEmpty();
+                    valid(previousGroup ? Boundary.GROUP_END_BEFORE_FINAL_NODE_REFRESH : Boundary.BEFORE_FINAL_NODE_REFRESH);
+                    if (previousGroup) {
+                        // The actual post-group scope witness just succeeded. Do not borrow the
+                        // later parent's completion time, or publish an unconfirmed line/sibling.
+                        observe(confirmed.get(confirmed.size() - 1), confirmed.size());
+                        // Observation callbacks can stop/reconfigure the owner. This local fence
+                        // grants no additional physical-window authority or atomic scope promise.
+                        valid(Boundary.TRAVERSAL);
+                    }
                     // A supported glyph query refreshes the complete exact node itself. Otherwise
                     // the fallback performs a real refresh, never projection from cached bounds.
                     Geometry geometry = regions(probe, match);
@@ -338,6 +351,16 @@ public final class NativeTextReader implements CensorEngine.NativeTextWorker, Au
                 }
                 valid(Boundary.RESULT_END); confirmationGeneration = input.treeGeneration(); finish(confirmed, probes.size());
             } catch (Exception | Error failure) { fail(); }
+        }
+        void observe(NativeTextResult.Candidate candidate, int ordinal) {
+            long groupEnd = input.nowMillis(), generation = input.treeGeneration();
+            NativeTextResult group = new NativeTextResult(scope.width, scope.height, scope.windowId, started, groupEnd,
+                    Collections.singletonList(candidate), visited, classified, ordinal,
+                    NativeTextResult.Coverage.POSITIVE_NODES_ONLY, scanGeneration, generation, input.hardGeneration,
+                    classificationCompletedAt, confirmationStartedAt, mode);
+            // Optional publication refusal is not a parent failure. Actual cancellation/scope is
+            // rechecked by the caller; only the genuine terminal can release roots/cache/lane.
+            completion.observe(ordinal, group);
         }
         boolean sameWindow(AccessibilityNodeInfo node) {
             CharSequence name = node.getPackageName();

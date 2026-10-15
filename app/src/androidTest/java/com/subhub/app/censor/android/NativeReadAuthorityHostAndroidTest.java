@@ -50,20 +50,20 @@ public final class NativeReadAuthorityHostAndroidTest {
         long firstImage = -1, partialImage = -1, finalImage = -1;
         try (Harness owned = h) {
             h.start(); assertTrue("First stable direct read held", h.firstDirect.await(5, TimeUnit.SECONDS));
-            NativeTextFrame initial = h.frames.get(0); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, initial.read.coverage);
+            NativeTextFrame initial = h.terminalFrames.get(0); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, initial.read.coverage);
             firstImage = h.deliverNext(); final long first = firstImage;
             await("Complete authority cancels actual host OCR slot", () -> h.terminal(first, CensorEngine.Stage.JOB_CANCELLED));
             assertEquals(0, h.ocrInitializations.get()); assertEquals(0, h.recognizer.processes.get());
             assertTrue(h.trace(first, CensorEngine.Stage.JOB_CANCELLED).atMillis <= deadline(initial));
 
             h.firstDirectRelease.countDown(); assertTrue("Next bounded FULL held", h.nextFull.await(5, TimeUnit.SECONDS));
-            assertEquals(3, h.frames.size()); assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, h.frames.get(2).read.coverage);
+            assertEquals(3, h.terminalFrames.size()); assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, h.terminalFrames.get(2).read.coverage);
             partialImage = h.deliverNext(); assertTrue("Partial authority permits real OCR worker invocation", h.recognizer.entered.await(5, TimeUnit.SECONDS));
             assertEquals(1, h.ocrInitializations.get()); assertEquals(1, h.recognizer.processes.get());
             assertFalse(h.recognizer.task.getTask().isComplete());
 
-            h.nextFullRelease.countDown(); await("Fresh COMPLETE admitted", () -> h.frames.size() >= 4);
-            NativeTextFrame fresh = h.frames.get(3); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, fresh.read.coverage);
+            h.nextFullRelease.countDown(); await("Fresh COMPLETE admitted", () -> h.terminalFrames.size() >= 4);
+            NativeTextFrame fresh = h.terminalFrames.get(3); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, fresh.read.coverage);
             h.recognizer.task.setResult(Collections.singletonList(Collections.singletonList(
                     new ImageTextLayout.Line("porn", new SceneEngine.Region(10, 20, 100, 50)))));
             final long partial = partialImage;
@@ -125,6 +125,7 @@ public final class NativeReadAuthorityHostAndroidTest {
         final UiAutomation automation = InstrumentationRegistry.getInstrumentation().getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
         final ActivityScenario<NativeTextFixtureActivity> scenario = ActivityScenario.launch(NativeTextFixtureActivity.class);
         final List<NativeTextFrame> frames = new CopyOnWriteArrayList<>();
+        final List<NativeTextFrame> terminalFrames = new CopyOnWriteArrayList<>();
         final List<CensorEngine.Trace> traces = new CopyOnWriteArrayList<>();
         final List<SceneEngine.Batch> batches = new CopyOnWriteArrayList<>();
         final List<Capture> allCaptures = new CopyOnWriteArrayList<>();
@@ -148,7 +149,9 @@ public final class NativeReadAuthorityHostAndroidTest {
                         visualInitializations.incrementAndGet(); throw new AssertionError("No visual model in controlled native/OCR test");
                     }, new AccessibilityCensorHost.Observer() {
                         @Override public void trace(CensorEngine.Trace trace) { traces.add(trace); }
-                        @Override public void nativeTextAccepted(NativeTextFrame frame) { frames.add(frame); }
+                        @Override public void nativeTextAccepted(NativeTextFrame frame) {
+                            frames.add(frame); if (frame.observationOrdinal == 0) terminalFrames.add(frame);
+                        }
                         @Override public void batchAccepted(SceneEngine.Batch batch) { batches.add(batch); }
                         @Override public void executorsTerminated(boolean value) { disposed = value; terminated.countDown(); }
                     }, new NativeTextReader.Provider() {

@@ -98,7 +98,7 @@ public final class NativeTextHostAndroidTest {
             main(() -> h.host.requestNativeText(false));
             assertTrue(h.secondOpen.await(5, TimeUnit.SECONDS));
             Thread.sleep(150);
-            assertEquals(1, h.frames.size());
+            assertEquals(1, h.terminalFrames.size());
             try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
                 assertEquals(2, masks(view).size());
                 for (SceneEngine.Mask mask : masks(view)) assertEquals(initial.source.sequence, mask.evidenceSource.sequence);
@@ -122,7 +122,7 @@ public final class NativeTextHostAndroidTest {
                 activity.first.omitMatchedLastLine = !offscreen; activity.first.offscreenGeometry = offscreen;
             });
             main(() -> h.host.requestNativeText(false)); assertTrue(h.secondOpen.await(5, TimeUnit.SECONDS));
-            Thread.sleep(150); assertEquals("Unavailable geometry is not a complete subset or edge rectangle", 1, h.frames.size());
+            Thread.sleep(150); assertEquals("Unavailable geometry is not a complete subset or edge rectangle", 1, h.terminalFrames.size());
             try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
                 assertEquals(2, masks(view).size());
                 for (SceneEngine.Mask mask : masks(view)) assertEquals(initial.source.sequence, mask.evidenceSource.sequence);
@@ -180,13 +180,16 @@ public final class NativeTextHostAndroidTest {
             h.start(true); NativeTextFrame nativeFrame = h.awaitFrame(1);
             long deadline = SystemClock.uptimeMillis() + 5000;
             while (h.captures.isEmpty() && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
-            assertEquals(1, h.captures.size()); assertEquals(0, h.modelInitializations.get());
+            assertEquals(1, h.captures.size());
+            // FAST readiness is eager; only inference requires the still-outstanding pixels.
+            assertEquals(0, h.modelInferences.get());
             Call call = h.captures.get(0); Bitmap bitmap = Bitmap.createBitmap(h.width, h.height, Bitmap.Config.ARGB_8888);
             PixelFrame pixels = new PixelFrame(bitmap, PixelGeometry.display(h.width, h.height, h.width, h.height),
                     PixelFrame.Kind.ACCESSIBILITY_DISPLAY, -1, SystemClock.uptimeMillis(), 0);
             CensorEngine.Captured<PixelFrame> payload = new CensorEngine.Captured<>(pixels, h.width, h.height, -1, bitmap::recycle);
             try { call.callback.success(payload); } finally { payload.close(); }
             assertTrue(h.imageAccepted.await(5, TimeUnit.SECONDS));
+            assertEquals(1, h.modelInferences.get());
             // Acceptance posts UI delivery first; it is not itself a delivered render snapshot.
             InstrumentationRegistry.getInstrumentation().waitForIdleSync();
             try (CensorEngine<PixelFrame>.RenderView view = h.host.acquireRenderView()) {
@@ -232,11 +235,12 @@ public final class NativeTextHostAndroidTest {
         }
     }
     private static final class Harness implements AutoCloseable {
-        final ActivityScenario<NativeTextFixtureActivity> scenario = ActivityScenario.launch(NativeTextFixtureActivity.class);
         final UiAutomation automation = InstrumentationRegistry.getInstrumentation().getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        final ActivityScenario<NativeTextFixtureActivity> scenario = ActivityScenario.launch(NativeTextFixtureActivity.class);
         final List<NativeTextFrame> frames = new CopyOnWriteArrayList<>();
+        final List<NativeTextFrame> terminalFrames = new CopyOnWriteArrayList<>();
         final List<Call> captures = new CopyOnWriteArrayList<>();
-        final AtomicInteger modelInitializations = new AtomicInteger(), opens = new AtomicInteger();
+        final AtomicInteger modelInitializations = new AtomicInteger(), modelInferences = new AtomicInteger(), opens = new AtomicInteger();
         final CountDownLatch terminated = new CountDownLatch(1), imageAccepted = new CountDownLatch(1);
         final CountDownLatch rootEntered = new CountDownLatch(1), rootRelease = new CountDownLatch(1), secondOpen = new CountDownLatch(1);
         volatile boolean blockRoot;
@@ -257,6 +261,7 @@ public final class NativeTextHostAndroidTest {
                             @Override public VisualDetectorWorker.ModelOutput infer(Bitmap bitmap, int width, int height,
                                     int tensorWidth, int tensorHeight, BooleanSupplier cancelled,
                                     Consumer<com.subhub.app.detection.DetectionEngine.RunCancellation> binding) {
+                                modelInferences.incrementAndGet();
                                 return new VisualDetectorWorker.ModelOutput(Collections.singletonList(
                                         new Detection("FACE_FEMALE", "face", .9f, new BBox(10, 20, 20, 30), false, true)),
                                         true, false, new CensorEngine.WorkTiming(1, 2, 1));
@@ -264,7 +269,9 @@ public final class NativeTextHostAndroidTest {
                             @Override public void close() { }
                         });
                     }, new AccessibilityCensorHost.Observer() {
-                        @Override public void nativeTextAccepted(NativeTextFrame frame) { frames.add(frame); }
+                        @Override public void nativeTextAccepted(NativeTextFrame frame) {
+                            frames.add(frame); if (frame.observationOrdinal == 0) terminalFrames.add(frame);
+                        }
                         @Override public void batchAccepted(SceneEngine.Batch batch) { if (batch.lane == SceneEngine.Lane.FAST) imageAccepted.countDown(); }
                         @Override public void executorsTerminated(boolean disposed) { assertTrue(disposed); terminated.countDown(); }
                     }, new NativeTextReader.Provider() {
@@ -297,8 +304,9 @@ public final class NativeTextHostAndroidTest {
         }
         NativeTextFrame awaitFrame(int count) throws InterruptedException {
             long deadline = SystemClock.uptimeMillis() + 5000;
-            while (frames.size() < count && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
-            assertEquals("Expected complete actual native frame", count, frames.size()); return frames.get(count - 1);
+            while (terminalFrames.size() < count && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
+            assertEquals("Expected terminal actual native frame, not early groups", count, terminalFrames.size());
+            return terminalFrames.get(count - 1);
         }
         @Override public void close() throws Exception {
             rootRelease.countDown(); main(host::close);

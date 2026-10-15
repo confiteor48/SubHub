@@ -158,24 +158,26 @@ public final class NativeTextMotionAndroidTest {
     }
 
     @Test public void unchangedTextConfirmationsContinueDuringSustainedActualScrollDemand() throws Exception {
-        h.start(); h.frame(1); Map<String, Long> initial = identities(); int before = h.frames.size();
+        h.start(); h.frame(1); Map<String, Long> initial = identities();
+        long before = h.terminalFrames.stream().filter(frame -> frame.read.coverage == com.subhub.app.censor.engine.NativeTextResult.Coverage.COMPLETE_TREE).count();
         int[] reversal = {0, 160, 320, 160};
         long until = SystemClock.uptimeMillis() + 2200; int index = 1;
         while (SystemClock.uptimeMillis() < until) {
             h.scroll(reversal[index++ % reversal.length]);
             assertEquals(initial, identities()); SystemClock.sleep(15);
         }
-        await("Several genuine full confirmations accepted during continuing scroll", () -> h.nativePublications.get() >= before + 5);
-        int count = h.frames.size(); h.scroll(0); await("Final literal native pose accepted", () -> h.frames.size() > count);
-        capture("sustained-final.png", h.frames.get(h.frames.size() - 1)); passed = true;
+        await("Several genuine full confirmations accepted during continuing scroll", () -> h.terminalFrames.stream()
+                .filter(frame -> frame.read.coverage == com.subhub.app.censor.engine.NativeTextResult.Coverage.COMPLETE_TREE).count() >= before + 5);
+        int count = h.terminalFrames.size(); h.scroll(0); await("Final literal native pose accepted", () -> h.terminalFrames.size() > count);
+        capture("sustained-final.png", h.terminalFrames.get(h.terminalFrames.size() - 1)); passed = true;
     }
 
     @Test public void heldActualRootKeepsRetirementPendingUntilItsRealTerminal() throws Exception {
-        h.start(); h.frame(1); h.holdRoot = true; main(() -> h.host.requestNativeText(false));
+        h.start(); h.frame(1); int before = h.frames.size(); h.holdRoot = true; main(() -> h.host.requestNativeText(false));
         assertTrue("Actual provider root acquired before hold", h.rootHeld.await(5, TimeUnit.SECONDS));
         main(h.host::close); assertFalse("No executor drain underneath actual held provider read", h.terminated.await(150, TimeUnit.MILLISECONDS));
         h.rootRelease.countDown(); assertTrue(h.terminated.await(5, TimeUnit.SECONDS)); assertNull(h.failure.get());
-        assertEquals("Cancelled read cannot publish another native frame", 1, h.frames.size()); passed = true;
+        assertEquals("Cancelled read cannot publish another source, including early groups", before, h.frames.size()); passed = true;
     }
 
     @Test public void frozenMovingLineGeometryCannotPassIndependentProviderDisplacement() throws Exception {
@@ -265,15 +267,17 @@ public final class NativeTextMotionAndroidTest {
         boolean correct = false; long deadline = SystemClock.uptimeMillis() + 5000;
         boolean interiorPixels = false, hitCenters = false, gapPixels = false, gapHitsAbsent = false, providerStable = false, sourceStable = false;
         long observedPaintBefore = -1, observedPaintAfter = -1;
+        JSONArray samples = new JSONArray(); int firstFailedSample = -1;
         do {
             painted = null; long paintSource = h.lastPaintSource;
             for (NativeTextFrame candidate : h.frames)
                 if (candidate.source.sequence == paintSource && candidate.source.readStartedAtMillis >= frame.source.readStartedAtMillis
                         && sameCaptionPose(frame, candidate) && SystemClock.uptimeMillis() <= candidate.validUntilMillis) painted = candidate;
             if (painted == null) { SystemClock.sleep(10); continue; }
+            long began = SystemClock.uptimeMillis();
             Map<String, Rect> provider = providerBounds(true); Bitmap pixels = ui.takeScreenshot(); assertNotNull(pixels);
+            long screenshotReceipt = SystemClock.uptimeMillis();
             try {
-                try (FileOutputStream stream = new FileOutputStream(new File(evidence, name))) { assertTrue(pixels.compress(Bitmap.CompressFormat.PNG, 100, stream)); }
                 observedPaintBefore = painted.source.sequence;
                 interiorPixels = hitCenters = gapPixels = gapHitsAbsent = true;
                 for (com.subhub.app.censor.engine.NativeTextResult.Candidate candidate : painted.read.candidates) {
@@ -291,9 +295,36 @@ public final class NativeTextMotionAndroidTest {
                 providerStable = provider.equals(providerBounds(true)); observedPaintAfter = h.lastPaintSource;
                 sourceStable = observedPaintAfter == painted.source.sequence;
                 correct = interiorPixels && hitCenters && gapPixels && gapHitsAbsent && providerStable && sourceStable;
+                long checked = SystemClock.uptimeMillis();
+                JSONObject sample = new JSONObject().put("ordinal", samples.length() + 1).put("observationBeganAtMillis", began)
+                        .put("screenshotReceiptAtMillis", screenshotReceipt).put("checksFinishedAtMillis", checked)
+                        .put("paintBefore", observedPaintBefore).put("paintAfter", observedPaintAfter)
+                        .put("interiorPixels", interiorPixels).put("hitCenters", hitCenters).put("gapPixels", gapPixels)
+                        .put("gapHitsAbsent", gapHitsAbsent).put("providerStable", providerStable).put("sourceStable", sourceStable)
+                        .put("passed", correct);
+                // Persistence is outside the unchanged source/pixel/hit/provider enclosure.
+                // Retain the first failing screenshot too, rather than overwriting it on retry.
+                if (correct || firstFailedSample < 0) {
+                    long persistenceBegan = SystemClock.uptimeMillis();
+                    String image = correct ? name : "failed-" + name;
+                    try (FileOutputStream stream = new FileOutputStream(new File(evidence, image))) {
+                        assertTrue(pixels.compress(Bitmap.CompressFormat.PNG, 100, stream));
+                    }
+                    sample.put("retainedImage", image).put("persistenceBeganAtMillis", persistenceBegan)
+                            .put("persistenceFinishedAtMillis", SystemClock.uptimeMillis());
+                    if (!correct) firstFailedSample = samples.length() + 1;
+                }
+                samples.put(sample);
             } finally { pixels.recycle(); }
             if (!correct) SystemClock.sleep(10);
         } while (!correct && SystemClock.uptimeMillis() < deadline);
+        JSONObject capture = new JSONObject().put("schemaVersion", 1).put("kind", "native-motion-capture-enclosure")
+                .put("method", testName.getMethodName()).put("pid", android.os.Process.myPid())
+                .put("clockDomain", "UPTIME_MILLIS").put("recordedAtMillis", SystemClock.uptimeMillis())
+                .put("requestedImage", name).put("passed", correct).put("rawSampleCount", samples.length()).put("samples", samples)
+                .put("firstFailedSample", firstFailedSample).put("physicalPixelClockKnown", false)
+                .put("pixelPerformanceAcceptance", false);
+        save("capture-" + name + ".json", capture.toString(2).getBytes(StandardCharsets.UTF_8));
         assertTrue("Independent current mask pixels and member hit-map preserve movement and line gap: interior=" + interiorPixels
                 + " hitCenters=" + hitCenters + " gapPixels=" + gapPixels + " gapHitsAbsent=" + gapHitsAbsent
                 + " providerStable=" + providerStable + " sourceStable=" + sourceStable + " paintBefore=" + observedPaintBefore
@@ -318,6 +349,7 @@ public final class NativeTextMotionAndroidTest {
         final ActivityScenario<NativeTextMotionFixtureActivity> scenario = ActivityScenario.launch(NativeTextMotionFixtureActivity.class);
         final CensorTapTracker taps = new CensorTapTracker();
         final List<NativeTextFrame> frames = new CopyOnWriteArrayList<>();
+        final List<NativeTextFrame> terminalFrames = new CopyOnWriteArrayList<>();
         final AtomicInteger opens = new AtomicInteger(), nativePublications = new AtomicInteger(), evidencePublications = new AtomicInteger(), paintPublications = new AtomicInteger();
         final AtomicReference<Throwable> failure = new AtomicReference<>();
         final CountDownLatch rootHeld = new CountDownLatch(1), rootRelease = new CountDownLatch(1), terminated = new CountDownLatch(1);
@@ -331,7 +363,10 @@ public final class NativeTextMotionAndroidTest {
                         executor -> (request, callback) -> { throw new AssertionError("Native-only fixture requested an IMAGE capture"); },
                         (c, lane, config, partition, fallback) -> { throw new AssertionError("Native-only fixture initialized an IMAGE model"); },
                         new AccessibilityCensorHost.Observer() {
-                            @Override public void nativeTextAccepted(NativeTextFrame frame) { frames.add(frame); nativePublications.incrementAndGet(); }
+                            @Override public void nativeTextAccepted(NativeTextFrame frame) {
+                                frames.add(frame); if (frame.observationOrdinal == 0) terminalFrames.add(frame);
+                                nativePublications.incrementAndGet();
+                            }
                             @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { evidencePublications.incrementAndGet(); }
                             @Override public void presentationChanged() { if (view != null) view.presentationChanged(); }
                             @Override public void executorsTerminated(boolean disposed) {
@@ -378,12 +413,13 @@ public final class NativeTextMotionAndroidTest {
                     false, true, ProtectionScope.normal(taps.scope())));
         }
         NativeTextFrame frame(int expected) {
-            await("Actual complete ordinary native frame " + expected, () -> frames.size() >= expected); assertNull(failure.get()); return frames.get(expected - 1);
+            await("Actual terminal ordinary native frame " + expected, () -> terminalFrames.size() >= expected);
+            assertNull(failure.get()); return terminalFrames.get(expected - 1);
         }
         NativeTextFrame freshFrame(long commandedAt, java.util.function.Predicate<NativeTextFrame> pose) {
             AtomicReference<NativeTextFrame> accepted = new AtomicReference<>();
             await("Fresh actual provider read at the commanded independent pose", () -> {
-                for (NativeTextFrame value : frames)
+                for (NativeTextFrame value : terminalFrames)
                     if (value.source.readStartedAtMillis >= commandedAt && pose.test(value)) { accepted.set(value); return true; }
                 return false;
             });

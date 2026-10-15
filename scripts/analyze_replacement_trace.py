@@ -23,6 +23,7 @@ NATIVE = {'schemaVersion', 'clockDomain', 'connection', 'epoch', 'sequence', 're
           'visitedNodes', 'classifiedNodes', 'confirmationReads', 'candidateCount', 'regionCount', 'nodes'}
 NATIVE_NODE = {'validatedAtMillis', 'validUntilMillis', 'textSource', 'matchStart', 'matchEnd', 'normalizedLength', 'lineCount', 'exactGeometry'}
 NATIVE_V2 = NATIVE | {'readMode'}
+NATIVE_V3 = NATIVE_V2 | {'observationOrdinal'}
 READ_MODES = ('FULL_DISCOVERY','ADMITTED_NODE_RECLASSIFY')
 COST_START = {'schemaVersion', 'clockDomain', 'connection', 'request', 'epoch', 'geometry', 'hardGeneration', 'invokedAtMillis'}
 COST = COST_START | {'scanGeneration', 'readStartedAtMillis', 'readFinishedAtMillis', 'terminalAtMillis', 'terminal',
@@ -95,15 +96,47 @@ def reconcile_native_costs(starts, costs, natives):
     if beginning.keys()!=terminal.keys(): raise ValueError('Reader invocation lacks exactly one actual terminal')
     for identity, start in beginning.items():
         if any(start[k]!=terminal[identity].get(k) for k in start): raise ValueError('Reader terminal borrowed another invocation')
+    if not starts and any(row.get('observationOrdinal', 0) > 0 for row in natives):
+        raise ValueError('Native observations lack actual parent invocation/terminal coverage')
     if starts or costs:
         for native in natives:
             cost=terminal.get(key(native))
-            if (cost is None or cost['terminal']!='SUCCESS' or any(cost[k]!=native[k] for k in
-                    ('hardGeneration','scanGeneration','readStartedAtMillis','readFinishedAtMillis'))
+            if cost is None or any(cost[k]!=native[k] for k in ('hardGeneration','scanGeneration','readStartedAtMillis')):
+                raise ValueError('Admitted native facts borrowed another actual Reader parent')
+            if native.get('observationOrdinal', 0) > 0:
+                # The producer is still running here; its genuine later terminal can fail or cancel.
+                # This is historical positive admission, not complete/current evidence authority.
+                if not native['receivedAtMillis'] <= cost['readFinishedAtMillis'] <= cost['terminalAtMillis']:
+                    raise ValueError('Native observation crossed its actual parent lifetime')
+            elif (cost['terminal']!='SUCCESS' or cost['readFinishedAtMillis']!=native['readFinishedAtMillis']
                     or cost['terminalAtMillis'] > native['receivedAtMillis']):
                 raise ValueError('Admitted native Source lacks its unique successful actual Reader terminal')
-            if cost['schemaVersion']==3 and (native['schemaVersion']!=2 or native['readMode']!=cost['readMode']):
+            if cost['schemaVersion']==3 and (native['schemaVersion'] not in (2,3) or native['readMode']!=cost['readMode']):
                 raise ValueError('Admitted native mode differs from its actual selected operation')
+
+
+def native_publication(prior_rows, row):
+    for prior in prior_rows:
+        if prior['connection'] != row['connection'] or prior['epoch'] != row['epoch']:
+            continue
+        if prior['sequence'] == row['sequence']:
+            raise ValueError('Duplicate native Source publication')
+        if row['request'] <= 0 or prior['request'] != row['request']:
+            continue
+        if prior['schemaVersion'] != 3 or row['schemaVersion'] != 3:
+            raise ValueError('Legacy native rows cannot establish same-parent observations')
+        if prior['observationOrdinal'] == 0:
+            raise ValueError('Native parent already terminally admitted')
+        if row['observationOrdinal'] and row['observationOrdinal'] <= prior['observationOrdinal']:
+            raise ValueError('Repeated or reversed native group ordinal')
+        if (any(prior[k] != row[k] for k in ('queuedAtMillis','startedAtMillis','readStartedAtMillis','readMode',
+                'hardGeneration','scanGeneration','classificationCompletedAtMillis','confirmationStartedAtMillis',
+                'maximumAgeMillis','visitedNodes','classifiedNodes'))
+                or row['sequence'] <= prior['sequence'] or row['readFinishedAtMillis'] < prior['readFinishedAtMillis']
+                or row['receivedAtMillis'] < prior['receivedAtMillis']
+                or row['confirmationGeneration'] < prior['confirmationGeneration']
+                or row['confirmationReads'] < prior['confirmationReads']):
+            raise ValueError('Native observation/terminal borrowed or regressed parent provenance')
 ADMISSIONS = set('BASELINE RECORDED DUPLICATE UNKNOWN GAP STALE CLOSED'.split())
 REFUSALS = set('NONE SCOPE CLOCK OWNER CAPACITY ORDER CONFLICT OVERFLOW INVALID_COORDINATE EXPLICIT_GAP SOURCE HISTORY UNKNOWN_AXIS CLOSED'.split())
 STAGES = set('CAPTURE_REQUESTED CAPTURE_DISPATCHED CAPTURE_RETURNED CAPTURE_CALLBACK CAPTURE_REJECTED CAPTURE_BACKPRESSURE '
@@ -182,14 +215,20 @@ def scroll_row(row, observed_at):
 
 def native_row(row, observed_at):
     if type(row) is not dict: raise ValueError('Unknown native read type')
-    expected=NATIVE_V2 if row.get('schemaVersion')==2 else NATIVE
-    if type(row) is not dict or set(row) != expected or type(row['schemaVersion']) is not int or row['schemaVersion'] not in (1,2) or row['coverage'] not in ('COMPLETE_TREE', 'POSITIVE_NODES_ONLY'):
+    expected=NATIVE_V3 if row.get('schemaVersion')==3 else NATIVE_V2 if row.get('schemaVersion')==2 else NATIVE
+    if type(row) is not dict or set(row) != expected or type(row['schemaVersion']) is not int or row['schemaVersion'] not in (1,2,3) or row['coverage'] not in ('COMPLETE_TREE', 'POSITIVE_NODES_ONLY'):
         raise ValueError('Unknown/incomplete native read coverage')
-    if row['schemaVersion']==2:
+    if row['schemaVersion'] in (2,3):
         if row['readMode'] not in READ_MODES: raise ValueError('Unknown native acquisition mode')
         if row['readMode']=='ADMITTED_NODE_RECLASSIFY' and (row['coverage']!='POSITIVE_NODES_ONLY' or
                 any(row[key]!=1 or type(row[key]) is not int for key in ('visitedNodes','classifiedNodes','confirmationReads','candidateCount'))):
             raise ValueError('Direct native operation fabricated tree or selected-node coverage')
+    if row['schemaVersion']==3:
+        integer(row['observationOrdinal'])
+        if row['observationOrdinal'] > 64 or (row['observationOrdinal'] > 0 and
+                (row['request'] <= 0 or row['readMode'] != 'FULL_DISCOVERY' or row['coverage'] != 'POSITIVE_NODES_ONLY'
+                 or row['candidateCount'] != 1 or row['confirmationReads'] != row['observationOrdinal'])):
+            raise ValueError('Native group ordinal invented terminal/tree/direct authority')
     for key in NATIVE - {'schemaVersion', 'clockDomain', 'coverage', 'nodes'}:
         integer(row[key], -1 if key in {'request', 'queuedAtMillis', 'startedAtMillis', 'scanGeneration', 'confirmationGeneration',
                                       'hardGeneration', 'classificationCompletedAtMillis', 'confirmationStartedAtMillis'} else 0)
@@ -273,7 +312,7 @@ def analyze(records, expected_events=None, dropped_events=None):
         if not separator or prefix not in ('REPLACEMENT_TRACE', 'REPLACEMENT_POST', 'REPLACEMENT_SCROLL', 'REPLACEMENT_NATIVE', 'REPLACEMENT_NATIVE_COST_START', 'REPLACEMENT_NATIVE_COST'):
             raise ValueError('Unknown selected replacement record')
         row = decode(payload)
-        versions=(1,2,3) if prefix in ('REPLACEMENT_NATIVE_COST_START','REPLACEMENT_NATIVE_COST') else (1,2) if prefix=='REPLACEMENT_NATIVE' else (1,)
+        versions=(1,2,3) if prefix in ('REPLACEMENT_NATIVE_COST_START','REPLACEMENT_NATIVE_COST','REPLACEMENT_NATIVE') else (1,)
         if type(row) is not dict or row.get('schemaVersion') not in versions or type(row['schemaVersion']) is not int or row.get('clockDomain') != 'UPTIME_MILLIS':
             raise ValueError('Unsupported replacement schema/clock')
         integer(row.get('connection'), 1)
@@ -298,9 +337,7 @@ def analyze(records, expected_events=None, dropped_events=None):
             scrolls.append(scroll_row(row, event['observedUptimeMillis']))
         elif prefix == 'REPLACEMENT_NATIVE':
             native_row(row, event['observedUptimeMillis'])
-            if any(prior['connection'] == row['connection'] and prior['epoch'] == row['epoch']
-                   and (prior['sequence'] == row['sequence'] or (row['request'] > 0 and prior['request'] == row['request'])) for prior in natives):
-                raise ValueError('Duplicate native source/producer publication')
+            native_publication(natives, row)
             natives.append(row)
         else:
             if set(row) != POST:
@@ -345,8 +382,14 @@ def analyze(records, expected_events=None, dropped_events=None):
         completeNativeRows=sum(row['coverage'] == 'COMPLETE_TREE' for row in natives),
         positiveNodeOnlyRows=sum(row['coverage'] == 'POSITIVE_NODES_ONLY' for row in natives),
         nativeReadModes=dict(Counter(row.get('readMode','UNKNOWN') for row in natives)),
-        nativeReadModeProvenanceComplete=bool(natives) and all(row['schemaVersion']==2 for row in natives)
+        nativeReadModeProvenanceComplete=bool(natives) and all(row['schemaVersion'] in (2,3) for row in natives)
             and bool(costs) and all(row['schemaVersion']==3 for row in costs),
+        nativeObservationRows=sum(row.get('observationOrdinal',0)>0 for row in natives),
+        nativeTerminalAdmissionRows=sum(row['schemaVersion']==3 and row['observationOrdinal']==0 for row in natives),
+        nativeLegacyAdmissionRows=sum(row['schemaVersion']<3 for row in natives),
+        nativeObservationProvenanceComplete=bool(natives) and all(row['schemaVersion']==3 for row in natives),
+        actualNativeAcquisitionStarts=sum(row['readStartedAtMillis']>=0 for row in costs),
+        successfulNativeAcquisitionTerminals=sum(row['terminal']=='SUCCESS' for row in costs),
         nativeCandidates=sum(row['candidateCount'] for row in natives),
         scrollAdmissions=dict(Counter(row['admission'] for row in scrolls)),
         scrollRefusals=dict(Counter(row['refusal'] for row in scrolls)),

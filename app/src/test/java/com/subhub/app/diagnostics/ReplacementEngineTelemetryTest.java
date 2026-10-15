@@ -43,6 +43,24 @@ public final class ReplacementEngineTelemetryTest {
         assertTrue(value.contains("\"validatedAtMillis\":170,\"validUntilMillis\":1170"));
         assertTrue(value.contains("\"queuedAtMillis\":90,\"startedAtMillis\":95")); assertFalse(value.contains(content));
         assertFalse(value.contains("pixelAtMillis")); assertFalse(value.contains("contentKey"));
+        assertTrue(value.contains("\"schemaVersion\":3")); assertTrue(value.contains("\"observationOrdinal\":0"));
+    }
+
+    @Test public void nonterminalNativeGroupCannotMasqueradeAsAnotherTerminalAcquisition() {
+        String content = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        com.subhub.app.censor.engine.NativeTextResult.Candidate candidate = new com.subhub.app.censor.engine.NativeTextResult.Candidate(
+                "TEXT_SMUT", content, content, .9f, true, java.util.Collections.singletonList(new SceneEngine.Region(1, 2, 10, 20)),
+                com.subhub.app.censor.engine.NativeTextResult.TextSource.TEXT, 1, 4, 6, 170);
+        com.subhub.app.censor.engine.NativeTextResult read = new com.subhub.app.censor.engine.NativeTextResult(100, 200, 7, 100, 200,
+                java.util.Collections.singletonList(candidate), 3, 2, 1,
+                com.subhub.app.censor.engine.NativeTextResult.Coverage.POSITIVE_NODES_ONLY, 1, 2, 1, 120, 168);
+        com.subhub.app.censor.engine.NativeTextFrame frame = new com.subhub.app.censor.engine.NativeTextFrame(
+                SceneEngine.Source.nativeText(1, 2, 3, 100, 200, 7, 100, 200, 220), 9, read, 1000, 7, 90, 95, 1);
+        String value = ReplacementEngineTelemetry.nativeRead(5, frame);
+        assertTrue(value.contains("\"request\":7,\"observationOrdinal\":1"));
+        assertTrue(value.contains("\"readFinishedAtMillis\":200"));
+        assertTrue(value.contains("\"validatedAtMillis\":170,\"validUntilMillis\":1170"));
+        assertFalse(value.contains(content));
     }
 
     @Test public void legacyCompleteNativeTelemetryKeepsUnknownProvenanceInsteadOfInventingConfirmation() {
@@ -51,7 +69,7 @@ public final class ReplacementEngineTelemetryTest {
         com.subhub.app.censor.engine.NativeTextFrame frame = new com.subhub.app.censor.engine.NativeTextFrame(
                 SceneEngine.Source.nativeText(1, 2, 3, 100, 200, 7, 100, 200, 220), 9, read, 1000);
         String value = ReplacementEngineTelemetry.nativeRead(5, frame);
-        assertTrue(value.contains("\"request\":-1,\"queuedAtMillis\":-1,\"startedAtMillis\":-1"));
+        assertTrue(value.contains("\"request\":-1,\"observationOrdinal\":0,\"queuedAtMillis\":-1,\"startedAtMillis\":-1"));
         assertTrue(value.contains("\"classificationCompletedAtMillis\":-1,\"confirmationStartedAtMillis\":-1"));
         assertTrue(value.contains("\"candidateCount\":0,\"regionCount\":0,\"nodes\":[]"));
         assertThrows(IllegalArgumentException.class, () -> ReplacementEngineTelemetry.nativeRead(0, frame));

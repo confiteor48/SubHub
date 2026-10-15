@@ -4,6 +4,7 @@ import static org.junit.Assert.*;
 
 import android.Manifest;
 import android.app.Instrumentation;
+import android.app.ActivityOptions;
 import android.app.UiAutomation;
 import android.content.ComponentName;
 import android.content.Context;
@@ -69,6 +70,7 @@ import java.util.function.Consumer;
 @SdkSuppress(minSdkVersion = 34)
 public final class BoundCensorControllerAndroidTest {
     private static final int COVER = 0xffff0080;
+    @org.junit.Rule public final org.junit.rules.TestName testName = new org.junit.rules.TestName();
     private Instrumentation instrumentation;
     private UiAutomation ui;
     private Context context;
@@ -77,6 +79,7 @@ public final class BoundCensorControllerAndroidTest {
     private int previousComponent;
     private boolean settingsOwned;
     private FixtureServiceConnection.Lease<BoundCensorFixtureService> boundLease;
+    private File groupEvidenceDirectory;
 
     @Before public void bindActualNonSuppressedService() throws Exception {
         instrumentation = InstrumentationRegistry.getInstrumentation(); context = instrumentation.getTargetContext();
@@ -85,6 +88,17 @@ public final class BoundCensorControllerAndroidTest {
         assertTrue("Not authorized on a phone", android.os.Build.FINGERPRINT.contains("generic")
                 || android.os.Build.MODEL.contains("sdk_gphone"));
         component = new ComponentName(context, BoundCensorFixtureService.class);
+        String namespace = InstrumentationRegistry.getArguments().getString("native_group_namespace");
+        if (namespace != null) {
+            assertTrue("Exclusive owned evidence namespace", namespace.matches("[a-z][a-z0-9-]{5,63}"));
+            File root = context.getExternalFilesDir("native-group-publication"); assertNotNull(root);
+            File run = new File(root, namespace); assertTrue(run.isDirectory() || run.mkdirs());
+            assertTrue(testName.getMethodName().matches("[A-Za-z][A-Za-z0-9_]{0,159}"));
+            groupEvidenceDirectory = new File(run, testName.getMethodName());
+            assertEquals(run.getCanonicalPath(), groupEvidenceDirectory.getCanonicalFile().getParent());
+            assertFalse("Never reuse retained case evidence", groupEvidenceDirectory.exists());
+            assertTrue(groupEvidenceDirectory.mkdir());
+        }
         previousServices = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
         previousEnabled = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED);
         previousComponent = context.getPackageManager().getComponentEnabledSetting(component);
@@ -780,7 +794,7 @@ public final class BoundCensorControllerAndroidTest {
         finally {
             try {
                 JSONArray frames = new JSONArray();
-                for (NativeTextFrame frame : h.nativeFrames) {
+                for (NativeTextFrame frame : h.allNativeFrames()) {
                     JSONArray identities = new JSONArray();
                     for (NativeTextResult.Candidate candidate : frame.read.candidates) identities.put(new JSONObject()
                             .put("nodeKey", candidate.nodeKey).put("contentKey", candidate.contentKey).put("category", candidate.category));
@@ -891,7 +905,7 @@ public final class BoundCensorControllerAndroidTest {
                     }
                     assertEquals(known, rotated);
                 }
-                for (NativeTextFrame frame : h.nativeFrames) {
+                for (NativeTextFrame frame : h.allNativeFrames()) {
                     assertEquals(baseline.read.scanGeneration, frame.read.scanGeneration);
                     assertEquals(baseline.read.scanGeneration, frame.read.confirmationGeneration);
                     assertEquals(baseline.read.hardGeneration, frame.read.hardGeneration);
@@ -910,7 +924,7 @@ public final class BoundCensorControllerAndroidTest {
         finally {
             try {
                 JSONArray frames = new JSONArray();
-                for (NativeTextFrame frame : h.nativeFrames) {
+                for (NativeTextFrame frame : h.allNativeFrames()) {
                     JSONObject nativeRead = new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeRead(1, frame)
                             .substring("REPLACEMENT_NATIVE ".length()));
                     JSONArray identities = new JSONArray();
@@ -1010,7 +1024,7 @@ public final class BoundCensorControllerAndroidTest {
                 if (view == null) return false;
                 for (SceneEngine.Group group : view.snapshot.groups) for (SceneEngine.Mask member : group.members) {
                     if (!member.nativeValidated || !member.nativeNodeIdentityKnown) return false;
-                    NativeTextFrame source = h.nativeFrames.stream().filter(f -> f.source.epoch == member.evidenceSource.epoch
+                    NativeTextFrame source = h.allNativeFrames().stream().filter(f -> f.source.epoch == member.evidenceSource.epoch
                             && f.source.sequence == member.evidenceSource.sequence).findFirst().orElse(null);
                     if (source == null || source.read.readStartedAtMillis < sourceStartedNotBefore) return false;
                     NativeTextResult.Candidate candidate = source.read.candidates.stream()
@@ -1092,8 +1106,275 @@ public final class BoundCensorControllerAndroidTest {
         }
     }
 
+    @Test public void confirmedNativeGroupWaitsForActualSharedWindowQueryAndRejectsResize() throws Exception {
+        sharedGroupQueryAdverse(true);
+    }
+
+    @Test public void confirmedNativeGroupWaitsForActualSharedWindowQueryAndRejectsStop() throws Exception {
+        sharedGroupQueryAdverse(false);
+    }
+
+    private void sharedGroupQueryAdverse(boolean resize) throws Exception {
+        assertNotNull("Exclusive current native_group_namespace is required", groupEvidenceDirectory);
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<CensorEngine.NativeTextInput> held = new AtomicReference<>();
+        JSONObject detail = new JSONObject(); boolean passed = false; Throwable primary = null;
+        Harness h = new Harness(resize ? "confirmed-group-shared-resize" : "confirmed-group-shared-stop", false,
+                () -> { }, () -> { }, (input, boundary) -> {
+                    if (boundary == NativeTextReader.Boundary.GROUP_END_BEFORE_FINAL_NODE_REFRESH
+                            && held.compareAndSet(null, input)) { entered.countDown(); hold(release); }
+                });
+        try (Harness owned = h; ActivityScenario<NativeTextFixtureActivity> activity = launchGroupWindow()) {
+            detail.put("fixtureReadiness", prepareGroupWindow(activity)); AccessibilityWindowReader.Window original = h.window();
+            h.start(original, 10, config(2, false, .3f), text(), false);
+            try {
+                assertTrue("Held BEFORE the actual shared post-A scope query", entered.await(8, TimeUnit.SECONDS));
+                CensorEngine.NativeTextInput input = held.get(); assertNotNull(input);
+                assertTrue(h.nativeObservations.isEmpty()); assertTrue(h.nativeFrames.isEmpty());
+                detail.put("selectedRequest", input.identity).put("heldBeforeActualSharedQuery", true)
+                        .put("sourcesBeforeRelease", 0).put("inputCancelledBeforeAction", input.cancelled());
+                if (resize) {
+                    long generation = input.treeGeneration();
+                    // Isolate the real query from event-driven cancellation in this debug guest only.
+                    main(() -> h.service.controller = null);
+                    activity.onActivity(value -> value.getWindow().setLayout(original.displayWidth, original.displayHeight / 2));
+                    await("Actual same-id bounds changed before the shared query", () -> {
+                        AccessibilityWindowReader.Window actual = h.controller.observeWindow(context.getPackageName(), original.id);
+                        return actual != null && actual.id == original.id && !actual.same(original);
+                    });
+                    assertFalse(input.cancelled()); assertEquals(generation, input.treeGeneration());
+                    detail.put("actualSameIdResizeObserved", true).put("eventForwardingDetached", true)
+                            .put("treeGenerationUnchanged", true).put("inputNotCancelledBeforeQuery", true);
+                } else {
+                    main(h.controller::stop); assertTrue(input.cancelled()); detail.put("actualStopBeforeQuery", true);
+                }
+                release.countDown();
+                await("Actual selected parent terminal after the rejecting shared boundary", () -> h.nativeCosts.stream().anyMatch(c -> c.request == input.identity));
+                main(h.controller::stop);
+                NativeReadCost cost = h.nativeCosts.stream().filter(c -> c.request == input.identity).findFirst().get();
+                assertNotEquals(NativeReadCost.Terminal.SUCCESS, cost.terminal);
+                assertNotEquals(NativeReadCost.Terminal.RESOURCE_FAILURE, cost.terminal);
+                assertEquals(1, h.nativeCosts.stream().filter(c -> c.request == input.identity).count());
+                assertEquals(1, h.nativeCostStarts.stream().filter(c -> c.request == input.identity).count());
+                assertNoNativeAdmission(h); detail.put("noObservationAfterRejectedQuery", true); passed = true;
+            } finally { release.countDown(); main(() -> h.service.controller = h.controller); }
+        } catch (Exception | Error failure) { primary = failure; throw failure; }
+        finally { writeGroupControl(h, resize ? "SHARED_RESIZE" : "SHARED_STOP", passed, detail, primary); }
+    }
+
+    @Test public void confirmedNativeGroupPaintsBeforeRemainingParentWorkAndKeepsItsOwnAge() throws Exception {
+        assertNotNull("Exclusive current native_group_namespace is required", groupEvidenceDirectory);
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<NativeTextFrame> first = new AtomicReference<>();
+        AtomicReference<Throwable> observerFailure = new AtomicReference<>();
+        JSONObject detail = new JSONObject(); boolean passed = false; Throwable primary = null;
+        Harness h = new Harness("confirmed-group-first-paint", false, () -> { });
+        h.nativeEvidenceControl.set(receipt -> {
+            NativeTextFrame frame = h.nativeObservations.stream().filter(value -> value.source == receipt.source).findFirst().orElse(null);
+            if (frame != null && first.compareAndSet(null, frame)) {
+                try { detail.put("heldReader", heldGroupReader(h, frame)); }
+                catch (Exception | Error failure) { observerFailure.set(failure); entered.countDown(); return; }
+                entered.countDown(); hold(release);
+            }
+        });
+        try (Harness owned = h; ActivityScenario<NativeTextFixtureActivity> activity = launchGroupWindow()) {
+            detail.put("fixtureReadiness", prepareGroupWindow(activity)); AccessibilityWindowReader.Window window = h.window();
+            AtomicReference<int[]> points = new AtomicReference<>();
+            activity.onActivity(value -> {
+                int[] a = independentTextPoint(value.first), b = independentTextPoint(value.second);
+                points.set(new int[]{a[0], a[1], b[0], b[1]});
+            });
+            AccessibilityCensorController.Configuration base = h.configuration(window, 10, config(2, false, .3f), text(), false);
+            main(() -> h.controller.start(new AccessibilityCensorController.Configuration(base.token, base.window, base.detector,
+                    base.quality, base.text, base.semanticText, base.exactText, ProtectionScope.normal(h.taps.scope()),
+                    base.appearance, base.paintPolicy, base.artworkRevision)));
+            try {
+                assertTrue("Real confirmed-A observation before remaining geometry/terminal work", entered.await(8, TimeUnit.SECONDS));
+                if (observerFailure.get() != null) throw new AssertionError("Actual held-reader snapshot failed", observerFailure.get());
+                NativeTextFrame early = first.get(); assertNotNull(early); assertEquals(1, early.observationOrdinal);
+                assertEquals(1, early.read.candidates.size()); assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, early.read.coverage);
+                assertEquals(1, h.nativeObservations.size()); assertTrue(h.nativeFrames.isEmpty()); assertTrue(h.nativeCosts.isEmpty());
+                assertEquals(1, h.nativeCostStarts.size()); assertFalse(h.controller.managedResourcesDrained());
+                NativeTextResult.Candidate a = early.read.candidates.get(0); assertTrue(a.exactGeometry);
+                long deadline = early.candidateValidUntilMillis(a);
+                int[] point = points.get(); assertNotNull(point);
+                AtomicReference<Bitmap> retained = new AtomicReference<>();
+                try {
+                    await("Actual early-A pixels and hit geometry before its unchanged deadline", Math.max(1, deadline - SystemClock.uptimeMillis()), () -> {
+                        Bitmap pixels = ui.takeScreenshot(); if (pixels == null) return false;
+                        Bitmap previous = retained.getAndSet(pixels); if (previous != null) previous.recycle();
+                        long now = SystemClock.uptimeMillis();
+                        return now < deadline && pixels.getPixel(point[0], point[1]) == COVER
+                                && pixels.getPixel(point[2], point[3]) != COVER
+                                && h.taps.matchesPoint(point[0], point[1], window.displayWidth, window.displayHeight, now)
+                                && !h.taps.matchesPoint(point[2], point[3], window.displayWidth, window.displayHeight, now)
+                                && h.posts.stream().anyMatch(post -> post.acceptedPaint != null && post.acceptedPaint.members.size() == 1
+                                    && post.acceptedPaint.members.get(0).evidenceSource == early.source
+                                    && post.acceptedPaint.members.get(0).nativeCoverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY);
+                    });
+                    detail.put("literalPixelsPassedBeforeRelease", true).put("literalHitMapPassedBeforeRelease", true)
+                            .put("independentPoints", new JSONArray().put(point[0]).put(point[1]).put(point[2]).put(point[3]))
+                            .put("pixelsObservedAtMillis", SystemClock.uptimeMillis()).put("originalCandidateDeadline", deadline);
+                } finally {
+                    Bitmap pixels = retained.get(); if (pixels != null) try { save(pixels, "confirmed-group-held-a"); } finally { pixels.recycle(); }
+                }
+                assertTrue(h.nativeCosts.isEmpty()); assertTrue(h.nativeFrames.isEmpty()); assertEquals(1, release.getCount());
+                assertEquals(1, h.nativeEvidence.size()); CensorEngine.EvidenceReceipt receipt = h.nativeEvidence.get(0);
+                assertEquals(NativeTextResult.Coverage.POSITIVE_NODES_ONLY, receipt.nativeCoverage);
+                assertEquals(1, receipt.subjects.size()); assertTrue(receipt.subjects.get(0).witnesses.isEmpty());
+                assertFalse(receipt.subjects.get(0).confirmedForConsumption);
+                CensorEngine.EvidenceClaim claim = h.controller.claimEvidence(receipt, new Object()); assertNotNull(claim); assertTrue(claim.subjects.isEmpty());
+                assertFalse(h.controller.dwellPresent(h.controller.viewportCoverage(), receipt));
+                assertFalse(((CensorEngine<?>) groupField(h.controller.host(), "engine")).imageTextSuppressed());
+                detail.put("noParentTerminalBeforeRelease", true).put("remainingParentWorkHeldNotProviderInflight", true)
+                        .put("noConsumptionWitnessDwellOrOcrAuthority", true)
+                        .put("selectedRequest", early.requestIdentity).put("releasedAtMillis", SystemClock.uptimeMillis());
+                release.countDown();
+                await("Genuine same-parent final admission with both groups", () -> h.nativeFrames.stream().anyMatch(frame -> frame.requestIdentity == early.requestIdentity));
+                NativeTextFrame complete = h.nativeFrames.stream().filter(frame -> frame.requestIdentity == early.requestIdentity).findFirst().get();
+                assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, complete.read.coverage); assertEquals(2, complete.read.candidates.size());
+                NativeTextResult.Candidate finalA = complete.read.candidates.stream().filter(candidate -> candidate.nodeKey.equals(a.nodeKey)).findFirst().get();
+                assertSame("Parent completion reuses immutable A facts, never later B's age", a, finalA);
+                assertEquals(deadline, complete.candidateValidUntilMillis(finalA));
+                NativeReadCost cost = h.nativeCosts.stream().filter(value -> value.request == early.requestIdentity).findFirst().get();
+                assertEquals(NativeReadCost.Terminal.SUCCESS, cost.terminal);
+                assertEquals("Two groups retain six existing production current-scope queries", 6,
+                        cost.costs.get(NativeReadCost.Stage.PROVIDER_CURRENT.ordinal()).calls);
+                assertEquals(1, h.nativeCosts.stream().filter(value -> value.request == early.requestIdentity).count());
+                main(h.controller::stop); detail.put("sameParentFinalKeepsAIdentityAndDeadline", true).put("unchangedProductionCurrentQueries", 6); passed = true;
+            } finally { release.countDown(); }
+        } catch (Exception | Error failure) { primary = failure; throw failure; }
+        finally { writeGroupControl(h, "EARLY_PAINT", passed, detail, primary); }
+    }
+
+    @Test public void confirmedNativeGroupReentrantStopPreventsLaterGeometryAndFalseDrain() throws Exception {
+        assertNotNull("Exclusive current native_group_namespace is required", groupEvidenceDirectory);
+        CountDownLatch stopped = new CountDownLatch(1); AtomicReference<NativeTextFrame> first = new AtomicReference<>();
+        AtomicReference<Throwable> observerFailure = new AtomicReference<>();
+        JSONObject detail = new JSONObject(); boolean passed = false; Throwable primary = null;
+        Harness h = new Harness("confirmed-group-reentrant-stop", false, () -> { });
+        h.nativeObservationControl.set(frame -> {
+            if (frame.observationOrdinal > 0 && first.compareAndSet(null, frame)) {
+                try { detail.put("heldReader", heldGroupReader(h, frame)); }
+                catch (Exception | Error failure) { observerFailure.set(failure); stopped.countDown(); return; }
+                main(h.controller::stop); stopped.countDown();
+            }
+        });
+        try (Harness owned = h; ActivityScenario<NativeTextFixtureActivity> activity = launchGroupWindow()) {
+            detail.put("fixtureReadiness", prepareGroupWindow(activity)); h.start(h.window(), 10, config(2, false, .3f), text(), false);
+            assertTrue("Stop from the real A observer", stopped.await(8, TimeUnit.SECONDS));
+            if (observerFailure.get() != null) throw new AssertionError("Actual held-reader snapshot failed", observerFailure.get());
+            NativeTextFrame early = first.get(); assertNotNull(early);
+            await("Actual cancellation terminal after observation reentrancy", () -> h.nativeCosts.stream().anyMatch(cost -> cost.request == early.requestIdentity));
+            NativeReadCost cost = h.nativeCosts.stream().filter(value -> value.request == early.requestIdentity).findFirst().get();
+            assertEquals(NativeReadCost.Terminal.CANCELLED, cost.terminal);
+            assertEquals("B's final glyph query must not run after the observer stops the owner", 1,
+                    cost.costs.get(NativeReadCost.Stage.GLYPH_QUERY.ordinal()).calls);
+            assertEquals(1, h.nativeObservations.size()); assertTrue(h.nativeFrames.isEmpty());
+            assertEquals(1, h.nativeCosts.stream().filter(value -> value.request == early.requestIdentity).count());
+            detail.put("selectedRequest", early.requestIdentity).put("reentrantStopPassed", true).put("laterGlyphQueryPrevented", true); passed = true;
+        } catch (Exception | Error failure) { primary = failure; throw failure; }
+        finally { writeGroupControl(h, "REENTRANT_STOP", passed, detail, primary); }
+    }
+
+    private ActivityScenario<NativeTextFixtureActivity> launchGroupWindow() {
+        return ActivityScenario.launch(NativeTextFixtureActivity.class,
+                ActivityOptions.makeCustomAnimation(context, 0, 0).toBundle());
+    }
+
+    private JSONObject prepareGroupWindow(ActivityScenario<NativeTextFixtureActivity> activity) throws Exception {
+        CountDownLatch committed = new CountDownLatch(1);
+        AtomicBoolean registered = new AtomicBoolean(); AtomicLong layoutAt = new AtomicLong(), committedAt = new AtomicLong();
+        AtomicReference<android.view.ViewTreeObserver.OnDrawListener> listener = new AtomicReference<>();
+        activity.onActivity(value -> {
+            value.getWindow().setFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN, android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            value.getWindow().setDecorFitsSystemWindows(false); if (value.getActionBar() != null) value.getActionBar().hide();
+            value.first.setText("send nudes"); value.second.setText("touch yourself");
+            View decor = value.getWindow().getDecorView(); assertTrue("Owned fixture uses actual hardware frames", decor.isHardwareAccelerated());
+            android.view.ViewTreeObserver.OnDrawListener draw = () -> {
+                if (value.first.isLaidOut() && value.second.isLaidOut() && value.first.getLayout() != null && value.second.getLayout() != null
+                        && value.first.getWidth() > 0 && value.first.getHeight() > 0 && value.second.getWidth() > 0 && value.second.getHeight() > 0
+                        && "send nudes".contentEquals(value.first.getText()) && "touch yourself".contentEquals(value.second.getText())
+                        && registered.compareAndSet(false, true)) {
+                    layoutAt.set(SystemClock.uptimeMillis());
+                    decor.getViewTreeObserver().registerFrameCommitCallback(() -> {
+                        committedAt.set(SystemClock.uptimeMillis()); committed.countDown();
+                    });
+                    decor.postInvalidateOnAnimation();
+                }
+            };
+            listener.set(draw); decor.getViewTreeObserver().addOnDrawListener(draw); decor.invalidate();
+        });
+        try { assertTrue("Actual literal layout followed by a new hardware-frame commit", committed.await(8, TimeUnit.SECONDS)); }
+        finally {
+            activity.onActivity(value -> {
+                android.view.ViewTreeObserver.OnDrawListener draw = listener.get();
+                if (draw != null) value.getWindow().getDecorView().getViewTreeObserver().removeOnDrawListener(draw);
+            });
+        }
+        instrumentation.waitForIdleSync();
+        long drained = SystemClock.uptimeMillis(); assertTrue(layoutAt.get() > 0 && committedAt.get() >= layoutAt.get() && drained >= committedAt.get());
+        return new JSONObject().put("explicitNoAnimationLaunch", true).put("literalLayoutAtMillis", layoutAt.get())
+                .put("hardwareFrameCommittedAtMillis", committedAt.get()).put("targetMainQueueDrainedAtMillis", drained)
+                .put("physicalPixelClockKnown", false).put("atomicWindowOrEventSnapshot", false);
+    }
+
+    private static int[] independentTextPoint(android.widget.TextView view) {
+        int[] origin = new int[2]; view.getLocationOnScreen(origin); android.text.Layout layout = view.getLayout(); assertNotNull(layout);
+        android.graphics.Paint.FontMetrics metrics = view.getPaint().getFontMetrics();
+        return new int[]{Math.round(origin[0] + view.getTotalPaddingLeft() + layout.getPrimaryHorizontal(0)
+                    + view.getPaint().measureText(view.getText().toString(), 0, 1) / 2),
+                Math.round(origin[1] + view.getTotalPaddingTop() + layout.getLineBaseline(0) + (metrics.ascent + metrics.descent) / 2)};
+    }
+
+    private static Object groupField(Object owner, String name) throws Exception {
+        java.lang.reflect.Field field = owner.getClass().getDeclaredField(name); field.setAccessible(true); return field.get(owner);
+    }
+
+    /** Called on the real reader executor while its observation callback still owns the parent. */
+    private static JSONObject heldGroupReader(Harness h, NativeTextFrame frame) throws Exception {
+        Object reader = groupField(h.controller.host(), "textReader"); assertNotNull(reader);
+        Object operation = groupField(reader, "activeOperation"); assertNotNull(operation); assertEquals(true, groupField(reader, "reading"));
+        CensorEngine.NativeTextInput input = (CensorEngine.NativeTextInput) groupField(operation, "input");
+        assertEquals(frame.requestIdentity, input.identity); assertFalse(input.cancelled());
+        java.util.Set<?> owned = (java.util.Set<?>) groupField(operation, "owned");
+        assertTrue(owned.contains(groupField(operation, "treeRoot"))); assertTrue(owned.size() >= 3);
+        Object cache = groupField(reader, "identities"); List<?> entries = (List<?>) groupField(cache, "entries");
+        int admitted = 0; for (Object entry : entries) if (groupField(entry, "basis") != null || Boolean.TRUE.equals(groupField(entry, "refreshable"))) admitted++;
+        assertEquals(2, entries.size()); assertEquals(0, admitted);
+        long[] calls = (long[]) groupField(operation, "costCalls"); assertEquals(1, calls[NativeReadCost.Stage.GLYPH_QUERY.ordinal()]);
+        return new JSONObject().put("request", input.identity).put("observedAtMillis", SystemClock.uptimeMillis())
+                .put("reading", true).put("rootStillOwned", true).put("ownedNodeHandles", owned.size())
+                .put("identityEntries", entries.size()).put("admittedAddresses", admitted).put("finalGlyphQueries", 1);
+    }
+
+    private void writeGroupControl(Harness h, String control, boolean passed, JSONObject detail, Throwable primary) throws Exception {
+        try {
+            JSONArray frames = new JSONArray(), starts = new JSONArray(), costs = new JSONArray();
+            for (NativeTextFrame frame : h.allNativeFrames()) frames.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeRead(1, frame).substring("REPLACEMENT_NATIVE ".length())));
+            for (NativeReadCost.Start value : h.nativeCostStarts) starts.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCostStart(1, value).substring("REPLACEMENT_NATIVE_COST_START ".length())));
+            for (NativeReadCost value : h.nativeCosts) costs.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCost(1, value).substring("REPLACEMENT_NATIVE_COST ".length())));
+            JSONObject receipt = new JSONObject().put("schemaVersion", 1).put("kind", "confirmed-native-group-control")
+                    .put("runIdentity", InstrumentationRegistry.getArguments().getString("native_group_namespace"))
+                    .put("case", testName.getMethodName()).put("control", control).put("pid", Process.myPid())
+                    .put("clockDomain", "UPTIME_MILLIS").put("recordedAtMillis", SystemClock.uptimeMillis())
+                    .put("bodyPassed", passed).put("managedDrain", h.controller.managedResourcesDrained())
+                    .put("rawFrameCount", frames.length()).put("frames", frames).put("rawStartCount", starts.length()).put("starts", starts)
+                    .put("rawTerminalCount", costs.length()).put("terminals", costs).put("detail", detail)
+                    .put("physicalWindowAtomicityKnown", false).put("pixelClockKnown", false).put("naturalLatencyBenefitQualified", false)
+                    .put("pixelPerformanceAcceptance", false);
+            try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-surface-metrics-" + System.nanoTime() + ".json"))) {
+                stream.write(receipt.toString().getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Exception | Error failure) {
+            if (primary == null) throw failure;
+            if (primary != failure) primary.addSuppressed(failure);
+        }
+    }
+
     private static void assertNoNativeAdmission(Harness h) {
-        assertTrue(h.nativeFrames.isEmpty()); assertTrue(h.nativeEvidence.isEmpty()); assertTrue(h.batches.isEmpty());
+        assertTrue(h.nativeFrames.isEmpty()); assertTrue(h.nativeObservations.isEmpty());
+        assertTrue(h.nativeEvidence.isEmpty()); assertTrue(h.batches.isEmpty());
         assertTrue(h.posts.stream().noneMatch(p -> p.acceptedPaint != null && !p.acceptedPaint.members.isEmpty()));
         assertEquals(0, h.models.get());
         assertEquals(0, h.traces.stream().filter(t -> t.stage == CensorEngine.Stage.CAPTURE_DISPATCHED).count());
@@ -1264,6 +1545,11 @@ public final class BoundCensorControllerAndroidTest {
         final List<CensorEngine.Trace> traces = new CopyOnWriteArrayList<>();
         final List<SceneEngine.Batch> batches = new CopyOnWriteArrayList<>();
         final List<NativeTextFrame> nativeFrames = new CopyOnWriteArrayList<>();
+        // Existing acquisition assertions use terminal admissions; never count observations as reads.
+        final List<NativeTextFrame> nativeObservations = new CopyOnWriteArrayList<>();
+        final AtomicReference<Consumer<NativeTextFrame>> nativeObservationControl = new AtomicReference<>();
+        final AtomicReference<Consumer<CensorEngine.EvidenceReceipt>> nativeEvidenceControl = new AtomicReference<>();
+        final CensorTapTracker taps = new CensorTapTracker();
         final List<NativeReadCost.Start> nativeCostStarts = new CopyOnWriteArrayList<>();
         final List<NativeReadCost> nativeCosts = new CopyOnWriteArrayList<>();
         final List<CensorEngine.EvidenceReceipt> nativeEvidence = new CopyOnWriteArrayList<>();
@@ -1307,10 +1593,17 @@ public final class BoundCensorControllerAndroidTest {
                     catch (org.json.JSONException failure) { throw new IllegalStateException(failure); }
                 }
                 @Override public void batchAccepted(SceneEngine.Batch batch) { batches.add(batch); }
-                @Override public void nativeTextAccepted(NativeTextFrame frame) { nativeFrames.add(frame); }
+                @Override public void nativeTextAccepted(NativeTextFrame frame) {
+                    if (frame.observationOrdinal == 0) nativeFrames.add(frame); else nativeObservations.add(frame);
+                    Consumer<NativeTextFrame> control = nativeObservationControl.get();
+                    if (control != null) control.accept(frame);
+                }
                 @Override public void nativeReadCostStarted(NativeReadCost.Start value) { nativeCostStarts.add(value); }
                 @Override public void nativeReadCost(NativeReadCost value) { nativeCosts.add(value); }
-                @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { nativeEvidence.add(receipt); }
+                @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) {
+                    nativeEvidence.add(receipt); Consumer<CensorEngine.EvidenceReceipt> control = nativeEvidenceControl.get();
+                    if (control != null) control.accept(receipt);
+                }
                 @Override public void providerReady(SceneEngine.Lane lane, String name, long millis) { if (lane == SceneEngine.Lane.FAST) provider.set(name); }
                 @Override public void resourceFailure() { resourceFailure.set(true); }
                 @Override public void posted(SnapshotCensorSurface.Post post) { posts.add(post); }
@@ -1334,7 +1627,7 @@ public final class BoundCensorControllerAndroidTest {
             };
             main(() -> {
                 controller = new AccessibilityCensorController(service, new SceneEngine.Policy(16, 100, 64, 256, 2000, 20000, .5),
-                        new CensorTapTracker(), observer, (app, lane, config, partition, fallback) -> {
+                        taps, observer, (app, lane, config, partition, fallback) -> {
                     modelOnMain.set(Looper.myLooper() == Looper.getMainLooper()); models.incrementAndGet();
                     if (actualModel) return VisualDetectorWorker.initialize(app, lane, config, partition, fallback);
                     modelThreshold.set(config.getConfidenceThreshold());
@@ -1436,6 +1729,10 @@ public final class BoundCensorControllerAndroidTest {
             await("Current actual captured visual batch", () -> batches.stream().anyMatch(b -> b.source.geometry == token && b.lane == SceneEngine.Lane.FAST));
         }
         long latestSource() { return batches.stream().mapToLong(b -> b.source.sequence).max().orElse(0); }
+        List<NativeTextFrame> allNativeFrames() {
+            List<NativeTextFrame> result = new java.util.ArrayList<>(nativeFrames); result.addAll(nativeObservations);
+            result.sort(java.util.Comparator.comparingLong(frame -> frame.source.sequence)); return result;
+        }
         @Override public void close() throws Exception {
             main(controller::close); await("Full actual controller managed drain", controller::managedResourcesDrained);
             assertFalse("Native resource failure", resourceFailure.get());
@@ -1454,7 +1751,8 @@ public final class BoundCensorControllerAndroidTest {
             JSONObject receipt = new JSONObject().put("schemaVersion", 2).put("label", label).put("pid", Process.myPid()).put("actualService", true)
                     .put("suppressionDisabled", true).put("legacyInactive", true).put("managedDrain", controller.managedResourcesDrained())
                     .put("rawTraceCount", traces.size()).put("traces", raw).put("rawPostCount", posts.size()).put("posts", posted)
-                    .put("nativeAccepted", nativeFrames.size()).put("batches", batches.size()).put("pixelTimeKnown", false)
+                    .put("nativeAccepted", nativeFrames.size() + nativeObservations.size()).put("nativeTerminalAccepted", nativeFrames.size())
+                    .put("rawNativeObservationCount", nativeObservations.size()).put("batches", batches.size()).put("pixelTimeKnown", false)
                     .put("prepared", prepared.get()).put("captureOnMain", captureOnMain.get())
                     .put("preparations", new JSONArray(preparations))
                     .put("windowRejections", new JSONArray(windowRejections))
@@ -1462,8 +1760,11 @@ public final class BoundCensorControllerAndroidTest {
             JSONArray starts = new JSONArray(), costs = new JSONArray();
             for (NativeReadCost.Start value : nativeCostStarts) starts.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCostStart(1, value).substring("REPLACEMENT_NATIVE_COST_START ".length())));
             for (NativeReadCost value : nativeCosts) costs.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeCost(1, value).substring("REPLACEMENT_NATIVE_COST ".length())));
+            JSONArray observations = new JSONArray();
+            for (NativeTextFrame value : nativeObservations) observations.put(new JSONObject(com.subhub.app.diagnostics.ReplacementEngineTelemetry.nativeRead(1, value).substring("REPLACEMENT_NATIVE ".length())));
             receipt.put("rawNativeCostStartCount", starts.length()).put("nativeCostStarts", starts)
                     .put("rawNativeCostCount", costs.length()).put("nativeCosts", costs).put("rawNativeEvidenceCount", nativeEvidence.size())
+                    .put("nativeObservations", observations)
                     .put("nativeCostDiagnosticFailures", controller.host().nativeCostDiagnosticFailures());
             try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-surface-metrics-" + System.nanoTime() + ".json"))) {
                 stream.write(receipt.toString().getBytes(StandardCharsets.UTF_8));
@@ -1513,6 +1814,7 @@ public final class BoundCensorControllerAndroidTest {
         try { save(matched.get(), label); } finally { matched.get().recycle(); }
     }
     private File directory() {
+        if (groupEvidenceDirectory != null) return groupEvidenceDirectory;
         File directory = context.getExternalFilesDir("censor-tap-fixtures-20261011"); assertNotNull(directory);
         assertTrue(directory.isDirectory() || directory.mkdirs()); return directory;
     }

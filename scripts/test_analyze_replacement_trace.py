@@ -5,6 +5,85 @@ from scripts import analyze_replacement_trace as reader
 
 
 class ReplacementTraceReaderTest(unittest.TestCase):
+    def streaming_records(self, terminal='SUCCESS', final=True):
+        start, end, last = self.mode_records(False)
+        body = reader.decode(last['message'].partition(' ')[2])
+        body.update(schemaVersion=3, observationOrdinal=0, coverage='COMPLETE_TREE', confirmationGeneration=1, sequence=4)
+        last.update(sequence=4, message='REPLACEMENT_NATIVE '+json.dumps(body))
+        early = copy.deepcopy(last)
+        first = copy.deepcopy(body)
+        first.update(observationOrdinal=1, sequence=3, readFinishedAtMillis=200, receivedAtMillis=210,
+                     coverage='POSITIVE_NODES_ONLY', confirmationReads=1, candidateCount=1, regionCount=1,
+                     nodes=first['nodes'][:1])
+        early.update(sequence=2, observedUptimeMillis=210, message='REPLACEMENT_NATIVE '+json.dumps(first))
+        cost = reader.decode(end['message'].partition(' ')[2]); cost['terminal'] = terminal
+        start['sequence'] = 1
+        end.update(sequence=3, message='REPLACEMENT_NATIVE_COST '+json.dumps(cost))
+        return [start, early, end] + ([last] if final else [])
+
+    def test_early_group_and_real_terminal_are_one_acquisition_not_two_reads(self):
+        rows = self.streaming_records(); report = reader.analyze(rows, len(rows), 0)
+        self.assertEqual((2, 1, 1), (report['nativeRows'], report['nativeObservationRows'], report['nativeTerminalAdmissionRows']))
+        self.assertEqual((1, 1), (report['actualNativeAcquisitionStarts'], report['successfulNativeAcquisitionTerminals']))
+        self.assertEqual((1, 1), (report['completeNativeRows'], report['positiveNodeOnlyRows']))
+        self.assertTrue(report['nativeObservationProvenanceComplete'])
+        self.assertEqual(report['rawSelectedPublications'], report['parsedSelectedPublications'])
+        self.assertFalse(report['pixelPerformanceAcceptance'])
+
+    def test_finite_observation_can_precede_genuine_failed_or_cancelled_parent_terminal(self):
+        for terminal in ('FAILURE', 'CANCELLED', 'RESOURCE_FAILURE'):
+            rows = self.streaming_records(terminal, False); report = reader.analyze(rows, len(rows), 0)
+            self.assertEqual((1, 0, 0), (report['nativeObservationRows'], report['nativeTerminalAdmissionRows'],
+                                       report['successfulNativeAcquisitionTerminals']))
+            self.assertEqual({terminal: 1}, report['nativeCostTerminals'])
+
+    def test_observation_cannot_hide_missing_or_foreign_actual_parent_terminal(self):
+        for missing in ('start', 'terminal', 'both', 'foreign'):
+            rows = self.streaming_records(final=False)
+            if missing == 'start': rows.pop(0)
+            elif missing == 'terminal': rows.pop(2)
+            elif missing == 'both': rows = rows[1:2]
+            else:
+                body = reader.decode(rows[2]['message'].partition(' ')[2]); body['request'] += 1
+                rows[2]['message'] = 'REPLACEMENT_NATIVE_COST '+json.dumps(body)
+            with self.subTest(missing=missing), self.assertRaises(ValueError): reader.analyze(rows, len(rows), 0)
+
+    def test_optional_groups_cannot_fabricate_terminal_tree_direct_or_multi_group_authority(self):
+        for field, value in (('observationOrdinal', True), ('observationOrdinal', -1), ('observationOrdinal', 65),
+                             ('observationOrdinal', 2), ('coverage', 'COMPLETE_TREE'), ('readMode', 'ADMITTED_NODE_RECLASSIFY'),
+                             ('candidateCount', 2), ('request', -1), ('newField', 0), ('schemaVersion', 4)):
+            rows = self.streaming_records(); body = reader.decode(rows[1]['message'].partition(' ')[2]); body[field] = value
+            rows[1]['message'] = 'REPLACEMENT_NATIVE '+json.dumps(body)
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError): reader.analyze(rows, len(rows), 0)
+        rows = self.streaming_records(); body = reader.decode(rows[1]['message'].partition(' ')[2]); del body['observationOrdinal']
+        rows[1]['message'] = 'REPLACEMENT_NATIVE '+json.dumps(body)
+        with self.assertRaises(ValueError): reader.analyze(rows, len(rows), 0)
+
+    def test_observation_and_terminal_must_keep_exact_parent_clocks_and_order(self):
+        for field, value in (('queuedAtMillis', 81), ('startedAtMillis', 91), ('readStartedAtMillis', 101),
+                             ('classificationCompletedAtMillis', 121), ('confirmationStartedAtMillis', 169),
+                             ('hardGeneration', 2), ('scanGeneration', 0), ('maximumAgeMillis', 1001),
+                             ('visitedNodes', 6), ('classifiedNodes', 3), ('sequence', 4),
+                             ('receivedAtMillis', 311), ('readFinishedAtMillis', 301)):
+            rows = self.streaming_records(); body = reader.decode(rows[1]['message'].partition(' ')[2]); body[field] = value
+            rows[1].update(observedUptimeMillis=max(330, value if field in ('receivedAtMillis', 'readFinishedAtMillis') else 0),
+                           message='REPLACEMENT_NATIVE '+json.dumps(body))
+            with self.subTest(field=field), self.assertRaises(ValueError): reader.analyze(rows, len(rows), 0)
+
+    def test_duplicate_group_or_observation_after_terminal_cannot_add_confirmations(self):
+        for after_terminal in (False, True):
+            rows = self.streaming_records(); duplicate = copy.deepcopy(rows[1]); duplicate['sequence'] = 5
+            body = reader.decode(duplicate['message'].partition(' ')[2]); body['sequence'] = 5
+            duplicate['message'] = 'REPLACEMENT_NATIVE '+json.dumps(body)
+            rows.insert(len(rows) if after_terminal else 2, duplicate)
+            with self.subTest(after_terminal=after_terminal), self.assertRaises(ValueError): reader.analyze(rows, len(rows), 0)
+
+    def test_legacy_schema_keeps_observation_provenance_unknown_not_fabricated_zero_work(self):
+        rows = self.mode_records(False); report = reader.analyze(rows, len(rows), 0)
+        self.assertFalse(report['nativeObservationProvenanceComplete'])
+        self.assertEqual((0, 0, 1), (report['nativeObservationRows'], report['nativeTerminalAdmissionRows'],
+                                   report['nativeLegacyAdmissionRows']))
+
     def mode_records(self, direct=True):
         rows=self.cost_records(); mode='ADMITTED_NODE_RECLASSIFY' if direct else 'FULL_DISCOVERY'
         for event in rows:

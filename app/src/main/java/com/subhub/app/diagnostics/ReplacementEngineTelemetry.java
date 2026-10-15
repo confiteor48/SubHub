@@ -39,7 +39,7 @@ public final class ReplacementEngineTelemetry {
                 + ",\"unattributedNanos\":" + value.unattributedNanos + ",\"rawCostCount\":" + value.costs.size() + ",\"costs\":" + costs + "}";
     }
 
-    /** Actual admitted classified reads, not a presentation/query renewal or an image timestamp. */
+    /** Admitted classified facts; observationOrdinal separates early groups from actual terminal admissions. */
     public static String nativeRead(long connection, NativeTextFrame frame) {
         if (connection <= 0) throw new IllegalArgumentException("Replacement connection identity");
         NativeTextResult read = frame.read; SceneEngine.Source source = frame.source;
@@ -55,8 +55,9 @@ public final class ReplacementEngineTelemetry {
                     .append(",\"exactGeometry\":").append(candidate.exactGeometry).append('}');
         }
         nodes.append(']');
-        return "REPLACEMENT_NATIVE {\"schemaVersion\":2,\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
+        return "REPLACEMENT_NATIVE {\"schemaVersion\":3,\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":" + connection
                 + ",\"epoch\":" + source.epoch + ",\"sequence\":" + source.sequence + ",\"request\":" + frame.requestIdentity
+                + ",\"observationOrdinal\":" + frame.observationOrdinal
                 + ",\"queuedAtMillis\":" + frame.queuedAtMillis + ",\"startedAtMillis\":" + frame.startedAtMillis
                 + ",\"readStartedAtMillis\":" + source.readStartedAtMillis + ",\"readFinishedAtMillis\":" + source.readFinishedAtMillis
                 + ",\"receivedAtMillis\":" + source.receivedAtMillis + ",\"maximumAgeMillis\":" + frame.maximumAgeMillis
