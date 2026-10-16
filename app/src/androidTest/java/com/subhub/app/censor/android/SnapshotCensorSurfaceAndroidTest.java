@@ -60,6 +60,27 @@ import org.json.JSONObject;
 @RunWith(AndroidJUnit4.class)
 @SdkSuppress(minSdkVersion = 30)
 public class SnapshotCensorSurfaceAndroidTest {
+    private String servicesBefore, enabledBefore;
+    private boolean settingsCaptured;
+
+    @org.junit.Before public void preserveAutomationSettings() {
+        android.content.Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        servicesBefore = android.provider.Settings.Secure.getString(context.getContentResolver(), android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+        enabledBefore = android.provider.Settings.Secure.getString(context.getContentResolver(), android.provider.Settings.Secure.ACCESSIBILITY_ENABLED);
+        settingsCaptured = true;
+    }
+    @org.junit.After public void restoreAutomationSettings() {
+        if (!settingsCaptured) return;
+        android.content.Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        android.app.UiAutomation automation = InstrumentationRegistry.getInstrumentation().getUiAutomation(android.app.UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
+        automation.adoptShellPermissionIdentity(android.Manifest.permission.WRITE_SECURE_SETTINGS);
+        try {
+            try { assertTrue(android.provider.Settings.Secure.putString(context.getContentResolver(), android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, servicesBefore)); }
+            finally { assertTrue(android.provider.Settings.Secure.putString(context.getContentResolver(), android.provider.Settings.Secure.ACCESSIBILITY_ENABLED, enabledBefore)); }
+        } finally { automation.dropShellPermissionIdentity(); }
+        assertEquals(servicesBefore, android.provider.Settings.Secure.getString(context.getContentResolver(), android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES));
+        assertEquals(enabledBefore, android.provider.Settings.Secure.getString(context.getContentResolver(), android.provider.Settings.Secure.ACCESSIBILITY_ENABLED));
+    }
     private static void main(Runnable action) {
         if (Looper.myLooper() == Looper.getMainLooper()) action.run();
         else InstrumentationRegistry.getInstrumentation().runOnMainSync(action);
@@ -76,6 +97,64 @@ public class SnapshotCensorSurfaceAndroidTest {
         return new CensorAppearance(type, 70, 0, false, false, CensorAppearance.BorderEffect.CLASSIC,
                 false, Color.WHITE, new EffectPalette(Color.GREEN, Color.BLUE, Color.WHITE),
                 Collections.singletonList("BLOCKED"), reverse, 100, "rectangle", "SubHub", "Access blocked.");
+    }
+
+    @Test public void unrelatedPreAdmissionOriginDuringDrawKeepsActualPostedMask() throws Exception {
+        originInsertionDuringDraw(false);
+    }
+    @Test public void conservativeRegistrationDuringDrawReproducesTransparentPostControl() throws Exception {
+        originInsertionDuringDraw(true);
+    }
+    private void originInsertionDuringDraw(boolean conservative) throws Exception {
+        CountDownLatch submitted = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicBoolean inserted = new AtomicBoolean();
+        try (Fixture f = new Fixture()) {
+            try {
+                f.image(CensorAppearance.Type.BOX, false);
+                f.composed("origin-insertion-baseline-" + conservative, 70, 70, Color.GREEN);
+                ReplacementScrollPresentation presentation = new ReplacementScrollPresentation(); presentation.reset(42, 7);
+                long epoch = f.h.engine.currentEpoch(), at = SystemClock.uptimeMillis();
+                try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                    SceneEngine.Source source = view.snapshot.groups.get(0).members.get(0).geometrySource;
+                    presentation.captured(epoch, 42, source.imageRequestIdentity, at, at);
+                }
+                int acceptedBefore = f.acceptedCount();
+                f.presentation.set(presentation); main(f.surface::presentationChanged); f.redraw();
+                // BOX records inline; there is deliberately no prepared image resource to await.
+                await(() -> {
+                    AtomicBoolean ready = new AtomicBoolean();
+                    main(() -> ready.set(f.acceptedCount() > acceptedBefore && f.surface.executingRenderCount() == 0
+                            && f.surface.pendingPoseCount() == 0 && f.surface.completionNoticeCount() == 0
+                            && !f.surface.demandPending()));
+                    return ready.get();
+                });
+                int captures = f.h.callbacks.size(); long revision = presentation.revision();
+                f.workerReadHook.set(() -> {
+                    // draw() has sampled presentationRevision, but has not yet recorded this member.
+                    if (conservative) presentation.captured(epoch, 42, 1001, at, at);
+                    else presentation.preparedBeforeAdmission(epoch, 42, 1001, at, at);
+                    inserted.set(true);
+                });
+                f.workerPostHook.set(() -> {
+                    // The actual holder post has returned; hold this worker BEFORE completion delivery
+                    // so an automatic replacement cannot conceal a transparent submitted buffer.
+                    submitted.countDown();
+                    try { assertTrue("Bounded posted-buffer inspection", release.await(8, TimeUnit.SECONDS)); }
+                    catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new AssertionError(failure); }
+                });
+                main(f.surface::requestFrame); assertTrue("Actual post after controlled origin insertion", submitted.await(5, TimeUnit.SECONDS));
+                assertTrue(inserted.get());
+                assertEquals(conservative, presentation.revision() != revision);
+                Bitmap buffer = f.buffer();
+                try {
+                    export(buffer, "origin-insertion-posted-buffer-" + conservative);
+                    assertEquals(conservative ? Color.TRANSPARENT : Color.GREEN, buffer.getPixel(70, 70));
+                } finally { buffer.recycle(); }
+                if (conservative) f.composedChecker("origin-insertion-cleared-composed-control", 70, 70);
+                else f.composed("origin-insertion-kept-composed-mask", 70, 70, Color.GREEN);
+                assertEquals("Origin metadata does not admit a detection or demand a capture", captures, f.h.callbacks.size());
+            } finally { release.countDown(); }
+        }
     }
 
     @Test public void reusedScrollMovesActualSurfaceBetweenDetectionsThenStopsWithoutTapAuthority() throws Exception {
@@ -799,6 +878,7 @@ public class SnapshotCensorSurfaceAndroidTest {
         final AtomicInteger failures = new AtomicInteger(); final ActivityScenario<SnapshotSurfaceFixtureActivity> scenario;
         final AtomicReference<Runnable> recordHook = new AtomicReference<>(), postHook = new AtomicReference<>();
         final AtomicBoolean failNextOwnerRead = new AtomicBoolean();
+        final AtomicReference<Runnable> workerReadHook = new AtomicReference<>(), workerPostHook = new AtomicReference<>();
         final AtomicReference<Thread> lockedCanvasThread = new AtomicReference<>();
         final AtomicReference<ReplacementScrollPresentation> presentation = new AtomicReference<>();
         final AtomicLong presentationTime = new AtomicLong(-1);
@@ -835,6 +915,9 @@ public class SnapshotCensorSurfaceAndroidTest {
                         return presentationTime.get() < 0 && value != null && value.isAnimating(now);
                     }
                     @Override public CensorEngine<PixelFrame>.RenderView acquireRenderView() {
+                        if (lockedCanvasThread.get() == Thread.currentThread()) {
+                            Runnable hook = workerReadHook.getAndSet(null); if (hook != null) hook.run();
+                        }
                         if (lockedCanvasThread.get() == Thread.currentThread() && failNextOwnerRead.compareAndSet(true, false)) {
                             assertNotEquals(Looper.getMainLooper(), Looper.myLooper());
                             throw new OutOfMemoryError("controlled owner failure after hardware lock");
@@ -857,6 +940,7 @@ public class SnapshotCensorSurfaceAndroidTest {
                     @Override public void post(SurfaceHolder holder, Canvas canvas) {
                         try { holder.unlockCanvasAndPost(canvas); }
                         finally { lockedCanvasThread.compareAndSet(Thread.currentThread(), null); }
+                        Runnable hook = workerPostHook.getAndSet(null); if (hook != null) hook.run();
                     }
                 } : endpoint;
                 surface = new SnapshotCensorSurface(value, owner, loader, taps, observer, actual, delivery, renderExecutor);

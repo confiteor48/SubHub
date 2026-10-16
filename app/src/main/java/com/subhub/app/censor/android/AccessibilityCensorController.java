@@ -152,7 +152,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
         AccessibilityCensorHost.Observer bridge = new AccessibilityCensorHost.Observer() {
             @Override public void sourcePrepared(CensorEngine.CaptureRequest request, PixelFrame frame) {
                 if (sourceCurrent(request.epoch, request.geometry)) {
-                    scrollPresentation.captured(request.epoch, request.geometry, request.identity,
+                    scrollPresentation.preparedBeforeAdmission(request.epoch, request.geometry, request.identity,
                             frame.reportedUptimeMillis, frame.callbackUptimeMillis);
                     surfaceChanged();
                 }

@@ -92,9 +92,23 @@ public final class ReplacementScrollPresentation {
 
     /** API-reported origin only; never substitute completion/publication time for a missing stamp. */
     public synchronized void captured(long epoch, long geometry, long request, long reportedAt, long callbackAt) {
+        registerOrigin(epoch, geometry, request, reportedAt, callbackAt, false);
+    }
+
+    /**
+     * Only inside the source-prepared hook BEFORE its success callback can admit this request's
+     * Source. The request cannot yet be an existing scene member. General/late metadata must use
+     * captured(), since registering an already-present member may change its previously unknown pose.
+     */
+    public synchronized void preparedBeforeAdmission(long epoch, long geometry, long request, long reportedAt, long callbackAt) {
+        registerOrigin(epoch, geometry, request, reportedAt, callbackAt, true);
+    }
+
+    private void registerOrigin(long epoch, long geometry, long request, long reportedAt, long callbackAt, boolean beforeAdmission) {
         if (this.geometry != geometry || request <= 0 || reportedAt < 0 || reportedAt > callbackAt) return;
         if (origins.containsKey(request)) return;
-        while (origins.size() >= MAXIMUM_ORIGINS) origins.remove(origins.keySet().iterator().next());
+        boolean evicted = false;
+        while (origins.size() >= MAXIMUM_ORIGINS) { origins.remove(origins.keySet().iterator().next()); evicted = true; }
         Origin origin = new Origin(epoch, geometry, reportedAt);
         for (Map.Entry<Long, Surface> entry : surfaces.entrySet()) {
             Position baseline = entry.getValue().estimateAt(reportedAt);
@@ -104,7 +118,10 @@ public final class ReplacementScrollPresentation {
         // inherit pre-capture forecast travel, nor be rebased when a later event arrives.
         // This remains advisory event phase, never a measured pixel/camera timestamp.
         origins.put(request, origin);
-        revision++;
+        // Before admission no current member can refer to this fresh request. Its isolated
+        // metadata cannot invalidate an unrelated draw. Eviction and late/general registration
+        // can change an existing member's pose, and retain the conservative revision fence.
+        if (!beforeAdmission || evicted) revision++;
     }
 
     public synchronized void nativeStrategy(String packageName, CharSequence className, float density,

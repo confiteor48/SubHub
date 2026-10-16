@@ -189,4 +189,31 @@ public final class ReplacementScrollPresentationTest {
         for (int i = 1; i <= 194; i++) position(i * 100L, i * 10L);
         assertNull(presentation.pose(mask(1, BOX), 20000));
     }
+    @Test public void preparingUnusedOriginCannotInvalidateUnchangedExistingPaint() {
+        for (boolean nativeCurve : new boolean[]{false, true}) {
+            presentation.reset(42, 7); ledger.reset(SCOPE); delivery = 0;
+            presentation.nativeStrategy(nativeCurve ? "com.twitter.android" : "org.chromium.chrome.stable",
+                    "androidx.recyclerview.widget.RecyclerView", 1, .015f, 1000);
+            captured(1, 1050); position(1000, 0); position(1100, 100); position(1200, 200);
+            double oldPose = top(1, 1216); long oldRevision = presentation.revision();
+            boolean oldAnimation = presentation.isAnimating(1216);
+            presentation.preparedBeforeAdmission(1, 42, 2, 1210, 1220);
+            assertEquals(oldPose, top(1, 1216), .000001);
+            assertEquals(oldAnimation, presentation.isAnimating(1216));
+            assertEquals("Unused pre-admission metadata cannot reject an unchanged in-flight old paint", oldRevision, presentation.revision());
+        }
+    }
+    @Test public void preAdmissionEvictionStillInvalidatesExistingPaint() {
+        captured(1, 50); position(100, 0); position(200, 100);
+        for (int request = 2; request <= 32; request++) presentation.preparedBeforeAdmission(1, 42, request, 200, 210);
+        assertNotNull(presentation.pose(mask(1, BOX), 240)); long before = presentation.revision();
+        presentation.preparedBeforeAdmission(1, 42, 33, 200, 210);
+        assertTrue(presentation.revision() > before); assertNull(presentation.pose(mask(1, BOX), 240));
+    }
+    @Test public void lateFirstRegistrationMustInvalidatePreviouslyUnknownMemberPose() {
+        position(100, 0); position(200, 100);
+        assertEquals(BOX.top, top(1, 240), 0); long before = presentation.revision();
+        captured(1, 50);
+        assertNotEquals(BOX.top, top(1, 240), .01); assertTrue(presentation.revision() > before);
+    }
 }
