@@ -31,7 +31,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         Cancellation schedule(Runnable action, long delayMillis);
     }
     public interface Capturer<P> {
-        /** Resolve foreground and invoke the API here; callback may precede or follow return. */
+        /** Resolve scope and acquire/consume input here; callback may precede or follow return. */
         void capture(CaptureRequest request, CaptureCallback<P> callback);
     }
     public interface CaptureCallback<P> {
@@ -343,7 +343,10 @@ public final class CensorEngine<P> implements AutoCloseable {
             this.gate = gate;
         }
 
-        /** Invoke immediately before the platform API, not before foreground resolution. */
+        /**
+         * Invoke immediately before the request API or consuming a continuous-source slot, not
+         * before scope resolution. Continuous input has its own acquisition clock and session.
+         */
         public boolean tryDispatch() { return gate.getAsBoolean(); }
     }
 
