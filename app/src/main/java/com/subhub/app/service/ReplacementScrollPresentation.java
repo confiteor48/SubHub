@@ -23,6 +23,7 @@ public final class ReplacementScrollPresentation {
     }
     private static final class Origin {
         final long epoch, geometry, at;
+        final Map<Long, Position> baselines = new LinkedHashMap<>();
         Origin(long epoch, long geometry, long at) { this.epoch = epoch; this.geometry = geometry; this.at = at; }
     }
     private static final class Producer {
@@ -41,9 +42,10 @@ public final class ReplacementScrollPresentation {
         final ArrayDeque<Position> history = new ArrayDeque<>();
         final ScrollCompanionDeduplicator companions = new ScrollCompanionDeduplicator();
         float x, y;
-        long discardedThrough = -1, trustedProducer;
+        long discardedThrough = -1, trustedProducer, lastAdmittedAt;
         Surface(SceneEngine.Region bounds, boolean nativeSpline, float density, float friction, long now) {
             this.bounds = bounds; motion.reset(0, 0, now); motion.setNativeSpline(nativeSpline, density, friction, now);
+            lastAdmittedAt = now;
         }
         Position at(long time) {
             if (time <= discardedThrough) return null;
@@ -61,7 +63,14 @@ public final class ReplacementScrollPresentation {
             }
             return previous;
         }
-        void record(long at) {
+        Position estimateAt(long at) {
+            if (history.isEmpty()) return null;
+            if (at < lastAdmittedAt) return at(at);
+            ViewportMotion.Position predicted = motion.position(at);
+            return new Position(at, predicted.x, predicted.y);
+        }
+        void record(long at, long admittedAt) {
+            lastAdmittedAt = admittedAt;
             history.addLast(new Position(at, x, y));
             while (history.size() > MAXIMUM_INTERVALS) discardedThrough = history.removeFirst().at;
         }
@@ -86,7 +95,15 @@ public final class ReplacementScrollPresentation {
         if (this.geometry != geometry || request <= 0 || reportedAt < 0 || reportedAt > callbackAt) return;
         if (origins.containsKey(request)) return;
         while (origins.size() >= MAXIMUM_ORIGINS) origins.remove(origins.keySet().iterator().next());
-        origins.put(request, new Origin(epoch, geometry, reportedAt));
+        Origin origin = new Origin(epoch, geometry, reportedAt);
+        for (Map.Entry<Long, Surface> entry : surfaces.entrySet()) {
+            Position baseline = entry.getValue().estimateAt(reportedAt);
+            if (baseline != null) origin.baselines.put(entry.getKey(), baseline);
+        }
+        // Freeze the source's available presentation estimate. A fresh frame must not
+        // inherit pre-capture forecast travel, nor be rebased when a later event arrives.
+        // This remains advisory event phase, never a measured pixel/camera timestamp.
+        origins.put(request, origin);
         revision++;
     }
 
@@ -145,7 +162,7 @@ public final class ReplacementScrollPresentation {
         }
         if (dx == null && dy == null) {
             if (!surface.history.isEmpty()) { surfaces.remove(sample.owner); origins.clear(); }
-            else surface.record(sample.sourceAtMillis);
+            else surface.record(sample.sourceAtMillis, receipt.admittedAtMillis);
             revision++;
             return true;
         }
@@ -161,7 +178,7 @@ public final class ReplacementScrollPresentation {
         if (dy != null) surface.y -= dy;
         surface.motion.addReportedDelta(dx == null ? null : -dx.floatValue(), dy == null ? null : -dy.floatValue(),
                 receipt.admittedAtMillis, width, height, sample.sourceAtMillis);
-        surface.record(sample.sourceAtMillis);
+        surface.record(sample.sourceAtMillis, receipt.admittedAtMillis);
         revision++;
         return true;
     }
@@ -172,12 +189,14 @@ public final class ReplacementScrollPresentation {
         Origin origin = origins.get(mask.geometrySource.imageRequestIdentity);
         if (origin == null || origin.at > now || origin.epoch != mask.geometrySource.epoch || origin.geometry != geometry) return null;
         Surface selected = null;
-        for (Surface surface : surfaces.values()) if (contains(surface.bounds, mask.displayRegion)) {
+        long selectedOwner = 0;
+        for (Map.Entry<Long, Surface> entry : surfaces.entrySet()) if (contains(entry.getValue().bounds, mask.displayRegion)) {
             if (selected != null) return null; // Overlapping/nested producers do not become additive cameras.
-            selected = surface;
+            selected = entry.getValue(); selectedOwner = entry.getKey();
         }
         if (selected == null) return null;
-        Position baseline = selected.at(origin.at);
+        Position baseline = origin.baselines.get(selectedOwner);
+        if (baseline == null) baseline = selected.at(origin.at);
         if (baseline == null) return null;
         ViewportMotion.Position displayed = selected.motion.position(now);
         float dx = displayed.x - baseline.x, dy = displayed.y - baseline.y;

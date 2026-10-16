@@ -5,6 +5,7 @@ import com.subhub.app.censor.engine.NativeTextResult;
 import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.censor.engine.ScrollMotionLedger;
+import com.subhub.app.overlay.ViewportMotion;
 import java.util.Collections;
 import org.junit.Test;
 import static org.junit.Assert.*;
@@ -54,6 +55,43 @@ public final class ReplacementScrollPresentationTest {
         captured(1, 200); position(100, 0); position(200, 100);
         assertEquals(600, top(1, 2000), .001);
         position(300, 180); assertEquals(520, top(1, 2000), .001);
+    }
+    @Test public void captureBetweenEventsDoesNotReapplyItsPreCaptureForecast() {
+        position(1000, 0); position(1100, 300); position(1200, 600);
+        captured(1, 1250);
+        assertEquals("Fresh geometry must start at its own presentation origin", 600, top(1, 1250), .001);
+    }
+    @Test public void laterEventsDoNotRetrospectivelyChangeAnAlreadyAvailableOriginEstimate() {
+        ViewportMotion reference = new ViewportMotion(); reference.reset(0, 0, 1003);
+        position(1000, 0);
+        for (int i = 1; i <= 2; i++) {
+            long time = 1000 + i * 100;
+            position(time, i * 300); reference.addReportedDelta(0f, -300f, time + 3, 1000, 2000, time);
+        }
+        captured(1, 1250); float origin = reference.position(1250).y;
+        position(1300, 900); reference.addReportedDelta(0f, -300f, 1303, 1000, 2000, 1300);
+        assertEquals(600 + reference.position(1340).y - origin, top(1, 1340), .001);
+    }
+    @Test public void eightSecondFastPauseReverseSweepKeepsEveryFreshOriginStable() {
+        for (boolean nativeX : new boolean[]{false, true}) {
+            presentation.reset(42, 7); ledger.reset(SCOPE); delivery = 0;
+            presentation.nativeStrategy(nativeX ? "com.twitter.android" : "org.chromium.chrome.stable",
+                    "androidx.recyclerview.widget.RecyclerView", 1, .015f, 1000);
+            long nextEvent = 1000;
+            for (int frame = 1; frame <= 24; frame++) {
+                long sourceAt = 1025 + frame * 350;
+                while (nextEvent + 3 <= sourceAt) { position(nextEvent, scriptedScroll(nextEvent)); nextEvent += 100; }
+                captured(frame, sourceAt);
+                assertEquals("New source phase frame=" + frame + " nativeX=" + nativeX, 600, top(frame, sourceAt), .001);
+                // A later source must not overwrite an older source's own origin.
+                if (frame > 1) assertTrue(Double.isFinite(top(frame - 1, sourceAt)));
+            }
+        }
+    }
+    private static long scriptedScroll(long at) {
+        long elapsed = at - 1000;
+        return elapsed < 2800 ? 10000 + elapsed * 3 : elapsed < 3600 ? 18400
+                : elapsed < 6400 ? 18400 - (elapsed - 3600) * 3 : 10000;
     }
     @Test public void sourceIdentityCannotBeRetimedAndEvictionDoesNotBorrowNewestOrigin() {
         captured(1, 50); captured(1, 200); position(100, 0); position(200, 100);

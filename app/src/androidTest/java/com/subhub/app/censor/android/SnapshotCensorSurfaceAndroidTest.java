@@ -49,6 +49,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -154,6 +155,49 @@ public class SnapshotCensorSurfaceAndroidTest {
             });
             f.prepared(); f.composed("hybrid-fresh-blue", 70, 70, Color.BLUE);
             assertEquals(2, f.h.callbacks.size()); ledger.close();
+        }
+    }
+
+    @Test public void scriptedFastPauseReverseKeepsTwentyFourFreshSourcesAtTheirOwnOrigin() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.image(CensorAppearance.Type.PIXELATE, false); f.prepared();
+            ReplacementScrollPresentation presentation = new ReplacementScrollPresentation(); presentation.reset(42, 7);
+            long epoch = f.h.engine.currentEpoch();
+            ScrollMotionLedger.Scope scope = new ScrollMotionLedger.Scope(epoch, 42, 7, ProtectionScope.normal(f.taps.scope()));
+            try (ScrollMotionLedger ledger = new ScrollMotionLedger(32, 4, 128)) {
+                ledger.reset(scope); f.presentation.set(presentation);
+                long nextEvent = 1000, delivery = 0;
+                for (int frame = 1; frame <= 24; frame++) {
+                    long sourceAt = 1025 + frame * 350;
+                    while (nextEvent + 3 <= sourceAt) {
+                        long elapsed = nextEvent - 1000;
+                        long y = elapsed < 2800 ? 10000 + elapsed * 3 : elapsed < 3600 ? 18400
+                                : elapsed < 6400 ? 18400 - (elapsed - 3600) * 3 : 10000;
+                        ScrollMotionLedger.Sample sample = new ScrollMotionLedger.Sample(scope, ++delivery, 10, 1,
+                                nextEvent, nextEvent, nextEvent + 1, nextEvent + 2, ScrollMotionLedger.Coordinate.absolute(0),
+                                ScrollMotionLedger.Coordinate.absolute(y), new SceneEngine.Region(f.origin[0], f.origin[1], f.origin[0] + 320, f.origin[1] + 320));
+                        presentation.observe(ledger.observe(sample, nextEvent + 3)); nextEvent += 100;
+                    }
+                    final int index = frame, color = Color.rgb(7 * frame, 80, 230);
+                    main(() -> {
+                        // A controlled event-presentation clock, NOT a physical pixel clock or
+                        // a claim that the whole product followed this scripted eight seconds.
+                        f.presentationTime.set(sourceAt); f.h.image(1 + index * 335, f.origin, color);
+                        try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                            boolean registered = false;
+                            for (SceneEngine.Group group : view.snapshot.groups) for (SceneEngine.Mask mask : group.members)
+                                if (mask.geometrySource.sequence == index + 1) {
+                                    presentation.captured(epoch, 42, mask.geometrySource.imageRequestIdentity, sourceAt, sourceAt + 10);
+                                    registered = true;
+                                }
+                            assertTrue("Actual newest render source, not an older held mask", registered);
+                        }
+                        f.surface.presentationChanged();
+                    });
+                    f.prepared(); f.composed("phase-" + frame, 70, 70, color);
+                }
+                assertEquals("No capture demand from presentation-only rendering", 25, f.h.callbacks.size());
+            }
         }
     }
 
@@ -757,6 +801,7 @@ public class SnapshotCensorSurfaceAndroidTest {
         final AtomicBoolean failNextOwnerRead = new AtomicBoolean();
         final AtomicReference<Thread> lockedCanvasThread = new AtomicReference<>();
         final AtomicReference<ReplacementScrollPresentation> presentation = new AtomicReference<>();
+        final AtomicLong presentationTime = new AtomicLong(-1);
         SnapshotSurfaceFixtureActivity activity; SnapshotCensorSurface surface; Harness h;
         Fixture() throws Exception { this((policy, revision, obsolete) -> Collections.emptyList(), null); }
         Fixture(SnapshotCensorView.ArtworkLoader loader, SnapshotCensorSurface.Endpoint endpoint) throws Exception {
@@ -777,14 +822,17 @@ public class SnapshotCensorSurfaceAndroidTest {
                     @Override public boolean isCurrent(CensorEngine.ActiveScope scope) { return h.engine.isCurrent(scope); }
                     @Override public SnapshotCensorPainter.Pose presentation(SceneEngine.Mask mask, long now) {
                         ReplacementScrollPresentation value = presentation.get();
-                        ReplacementScrollPresentation.Pose pose = value == null ? null : value.pose(mask, now);
+                        long fixed = presentationTime.get();
+                        ReplacementScrollPresentation.Pose pose = value == null ? null : value.pose(mask, fixed < 0 ? now : fixed);
                         return pose == null ? null : new SnapshotCensorPainter.Pose(pose.region, pose.clip);
                     }
                     @Override public long presentationRevision() {
-                        ReplacementScrollPresentation value = presentation.get(); return value == null ? 0 : value.revision();
+                        ReplacementScrollPresentation value = presentation.get();
+                        return (value == null ? 0 : value.revision()) ^ (presentationTime.get() << 16);
                     }
                     @Override public boolean presentationAnimating(long now) {
-                        ReplacementScrollPresentation value = presentation.get(); return value != null && value.isAnimating(now);
+                        ReplacementScrollPresentation value = presentation.get();
+                        return presentationTime.get() < 0 && value != null && value.isAnimating(now);
                     }
                     @Override public CensorEngine<PixelFrame>.RenderView acquireRenderView() {
                         if (lockedCanvasThread.get() == Thread.currentThread() && failNextOwnerRead.compareAndSet(true, false)) {
@@ -952,13 +1000,17 @@ public class SnapshotCensorSurfaceAndroidTest {
         void all() { while (!actions.isEmpty()) actions.remove(0).run(); }
     }
     private static final class Harness implements AutoCloseable {
+        private static final class Timer {
+            final long at; final Runnable action;
+            Timer(long at, Runnable action) { this.at = at; this.action = action; }
+        }
         static final long TRANSIENT_MILLIS = 5000;
-        volatile long now; final int width, height; final Queue worker = new Queue(), ui = new Queue(); final List<Runnable> timers = new ArrayList<>();
+        volatile long now; final int width, height; final Queue worker = new Queue(), ui = new Queue(); final List<Timer> timers = new ArrayList<>();
         final List<CensorEngine.CaptureCallback<PixelFrame>> callbacks = new ArrayList<>(); final CensorEngine<PixelFrame> engine; SceneEngine.Region[] regions; Bitmap lastImage;
         Harness(int width, int height) {
             this.width = width; this.height = height;
             engine = new CensorEngine<>(new CensorEngine.Policy(334, 0, 8, 3, false), new SceneEngine.Policy(16, 100, 64, 256, TRANSIENT_MILLIS, 20000, .5), () -> now,
-                    (action, delay) -> { timers.add(action); return () -> timers.remove(action); }, (request, callback) -> { assertTrue(request.tryDispatch()); callbacks.add(callback); },
+                    (action, delay) -> { Timer timer = new Timer(now + delay, action); timers.add(timer); return () -> timers.remove(timer); }, (request, callback) -> { assertTrue(request.tryDispatch()); callbacks.add(callback); },
                     Collections.singletonList(new CensorEngine.LaneWorker<>(SceneEngine.Lane.FAST, worker, (input, completion) -> {
                         List<SceneEngine.Observation> observations = new ArrayList<>(); for (SceneEngine.Region region : regions) observations.add(new SceneEngine.Observation("FACE", 1, 0, region, .9f));
                         completion.success(new SceneEngine.Batch(input.source, SceneEngine.Lane.FAST, observations, Collections.emptyList()), new CensorEngine.WorkTiming(1, 2, 1));
@@ -966,7 +1018,15 @@ public class SnapshotCensorSurfaceAndroidTest {
         }
         void image(long at, int[] xy, int color) {
             now = at; regions = new SceneEngine.Region[]{new SceneEngine.Region(xy[0] + 60, xy[1] + 60, xy[0] + 100, xy[1] + 100), new SceneEngine.Region(xy[0] + 200, xy[1] + 60, xy[0] + 240, xy[1] + 100)};
-            timers.remove(0).run(); Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888); bitmap.eraseColor(color); lastImage = bitmap;
+            int before = callbacks.size();
+            while (true) {
+                Timer due = null;
+                for (Timer timer : timers) if (timer.at <= now && (due == null || timer.at < due.at)) due = timer;
+                if (due == null) break;
+                timers.remove(due); due.action.run();
+            }
+            assertEquals("One due capture; expiry wakes are not captures", before + 1, callbacks.size());
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888); bitmap.eraseColor(color); lastImage = bitmap;
             callbacks.get(callbacks.size() - 1).success(new CensorEngine.Captured<>(new PixelFrame(bitmap, PixelGeometry.display(width, height, width, height), PixelFrame.Kind.ACCESSIBILITY_DISPLAY, -1, at, 0), width, height, -1, bitmap::recycle)); worker.all(); ui.all();
         }
         @Override public void close() { engine.close(); for (CensorEngine.CaptureCallback<PixelFrame> callback : callbacks) callback.failure(0); worker.all(); ui.all(); }
