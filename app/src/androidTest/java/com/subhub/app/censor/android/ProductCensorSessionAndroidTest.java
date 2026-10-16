@@ -154,6 +154,12 @@ public final class ProductCensorSessionAndroidTest {
     private boolean controlledStorageResult;
     private boolean explicitNativeDemand;
     private boolean controlledObservationRedelivery;
+    private int naturalAccountingNodes;
+    private boolean naturalAccountingPassed, naturalAccountingScopeStable, naturalAccountingReplayEmpty;
+    private long naturalAccountingStartedAt = -1, naturalAccountingCountedAt = -1, naturalAccountingFinishedAt = -1;
+    private long naturalAccountingReplaySource = -1, naturalAccountingFirstUnlock, naturalAccountingAppearanceAt = -1;
+    private long naturalAccountingPostAppearancePartialSource = -1;
+    private StatsRepository.SessionStamp naturalAccountingStamp;
 
     @Before public void ownOnlySyntheticGuestSettingsAndUnsuppressedAutomation() {
         instrumentation = InstrumentationRegistry.getInstrumentation(); context = instrumentation.getTargetContext();
@@ -302,6 +308,12 @@ public final class ProductCensorSessionAndroidTest {
                 }
                 // Preserve this new falsifier even if an older serializer/assertion failed.
                 if (naturalCohortRenewalGate) try { finishNaturalCohortEvidence(); }
+                catch (Exception | Error failure) {
+                    if (primaryTeardownFailure != null) primaryTeardownFailure.addSuppressed(failure);
+                    else if (evidenceFailure != null) evidenceFailure.addSuppressed(failure);
+                    else evidenceFailure = failure;
+                }
+                if (naturalAccountingNodes != 0) try { finishNaturalAccountingEvidence(); }
                 catch (Exception | Error failure) {
                     if (primaryTeardownFailure != null) primaryTeardownFailure.addSuppressed(failure);
                     else if (evidenceFailure != null) evidenceFailure.addSuppressed(failure);
@@ -1435,7 +1447,8 @@ public final class ProductCensorSessionAndroidTest {
         }
         assertEquals(scrollReceipts.size(), receipts.length()); assertEquals(nativeFrames.size(), frames.length());
         if (productScrollPassed && !nativeFrames.isEmpty()) {
-            if (sustainedNativeGate || windowCostGate || nativeCutoffGate || naturalCohortRenewalGate || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
+            if (sustainedNativeGate || windowCostGate || nativeCutoffGate || naturalCohortRenewalGate || naturalAccountingNodes != 0
+                    || testName.getMethodName().equals("actualServicePositiveNodePaintsKeepOwnSourcesThroughRapidScrollAndReversal")) {
                 assertTrue("A soft fence may omit a complete evidence callback, never invent one", evidence.size() <= nativeFrames.size());
                 java.util.Set<SceneEngine.Source> seen = new java.util.HashSet<>();
                 for (CensorEngine.EvidenceReceipt receipt : evidence) {
@@ -2124,6 +2137,265 @@ public final class ProductCensorSessionAndroidTest {
         CensorEngine.EvidenceClaim replay = session.controller().claimEvidence(receipt, StatsRepository.currentSessionStamp());
         assertTrue(replay == null || replay.subjects.isEmpty());
         assertTrue(faults.isEmpty()); assertBinding();
+    }
+
+    @Test public void actualServiceNaturalSingletonCountsOnlyCompletedNativeParents() throws Exception {
+        naturalNativeAccounting(1);
+    }
+
+    @Test public void actualServiceNaturalCohortCountsOnlyCompletedNativeParents() throws Exception {
+        naturalNativeAccounting(2);
+    }
+
+    /** Passive bookkeeping composition, not a throughput, quality or physical-motion gate. */
+    private void naturalNativeAccounting(int nodes) throws Exception {
+        requireProductScrollGate(); naturalAccountingNodes = nodes;
+        nativeCounting("porn", 1, 500); // Preferences/stores/ordinary View only; no native demand.
+        if (nodes == 2) {
+            context.startActivity(targetIntent().putExtra("nativeScrollFixture", true).putExtra("label", "porn"));
+            await("Two real ordinary provider captions", () -> {
+                // Fixture readiness precedes connect; session-scoped glyph helpers cannot run yet.
+                android.view.accessibility.AccessibilityNodeInfo root = ui.getRootInActiveWindow();
+                if (root == null) return false;
+                try {
+                    CharSequence packageName = root.getPackageName();
+                    if (packageName == null || !TARGET.contentEquals(packageName)) return false;
+                    for (String id : new String[]{"android:id/text1", "android:id/text2"}) {
+                        List<android.view.accessibility.AccessibilityNodeInfo> views = root.findAccessibilityNodeInfosByViewId(id);
+                        try {
+                            android.view.accessibility.AccessibilityNodeInfo view = views.size() == 1 ? views.get(0) : null;
+                            if (view == null || !view.refresh() || !view.isVisibleToUser()) return false;
+                            CharSequence text = view.getText();
+                            if (text == null || !"porn".contentEquals(text)) return false;
+                        } finally {
+                            for (android.view.accessibility.AccessibilityNodeInfo view : views) if (view != null && view != root) view.recycle();
+                        }
+                    }
+                    return true;
+                } finally { root.recycle(); }
+            });
+        }
+        naturalAccountingStamp = new StatsRepository(context).sessionStamp();
+        naturalAccountingStartedAt = SystemClock.uptimeMillis(); connect();
+        await("Actual current normal owner", () -> session.controller().activeScope() != null);
+        CensorEngine.ActiveScope scope = session.controller().activeScope();
+        assertEquals(ProtectionScope.Origin.NORMAL, scope.protectionScope.origin);
+        await("Natural completed native sources reach the real Stats store", () ->
+                new StatsRepository(context).load().getTotalBlocks() == nodes && committedNaturalCount() == nodes);
+        await("Real aggregate native ledger and applied first-block achievement", () ->
+                committedNaturalCents() == nodes * 7 && new AchievementManager(context).isUnlocked("first_block"));
+        naturalAccountingCountedAt = SystemClock.uptimeMillis();
+        naturalAccountingFirstUnlock = new AchievementManager(context).getUnlockedAt("first_block");
+        assertTrue(naturalAccountingFirstUnlock > 0);
+        Map<String, NativeTextResult.Candidate> countedFacts = new LinkedHashMap<>();
+        for (CensorProductSession.AccountingResult result : accountResults) {
+            if (result.phase != CensorProductSession.AccountingPhase.COUNT || result.status != CensorProductSession.AccountingStatus.COMMITTED) continue;
+            for (SceneEngine.AcceptedSubject subject : result.receipt.subjects) if (subject.confirmedForConsumption && !subject.alreadyConsumed) {
+                NativeTextResult.Candidate candidate = naturalCandidate(naturalFrame(result.receipt.source.sequence), subject);
+                countedFacts.put(candidate.nodeKey, candidate);
+            }
+        }
+        assertEquals(nodes, countedFacts.size());
+        assertTrue(preferences.edit().putInt(SettingsRepository.KEY_CENSOR_INTENSITY, 80).commit());
+        naturalAccountingAppearanceAt = SystemClock.uptimeMillis();
+        await("Further natural COMPLETE parents after appearance-only change", () -> naturalCompleteParentsAfter(naturalAccountingAppearanceAt) >= 2);
+        NativeTextResult.ReadMode partialMode = nodes == 1 ? NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY
+                : NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY;
+        await("The same counted nodes retain natural partial renewal after appearance", () -> {
+            for (NativeTextFrame frame : nativeFrames) {
+                if (frame.source.readStartedAtMillis < naturalAccountingAppearanceAt || frame.observationOrdinal != 0
+                        || frame.read.coverage != NativeTextResult.Coverage.POSITIVE_NODES_ONLY || frame.read.readMode != partialMode
+                        || frame.read.candidates.size() != nodes) continue;
+                if (frame.read.candidates.stream().anyMatch(candidate -> countedFacts.get(candidate.nodeKey) == null
+                        || !sameNaturalFact(candidate, countedFacts.get(candidate.nodeKey)))) continue;
+                if (nativeCosts.stream().noneMatch(cost -> cost.epoch == frame.source.epoch && cost.request == frame.requestIdentity
+                        && cost.terminal == com.subhub.app.censor.engine.NativeReadCost.Terminal.SUCCESS)) continue;
+                naturalAccountingPostAppearancePartialSource = frame.source.sequence; return true;
+            }
+            return false;
+        });
+        CensorEngine<PixelFrame> engine = actualEngineForControl();
+        await("Current already-consumed source has a nonnull empty replay", () -> {
+            synchronized (engine) {
+                for (int i = evidence.size() - 1; i >= 0; i--) {
+                    CensorEngine.EvidenceReceipt receipt = evidence.get(i);
+                    if (receipt.nativeCoverage != NativeTextResult.Coverage.COMPLETE_TREE || receipt.subjects.isEmpty()
+                            || receipt.subjects.stream().anyMatch(subject -> !subject.alreadyConsumed || !subject.confirmedForConsumption)) continue;
+                    CensorEngine.EvidenceClaim replay = session.controller().claimEvidence(receipt, naturalAccountingStamp);
+                    if (replay == null) continue; // Stale is inconclusive, never a replay pass.
+                    assertTrue(replay.subjects.isEmpty()); naturalAccountingReplaySource = receipt.source.sequence;
+                    naturalAccountingReplayEmpty = true; return true;
+                }
+                return false;
+            }
+        });
+        assertNaturalNativeCredit(nodes);
+        assertNaturalAccountingStores(nodes);
+        naturalAccountingScopeStable = scope.same(session.controller().activeScope());
+        assertTrue(naturalAccountingScopeStable); assertTrue(naturalAccountingStamp.isCurrent());
+        assertEquals(naturalAccountingFirstUnlock, new AchievementManager(context).getUnlockedAt("first_block"));
+        assertFalse(explicitNativeDemand); assertTrue(ownedHolds.isEmpty()); assertFalse(ownedLabStarted);
+        assertFalse(controlledStorageResult); assertFalse(controlledObservationRedelivery);
+        assertEquals(0, models.get()); assertTrue(faults.isEmpty()); assertBinding();
+        naturalAccountingFinishedAt = SystemClock.uptimeMillis(); productScrollPassed = naturalAccountingPassed = true;
+    }
+
+    private int committedNaturalCount() {
+        return accountResults.stream().filter(result -> result.phase == CensorProductSession.AccountingPhase.COUNT
+                && result.status == CensorProductSession.AccountingStatus.COMMITTED).mapToInt(result -> result.count).sum();
+    }
+    private int committedNaturalCents() {
+        return accountResults.stream().filter(result -> result.phase == CensorProductSession.AccountingPhase.LEDGER
+                && result.status == CensorProductSession.AccountingStatus.COMMITTED).mapToInt(result -> result.chargedCents).sum();
+    }
+    private int naturalCompleteParentsAfter(long after) {
+        return (int) nativeFrames.stream().filter(frame -> frame.observationOrdinal == 0
+                && frame.source.readStartedAtMillis >= after
+                && frame.read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY
+                && frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE).count();
+    }
+    private void assertNaturalAccountingStores(int nodes) {
+        com.subhub.app.stats.StatsSnapshot stats = new StatsRepository(context).load();
+        assertEquals(nodes, stats.getTotalBlocks()); assertEquals(nodes, stats.getCurrentSessionBlocks());
+        assertEquals(nodes * 7, stats.getTributeCents()); assertEquals(nodes * 7, stats.getCurrentSessionTributeCents());
+        assertEquals(0, stats.getAllCategoryCensors()); assertEquals(nodes, committedNaturalCount());
+        assertEquals(nodes * 7, committedNaturalCents());
+        List<com.subhub.app.penance.PenanceEvent> events = new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents();
+        assertEquals(nodes, events.stream().mapToInt(com.subhub.app.penance.PenanceEvent::getStrikeCount).sum());
+        assertEquals(nodes * 7, events.stream().mapToInt(com.subhub.app.penance.PenanceEvent::getAmountCents).sum());
+        for (com.subhub.app.penance.PenanceEvent event : events) assertEquals(PenanceInfraction.NEW_DETECTION, event.getInfraction());
+        assertFalse(new HardcoreAutoPayManager(context).isConfigured());
+        assertTrue(context.getSharedPreferences(PayPalCredentialStore.PREFS_NAME, Context.MODE_PRIVATE).getAll().isEmpty());
+    }
+    private NativeTextFrame naturalFrame(long sequence) {
+        NativeTextFrame selected = null;
+        for (NativeTextFrame frame : nativeFrames) if (frame.source.sequence == sequence) {
+            assertNull("One actual native Source", selected); selected = frame;
+        }
+        assertNotNull("Source has an actual native admission", selected); return selected;
+    }
+    private static boolean sameNaturalFact(NativeTextResult.Candidate a, NativeTextResult.Candidate b) {
+        return java.util.Objects.equals(a.nodeKey, b.nodeKey) && a.contentKey.equals(b.contentKey) && a.category.equals(b.category)
+                && a.textSource == b.textSource && a.matchStart == b.matchStart && a.matchEnd == b.matchEnd
+                && a.normalizedLength == b.normalizedLength;
+    }
+    private NativeTextResult.Candidate naturalCandidate(NativeTextFrame frame, SceneEngine.AcceptedSubject subject) {
+        NativeTextResult.Candidate selected = null;
+        for (NativeTextResult.Candidate candidate : frame.read.candidates) for (SceneEngine.Region line : candidate.regions) {
+            if (line.left == subject.region.left && line.top == subject.region.top && line.right == subject.region.right
+                    && line.bottom == subject.region.bottom && candidate.category.equals(subject.category)) {
+                assertNull("Exact candidate-to-subject region", selected); selected = candidate;
+            }
+        }
+        assertNotNull(selected); assertNotNull(selected.nodeKey); assertTrue(selected.matchProvenanceKnown()); return selected;
+    }
+    private void assertNaturalNativeCredit(int nodes) {
+        Set<String> countedNodes = new LinkedHashSet<>(); int count = 0;
+        NativeTextResult.ReadMode partialMode = nodes == 1 ? NativeTextResult.ReadMode.ADMITTED_NODE_RECLASSIFY
+                : NativeTextResult.ReadMode.ADMITTED_NODE_COHORT_RECLASSIFY;
+        for (CensorEngine.EvidenceReceipt receipt : evidence) if (receipt.nativeCoverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY)
+            for (SceneEngine.AcceptedSubject subject : receipt.subjects) assertFalse(subject.confirmedForConsumption);
+        for (CensorProductSession.AccountingResult result : accountResults) {
+            if (result.phase != CensorProductSession.AccountingPhase.COUNT || result.status != CensorProductSession.AccountingStatus.COMMITTED) continue;
+            CensorEngine.EvidenceReceipt receipt = result.receipt; assertNotNull(receipt);
+            NativeTextFrame current = naturalFrame(receipt.source.sequence);
+            assertSame(current.source, receipt.source); assertEquals(0, current.observationOrdinal);
+            assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, receipt.nativeCoverage);
+            assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, current.read.coverage);
+            assertEquals(NativeTextResult.ReadMode.FULL_DISCOVERY, current.read.readMode);
+            assertEquals(ProtectionScope.Origin.NORMAL, receipt.source.protectionScope.origin);
+            int selected = 0;
+            for (SceneEngine.AcceptedSubject subject : receipt.subjects) {
+                if (!subject.confirmedForConsumption || subject.alreadyConsumed) continue;
+                assertSame(receipt.source, subject.source);
+                NativeTextResult.Candidate candidate = naturalCandidate(current, subject);
+                assertTrue("A canonical node is charged once", countedNodes.add(candidate.nodeKey));
+                assertEquals(5, subject.witnesses.size()); assertEquals(current.candidateValidUntilMillis(candidate), subject.validUntilMillis);
+                Set<Long> parents = new LinkedHashSet<>(); long first = Long.MAX_VALUE, last = -1;
+                for (SceneEngine.EvidenceWitness witness : subject.witnesses) {
+                    NativeTextFrame full = naturalFrame(witness.sourceSequence);
+                    assertEquals(SceneEngine.SourceKind.NATIVE_TEXT, witness.kind);
+                    assertEquals(full.requestIdentity, witness.producerIdentity); assertTrue(parents.add(witness.producerIdentity));
+                    assertEquals(0, full.observationOrdinal); assertEquals(NativeTextResult.Coverage.COMPLETE_TREE, full.read.coverage);
+                    assertEquals(NativeTextResult.ReadMode.FULL_DISCOVERY, full.read.readMode);
+                    assertTrue(full.read.candidates.stream().anyMatch(value -> sameNaturalFact(candidate, value)));
+                    assertTrue(nativeCosts.stream().anyMatch(cost -> cost.epoch == full.source.epoch && cost.request == full.requestIdentity
+                            && cost.terminal == com.subhub.app.censor.engine.NativeReadCost.Terminal.SUCCESS));
+                    assertEquals(receipt.source.epoch, full.source.epoch); assertEquals(receipt.source.geometry, full.source.geometry);
+                    assertEquals(receipt.source.protectionScope, full.source.protectionScope);
+                    assertTrue(full.source.sequence <= current.source.sequence);
+                    first = Math.min(first, full.source.sequence); last = Math.max(last, full.source.sequence);
+                }
+                assertEquals(current.source.sequence, last);
+                boolean partialBetween = false; long deadline = -1, validated = -1;
+                long continuityEnd = Math.max(last, naturalAccountingPostAppearancePartialSource);
+                for (NativeTextFrame frame : nativeFrames) {
+                    if (frame.source.sequence < first || frame.source.sequence > continuityEnd) continue;
+                    if (deadline >= 0) assertTrue("Only this node's original current deadline can bridge", frame.source.receivedAtMillis <= deadline);
+                    NativeTextResult.Candidate fact = null;
+                    for (NativeTextResult.Candidate value : frame.read.candidates) if (sameNaturalFact(candidate, value)) fact = value;
+                    if (fact != null) {
+                        assertTrue(fact.exactGeometry); assertTrue(fact.validatedAtMillis >= frame.source.readStartedAtMillis);
+                        assertTrue(fact.validatedAtMillis <= frame.source.readFinishedAtMillis);
+                        assertTrue("Own-node validation never rolls backward", fact.validatedAtMillis >= validated);
+                        validated = fact.validatedAtMillis; deadline = frame.candidateValidUntilMillis(fact);
+                        assertTrue(frame.source.receivedAtMillis <= deadline);
+                    }
+                    else assertNotEquals("A COMPLETE absence cannot preserve a node", NativeTextResult.Coverage.COMPLETE_TREE, frame.read.coverage);
+                    if (fact != null && frame.source.sequence > first && frame.source.sequence < last && frame.observationOrdinal == 0
+                            && frame.read.readMode == partialMode && frame.read.coverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY
+                            && nativeCosts.stream().anyMatch(cost -> cost.epoch == frame.source.epoch && cost.request == frame.requestIdentity
+                                && cost.terminal == com.subhub.app.censor.engine.NativeReadCost.Terminal.SUCCESS)) partialBetween = true;
+                }
+                assertTrue("The counted node really crossed a natural selected-node terminal", partialBetween);
+                selected++;
+            }
+            assertEquals(result.count, selected); count += result.count;
+        }
+        assertEquals(nodes, count); assertEquals(nodes, countedNodes.size());
+    }
+
+    private void finishNaturalAccountingEvidence() throws Exception {
+        com.subhub.app.stats.StatsSnapshot stats = new StatsRepository(context).load();
+        JSONArray subjects = new JSONArray(), events = new JSONArray();
+        for (CensorEngine.EvidenceReceipt receipt : evidence) {
+            JSONArray members = new JSONArray();
+            for (SceneEngine.AcceptedSubject subject : receipt.subjects) members.put(new JSONObject()
+                    .put("identity", subject.identity).put("partition", subject.partition).put("textGroup", subject.textGroup)
+                    .put("category", subject.category).put("region", regionMetadata(subject.region))
+                    .put("nativeCoverage", subject.nativeCoverage == null ? JSONObject.NULL : subject.nativeCoverage.name()));
+            subjects.put(new JSONObject().put("sequence", receipt.source.sequence).put("epoch", receipt.source.epoch)
+                    .put("nativeCoverage", receipt.nativeCoverage == null ? JSONObject.NULL : receipt.nativeCoverage.name())
+                    .put("rawSubjectCount", members.length()).put("subjects", members));
+        }
+        for (com.subhub.app.penance.PenanceEvent event : new PenanceManager(context).snapshot(System.currentTimeMillis()).getEvents())
+            events.put(new JSONObject().put("strikeCount", event.getStrikeCount()).put("amountCents", event.getAmountCents())
+                    .put("infraction", event.getInfraction().name()).put("status", event.getStatus().name()));
+        AchievementManager achievements = new AchievementManager(context);
+        JSONObject result = new JSONObject().put("schemaVersion", 1).put("method", testName.getMethodName())
+                .put("expectedNodes", naturalAccountingNodes).put("nativeAssertionPassed", naturalAccountingPassed)
+                .put("clockDomain", "UPTIME_MILLIS").put("startedAtMillis", naturalAccountingStartedAt)
+                .put("countedAtMillis", naturalAccountingCountedAt).put("finishedAtMillis", naturalAccountingFinishedAt)
+                .put("appearanceChangedAtMillis", naturalAccountingAppearanceAt)
+                .put("postAppearancePartialSource", naturalAccountingPostAppearancePartialSource)
+                .put("scopeStableBeforeClose", naturalAccountingScopeStable)
+                .put("originalStatsStampCurrent", naturalAccountingStamp != null && naturalAccountingStamp.isCurrent())
+                .put("currentReplayNonNullEmpty", naturalAccountingReplayEmpty).put("currentReplaySource", naturalAccountingReplaySource)
+                .put("stats", new JSONObject().put("totalBlocks", stats.getTotalBlocks()).put("currentSessionBlocks", stats.getCurrentSessionBlocks())
+                        .put("tributeCents", stats.getTributeCents()).put("currentSessionTributeCents", stats.getCurrentSessionTributeCents())
+                        .put("allCategoryCensors", stats.getAllCategoryCensors()))
+                .put("rawLedgerEventCount", events.length()).put("ledgerEvents", events)
+                .put("firstBlockUnlocked", achievements.isUnlocked("first_block"))
+                .put("firstBlockUnlockedAt", achievements.getUnlockedAt("first_block"))
+                .put("firstBlockOriginalUnlockedAt", naturalAccountingFirstUnlock).put("achievementDiskCommitAcknowledged", false)
+                .put("rawEvidenceBindingCount", subjects.length()).put("evidenceBindings", subjects)
+                .put("providerHoldsUsed", !ownedHolds.isEmpty()).put("explicitNativeDemand", explicitNativeDemand)
+                .put("recorderUsed", ownedLabStarted).put("autopayConfigured", new HardcoreAutoPayManager(context).isConfigured())
+                .put("paymentCredentialsPresent", !context.getSharedPreferences(PayPalCredentialStore.PREFS_NAME, Context.MODE_PRIVATE).getAll().isEmpty())
+                .put("managedDrain", session != null && session.managedResourcesDrained())
+                .put("physicalMotionAcceptance", false).put("pixelPerformanceAcceptance", false);
+        File target = new File(productScrollEvidence, "native-natural-accounting.json"); assertFalse(target.exists());
+        try (FileOutputStream stream = new FileOutputStream(target)) { stream.write(result.toString(2).getBytes(StandardCharsets.UTF_8)); }
     }
     @Test public void statisticsSessionReplacementCannotRebindHeldSelectionOrOldWitnesses() throws Exception {
         nativeCounting("porn", 1, 500); connect(); awaitCount(1); awaitLedger(1, 7);
