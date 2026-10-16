@@ -38,6 +38,8 @@ import java.util.concurrent.atomic.AtomicLong;
 @RequiresApi(30)
 public final class AccessibilityCensorController implements AutoCloseable {
     public interface Observer extends AccessibilityCensorHost.Observer {
+        default boolean collectSubmissions() { return false; }
+        default void submitted(SurfaceSubmission submission) { }
         default void posted(SnapshotCensorSurface.Post receipt) { }
         default void endpointFailure() { }
         default void resourceFailure() { }
@@ -220,6 +222,8 @@ public final class AccessibilityCensorController implements AutoCloseable {
                 return paintEligible(scope) ? host.acknowledgePaint(scope, revision, generation, members, reverse) : null;
             }
         }, Objects.requireNonNull(taps), new SnapshotCensorSurface.Observer() {
+            @Override public boolean collectSubmissions() { return observer.collectSubmissions(); }
+            @Override public void submitted(SurfaceSubmission submission) { observer.submitted(submission); }
             @Override public void resourceFailure() { resourceFailed = true; observer.resourceFailure(); }
             @Override public void endpointFailure() { observer.endpointFailure(); }
             @Override public void posted(SnapshotCensorSurface.Post receipt) { observer.posted(receipt); }

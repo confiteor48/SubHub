@@ -39,6 +39,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class SnapshotCensorSurface extends FrameLayout implements AutoCloseable {
     public interface Observer {
+        /** Frozen at construction. Default product path collects no submission geometry. */
+        default boolean collectSubmissions() { return false; }
+        /** Render worker, AFTER holder use and Drawing leases close; never block or call main synchronously. */
+        default void submitted(SurfaceSubmission submission) { }
         default void recorded(CensorEngine.PaintReceipt receipt) { }
         default void drawDemand() { }
         default void tapScopeInvalidated(long tapScope) { }
@@ -141,6 +145,9 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
     private long generation, postSerial, replacedPoses, replacedCompletions, droppedSuccessfulCompletions;
     private volatile long postCount, lockCount, postAttempts, postReturns;
     private volatile long destructionsStarted, destructionsReturned;
+    private final boolean collectSubmissions;
+    private volatile long submissionObserverFailures;
+    private volatile long submissionObservationNanos, maximumSubmissionObservationNanos;
     private Pose pending;
     private Completion completed;
     private CensorEngine.ActiveScope lastScope;
@@ -190,10 +197,11 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
             CensorTapTracker taps, Observer observer, Endpoint endpoint,
             LatestResourceCoordinator.Delivery completionDelivery, ExecutorService rendering) {
         super(context); onMain(); this.observer = Objects.requireNonNull(observer);
+        collectSubmissions = observer.collectSubmissions();
         this.taps = Objects.requireNonNull(taps); this.endpoint = Objects.requireNonNull(endpoint);
         this.completionDelivery = completionDelivery == null ? main::post : completionDelivery;
         this.rendering = rendering == null ? Executors.newSingleThreadExecutor(action -> new Thread(action, "Censor-surface-render")) : rendering;
-        session = new SnapshotRenderSession(owner, artwork, getResources().getDisplayMetrics().density, main::post, this::presentationChanged);
+        session = new SnapshotRenderSession(owner, artwork, getResources().getDisplayMetrics().density, main::post, this::presentationChanged, collectSubmissions);
         surface = new SurfaceView(context); holder = surface.getHolder();
         surface.setZOrderOnTop(true); holder.setFormat(PixelFormat.TRANSLUCENT);
         addView(surface, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
@@ -329,6 +337,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
         if (canvas == null) return lifetime(pose) ? failed(pose, recorded, began) : null;
         SnapshotRenderSession.Drawing drawing = null;
         SnapshotRenderSession.Paint paint = null;
+        SurfaceSubmission.Paint submittedPaint = null;
         long recordingEnd, postingStarted, postEnd, returned, serial = 0;
         boolean safe = false, recordedSafely = false, posted = false, cleanup = true;
         // EVERYTHING after a returned Canvas belongs to this finally, including Error and tap-map
@@ -345,6 +354,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
             boolean painted = drawing != null && lifetime(pose) && session.configurationGeneration() == pose.configuration;
             if (!painted) canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
             paint = painted ? drawing.paint : null;
+            if (collectSubmissions) submittedPaint = recordedPaint(paint);
             TapMap nextMap = paint == null ? null : tapMap(paint);
             synchronized (gate) {
                 serial = ++postSerial;
@@ -357,7 +367,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
             recordedSafely = true;
         } catch (RuntimeException | Error failure) {
             paint = null;
-            try { canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR); }
+            try { canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR); submittedPaint = collectSubmissions ? SurfaceSubmission.Paint.clear() : null; }
             catch (RuntimeException | Error clearFailure) { safe = false; }
             synchronized (gate) { serial = ++postSerial; taps.withdrawDisplayed(this); }
         } finally {
@@ -370,6 +380,19 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
                 use.close(); // Actual holder post attempt ended; no more holder access in this job.
                 try { if (drawing != null) drawing.close(); }
                 catch (RuntimeException | Error failure) { cleanup = false; }
+            }
+        }
+        if (collectSubmissions) {
+            long observationBegan = SystemClock.elapsedRealtimeNanos();
+            try {
+                observer.submitted(new SurfaceSubmission(postAttempts, serial, pose.generation, returned,
+                        Thread.currentThread().getId(), Math.max(0, began - pose.enqueued), locked - began,
+                        recordingEnd - locked, postEnd - postingStarted, pose.x, pose.y, pose.width, pose.height,
+                        posted, safe, recordedSafely, cleanup, safe ? submittedPaint : null));
+            } catch (RuntimeException | Error unavailable) { submissionObserverFailures++; }
+            finally {
+                long elapsed = SystemClock.elapsedRealtimeNanos() - observationBegan;
+                submissionObservationNanos += elapsed; maximumSubmissionObservationNanos = Math.max(maximumSubmissionObservationNanos, elapsed);
             }
         }
         if (!posted || !safe || !recordedSafely || !cleanup) return failed(pose, recorded, began);
@@ -386,6 +409,16 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
         }
         return new Completion(pose, null, serial, recorded, SystemClock.uptimeMillis(),
                 Math.max(0, began - pose.enqueued), 0, 0, 0, true);
+    }
+    private SurfaceSubmission.Paint recordedPaint(SnapshotRenderSession.Paint paint) {
+        if (paint == null) return SurfaceSubmission.Paint.clear();
+        try {
+            List<SurfaceSubmission.Member> members = new ArrayList<>();
+            if (paint.result != null) for (SnapshotCensorPainter.PaintedMember member : paint.result.members)
+                if (member.recording != null) members.add(member.recording);
+            return SurfaceSubmission.Paint.drawn(paint.scope.epoch, paint.scope.geometry, paint.revision,
+                    paint.presentationRevision, paint.recordedAtMillis, paint.result == null ? 0 : paint.result.members.size(), members, paint.reverse);
+        } catch (RuntimeException | Error unavailable) { return null; }
     }
     private void failSubmission() {
         long epoch; synchronized (gate) { renderingReserved = false; epoch = generation; }
@@ -563,6 +596,9 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
     // Native queue controls observe real UI geometry but bypass only the Choreographer wait.
     void requestObservedFrame() { enqueueObservedPose(); }
     boolean demandPending() { onMain(); return frameQueued || changedQueued.get(); }
+    long submissionObserverFailures() { return submissionObserverFailures; }
+    long submissionObservationNanos() { return submissionObservationNanos; }
+    long maximumSubmissionObservationNanos() { return maximumSubmissionObservationNanos; }
     int executingRenderCount() { synchronized (gate) { return renderingReserved ? 1 : 0; } }
     int pendingPoseCount() { synchronized (gate) { return pending == null ? 0 : 1; } }
     int completionNoticeCount() { synchronized (gate) { return completionReserved != null ? 1 : 0; } }

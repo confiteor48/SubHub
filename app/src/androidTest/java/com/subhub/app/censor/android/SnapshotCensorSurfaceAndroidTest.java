@@ -94,7 +94,10 @@ public class SnapshotCensorSurfaceAndroidTest {
         }
     }
     private static CensorAppearance appearance(CensorAppearance.Type type, boolean reverse) {
-        return new CensorAppearance(type, 70, 0, false, false, CensorAppearance.BorderEffect.CLASSIC,
+        return appearance(type, reverse, 0);
+    }
+    private static CensorAppearance appearance(CensorAppearance.Type type, boolean reverse, float padding) {
+        return new CensorAppearance(type, 70, padding, false, false, CensorAppearance.BorderEffect.CLASSIC,
                 false, Color.WHITE, new EffectPalette(Color.GREEN, Color.BLUE, Color.WHITE),
                 Collections.singletonList("BLOCKED"), reverse, 100, "rectangle", "SubHub", "Access blocked.");
     }
@@ -108,7 +111,8 @@ public class SnapshotCensorSurfaceAndroidTest {
     private void originInsertionDuringDraw(boolean conservative) throws Exception {
         CountDownLatch submitted = new CountDownLatch(1), release = new CountDownLatch(1);
         AtomicBoolean inserted = new AtomicBoolean();
-        try (Fixture f = new Fixture()) {
+        try (Fixture f = new Fixture(true)) {
+            f.submissionLabel = conservative ? "conservative-clear" : "pre-admission-kept";
             try {
                 f.image(CensorAppearance.Type.BOX, false);
                 f.composed("origin-insertion-baseline-" + conservative, 70, 70, Color.GREEN);
@@ -154,6 +158,100 @@ public class SnapshotCensorSurfaceAndroidTest {
                 else f.composed("origin-insertion-kept-composed-mask", 70, 70, Color.GREEN);
                 assertEquals("Origin metadata does not admit a detection or demand a capture", captures, f.h.callbacks.size());
             } finally { release.countDown(); }
+            await(() -> f.surface.executingRenderCount() == 0 && f.surface.completionNoticeCount() == 0);
+            SurfaceSubmission last = f.lastSubmission();
+            assertTrue(last.holderReturned); assertNotNull(last.paint); assertTrue(last.paint.geometryComplete);
+            assertEquals(conservative ? SurfaceSubmission.Mode.CLEAR : SurfaceSubmission.Mode.MEMBERS, last.paint.mode);
+            assertEquals(conservative ? 0 : 2, last.paint.members.size());
+            f.assertSubmissionInventory();
+        }
+    }
+
+    @Test public void submissionGeometryMatchesActualPaddedOwnerClippedPixels() throws Exception {
+        try (Fixture f = new Fixture(true)) {
+            f.submissionLabel = "padded-clipped-control"; f.image(CensorAppearance.Type.BOX, false);
+            ReplacementScrollPresentation presentation = new ReplacementScrollPresentation(); presentation.reset(42, 7);
+            long epoch = f.h.engine.currentEpoch();
+            try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                presentation.captured(epoch, 42, view.snapshot.groups.get(0).members.get(0).geometrySource.imageRequestIdentity, 900, 900);
+            }
+            SceneEngine.Region owner = new SceneEngine.Region(f.origin[0] + 50, f.origin[1] + 50, f.origin[0] + 110, f.origin[1] + 130);
+            try (ScrollMotionLedger ledger = new ScrollMotionLedger(8, 4, 16)) {
+                ScrollMotionLedger.Scope scope = new ScrollMotionLedger.Scope(epoch, 42, 7, ProtectionScope.normal(f.taps.scope())); ledger.reset(scope);
+                for (int i = 0; i < 2; i++) {
+                    long at = 1000 + i * 100;
+                    presentation.observe(ledger.observe(new ScrollMotionLedger.Sample(scope, i + 1, 10, 1, at, at, at + 1, at + 2,
+                            ScrollMotionLedger.Coordinate.absolute(0), ScrollMotionLedger.Coordinate.absolute(200 - i * 40), owner), at + 3));
+                }
+                f.presentation.set(presentation); f.presentationTime.set(2000);
+                main(() -> f.surface.configure(appearance(CensorAppearance.Type.BOX, false, .25f), SnapshotPaintPolicy.from(DetectionPreset.LOW), 0, true));
+                f.redraw(); f.quiet();
+                SurfaceSubmission.Paint paint = f.lastSubmission().paint; assertNotNull(paint); assertTrue(paint.geometryComplete);
+                SurfaceSubmission.Member member = paint.members.stream().filter(value -> value.ownerClip != null).findFirst().orElseThrow(AssertionError::new);
+                assertEquals(f.origin[0] + 50, member.destination.left, .001); assertEquals(f.origin[1] + 90, member.destination.top, .001);
+                assertEquals(f.origin[0] + 110, member.destination.right, .001); assertEquals(f.origin[1] + 150, member.destination.bottom, .001);
+                assertEquals(f.origin[1] + 130, member.clippedBounds.bottom, .001);
+                assertEquals(f.origin[0], member.canvasClip.left, .001); assertEquals(f.origin[1], member.canvasClip.top, .001);
+                Bitmap bitmap = f.buffer();
+                try { export(bitmap, "submission-padded-clipped"); assertEquals(Color.GREEN, bitmap.getPixel(70, 110)); assertEquals(Color.TRANSPARENT, bitmap.getPixel(70, 140)); }
+                finally { bitmap.recycle(); }
+                f.composed("submission-padded-clipped-composed", 70, 110, Color.GREEN); f.assertSubmissionInventory();
+            }
+        }
+    }
+
+    @Test public void workerSubmissionRowsSurviveCoalescedUiCompletions() throws Exception {
+        HeldDelivery delivery = new HeldDelivery(); BlockingEndpoint endpoint = new BlockingEndpoint(false);
+        try (Fixture f = new Fixture((policy, revision, obsolete) -> Collections.emptyList(), endpoint, delivery, null, true)) {
+            f.submissionLabel = "coalesced-completions";
+            try {
+                f.image(CensorAppearance.Type.BOX, false); int admitted = f.posts.size(), before = f.submissions.size();
+                long drops = f.surface.droppedSuccessfulCompletionCount();
+                delivery.hold.set(true); endpoint.block.set(true);
+                main(f.surface::requestObservedFrame); assertTrue(endpoint.entered.await(5, TimeUnit.SECONDS));
+                main(() -> { for (int i = 0; i < 100; i++) f.surface.requestObservedFrame(); }); endpoint.release.countDown();
+                await(() -> f.submissions.size() >= before + 2 && f.surface.executingRenderCount() == 0 && delivery.size() == 1);
+                assertEquals(admitted, f.posts.size()); assertEquals(before + 2, f.submissions.size());
+                assertEquals(drops + 1, f.surface.droppedSuccessfulCompletionCount());
+                Runnable notice = delivery.only(); delivery.hold.set(false); main(notice);
+                await(() -> f.posts.size() == admitted + 1); f.quiet();
+                f.composed("submission-coalesced-composed", 70, 70, Color.GREEN); f.assertSubmissionInventory();
+            } finally { endpoint.release.countDown(); delivery.hold.set(false); }
+        }
+    }
+
+    @Test public void nonemptySubmissionRemainsNonemptyAfterItsAcknowledgementIsRejected() throws Exception {
+        HeldDelivery delivery = new HeldDelivery();
+        try (Fixture f = new Fixture((policy, revision, obsolete) -> Collections.emptyList(), null, delivery, null, true)) {
+            f.submissionLabel = "rejected-ack-nonempty";
+            try {
+                f.image(CensorAppearance.Type.BOX, false); int before = f.submissions.size();
+                ReplacementScrollPresentation presentation = new ReplacementScrollPresentation(); presentation.reset(42, 7);
+                f.presentation.set(presentation); f.redraw(); f.quiet(); before = f.submissions.size(); final int baseline = before;
+                delivery.hold.set(true);
+                f.workerPostHook.set(() -> presentation.captured(f.h.engine.currentEpoch(), 42, 1001, 0, 0));
+                main(f.surface::requestObservedFrame);
+                await(() -> f.submissions.size() > baseline && f.surface.executingRenderCount() == 0 && delivery.size() == 1);
+                SurfaceSubmission value = f.lastSubmission(); assertEquals(SurfaceSubmission.Mode.MEMBERS, value.paint.mode);
+                assertEquals(2, value.paint.members.size());
+                Bitmap bitmap = f.buffer();
+                try { export(bitmap, "submission-nonempty-rejected-ack"); assertEquals(Color.GREEN, bitmap.getPixel(70, 70)); }
+                finally { bitmap.recycle(); }
+                Runnable notice = delivery.only(); delivery.hold.set(false); main(notice);
+                await(() -> f.posts.stream().anyMatch(post -> post.postSerial == value.postSerial)); f.quiet();
+                assertTrue(f.posts.stream().anyMatch(post -> post.postSerial == value.postSerial && post.acceptedPaint == null));
+                assertEquals(SurfaceSubmission.Mode.MEMBERS, value.paint.mode); f.assertSubmissionInventory();
+            } finally { delivery.hold.set(false); }
+        }
+    }
+
+    @Test public void submissionObserverFailureDoesNotChangeRecordedPixels() throws Exception {
+        try (Fixture f = new Fixture(true)) {
+            f.submissionLabel = "observer-error-control"; f.image(CensorAppearance.Type.BOX, false);
+            f.submissionHook.set(() -> { throw new IllegalStateException("Controlled metadata callback failure"); });
+            f.redraw(); f.quiet(); assertEquals(1, f.surface.submissionObserverFailures()); assertFalse(f.surface.endpointFailed());
+            f.composed("submission-observer-error-composed", 70, 70, Color.GREEN);
+            assertEquals(f.surface.postAttempts(), f.submissionCallbacks.get()); assertEquals(0, f.submissionOverflow.get());
         }
     }
 
@@ -872,10 +970,42 @@ public class SnapshotCensorSurfaceAndroidTest {
             assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream));
         }
     }
+    private static Object regionJson(SceneEngine.Region region) throws Exception {
+        return region == null ? JSONObject.NULL : new JSONArray().put(region.left).put(region.top).put(region.right).put(region.bottom);
+    }
+    private static JSONObject sourceJson(long epoch, long geometry, long sequence, long request, SceneEngine.SourceKind kind) throws Exception {
+        return new JSONObject().put("epoch", epoch).put("geometry", geometry).put("sequence", sequence).put("request", request).put("kind", kind.name());
+    }
+    private static JSONObject submissionJson(SurfaceSubmission value) throws Exception {
+        Object paintJson = JSONObject.NULL;
+        if (value.paint != null) {
+            SurfaceSubmission.Paint paint = value.paint; JSONArray members = new JSONArray();
+            for (SurfaceSubmission.Member member : paint.members) members.put(new JSONObject().put("identity", member.identity)
+                    .put("geometrySource", sourceJson(member.geometryEpoch, member.geometry, member.geometrySequence, member.geometryRequest, member.geometryKind))
+                    .put("evidenceSource", sourceJson(member.evidenceEpoch, member.evidenceGeometry, member.evidenceSequence, member.evidenceRequest, member.evidenceKind))
+                    .put("destination", regionJson(member.destination)).put("canvasClip", regionJson(member.canvasClip))
+                    .put("ownerClip", regionJson(member.ownerClip)).put("clippedBounds", regionJson(member.clippedBounds)));
+            paintJson = new JSONObject().put("mode", paint.mode.name()).put("epoch", paint.epoch).put("geometry", paint.geometry)
+                    .put("sceneRevision", paint.sceneRevision).put("presentationRevision", paint.presentationRevision).put("sampledUptimeMillis", paint.sampledAtMillis)
+                    .put("rawMembers", paint.rawMembers).put("geometryComplete", paint.geometryComplete).put("members", members);
+        }
+        return new JSONObject().put("attempt", value.attempt).put("postSerial", value.postSerial).put("generation", value.endpointGeneration)
+                .put("postEndedUptimeMillis", value.postEndedAtMillis).put("renderThreadId", value.renderThreadId)
+                .put("queuedElapsedNanos", value.queuedNanos).put("lockElapsedNanos", value.lockNanos).put("recordingElapsedNanos", value.recordingNanos).put("postElapsedNanos", value.postNanos)
+                .put("surface", new JSONArray().put(value.surfaceX).put(value.surfaceY).put(value.surfaceWidth).put(value.surfaceHeight))
+                .put("holderReturned", value.holderReturned).put("canvasClipValidated", value.canvasClipValidated).put("recordingFinished", value.recordingFinished)
+                .put("cleanupSucceeded", value.cleanupSucceeded).put("compositorUptimeMillis", value.compositorAtMillis).put("paint", paintJson);
+    }
     private static final class Fixture implements AutoCloseable {
         final CensorTapTracker taps = new CensorTapTracker(); final int[] origin = new int[2];
         final List<SnapshotCensorSurface.Post> posts = Collections.synchronizedList(new ArrayList<>());
         final AtomicInteger failures = new AtomicInteger(); final ActivityScenario<SnapshotSurfaceFixtureActivity> scenario;
+        final List<SurfaceSubmission> submissions = Collections.synchronizedList(new ArrayList<>());
+        final AtomicInteger submissionCallbacks = new AtomicInteger(), submissionOverflow = new AtomicInteger();
+        final AtomicReference<Runnable> submissionHook = new AtomicReference<>();
+        final AtomicBoolean allSubmissionLeasesReleased = new AtomicBoolean(true);
+        final boolean collectSubmissions;
+        String submissionLabel = "unlabelled";
         final AtomicReference<Runnable> recordHook = new AtomicReference<>(), postHook = new AtomicReference<>();
         final AtomicBoolean failNextOwnerRead = new AtomicBoolean();
         final AtomicReference<Runnable> workerReadHook = new AtomicReference<>(), workerPostHook = new AtomicReference<>();
@@ -884,6 +1014,7 @@ public class SnapshotCensorSurfaceAndroidTest {
         final AtomicLong presentationTime = new AtomicLong(-1);
         SnapshotSurfaceFixtureActivity activity; SnapshotCensorSurface surface; Harness h;
         Fixture() throws Exception { this((policy, revision, obsolete) -> Collections.emptyList(), null); }
+        Fixture(boolean collect) throws Exception { this((policy, revision, obsolete) -> Collections.emptyList(), null, null, null, collect); }
         Fixture(SnapshotCensorView.ArtworkLoader loader, SnapshotCensorSurface.Endpoint endpoint) throws Exception {
             this(loader, endpoint, null);
         }
@@ -892,6 +1023,11 @@ public class SnapshotCensorSurfaceAndroidTest {
         }
         Fixture(SnapshotCensorView.ArtworkLoader loader, SnapshotCensorSurface.Endpoint endpoint,
                 LatestResourceCoordinator.Delivery delivery, ExecutorService renderExecutor) throws Exception {
+            this(loader, endpoint, delivery, renderExecutor, false);
+        }
+        Fixture(SnapshotCensorView.ArtworkLoader loader, SnapshotCensorSurface.Endpoint endpoint,
+                LatestResourceCoordinator.Delivery delivery, ExecutorService renderExecutor, boolean collect) throws Exception {
+            collectSubmissions = collect;
             InstrumentationRegistry.getInstrumentation().getUiAutomation();
             scenario = ActivityScenario.launch(SnapshotSurfaceFixtureActivity.class);
             scenario.onActivity(value -> {
@@ -927,6 +1063,12 @@ public class SnapshotCensorSurfaceAndroidTest {
                     @Override public CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long revision, long generation, List<Long> ids, boolean reverse) { return h.engine.acknowledgePaint(scope, revision, generation, ids, reverse); }
                 };
                 SnapshotCensorSurface.Observer observer = new SnapshotCensorSurface.Observer() {
+                    @Override public boolean collectSubmissions() { return collectSubmissions; }
+                    @Override public void submitted(SurfaceSubmission value) {
+                        if (surface.surfaceUseCount() != 0 || surface.renderer().activeDrawingCount() != 0) allSubmissionLeasesReleased.set(false);
+                        if (submissionCallbacks.incrementAndGet() <= 4096) submissions.add(value); else submissionOverflow.incrementAndGet();
+                        Runnable hook = submissionHook.getAndSet(null); if (hook != null) hook.run();
+                    }
                     @Override public void recorded(CensorEngine.PaintReceipt receipt) { Runnable hook = recordHook.getAndSet(null); if (hook != null) hook.run(); }
                     @Override public void posted(SnapshotCensorSurface.Post receipt) { posts.add(receipt); Runnable hook = postHook.get(); if (hook != null) hook.run(); }
                     @Override public void endpointFailure() { failures.incrementAndGet(); }
@@ -1027,12 +1169,28 @@ public class SnapshotCensorSurfaceAndroidTest {
             return state.toString();
         }
         void redraw() throws Exception { int before = posts.size(); main(surface::requestFrame); await(() -> posts.size() > before); InstrumentationRegistry.getInstrumentation().waitForIdleSync(); }
+        void quiet() throws Exception { await(() -> {
+            AtomicBoolean idle = new AtomicBoolean(); main(() -> idle.set(surface.executingRenderCount() == 0 && surface.pendingPoseCount() == 0
+                    && surface.completionNoticeCount() == 0 && !surface.demandPending())); return idle.get();
+        }); }
         void prepared() throws Exception { redraw(); await(renderer()::resourcesMatchCurrent); redraw(); }
         SnapshotCensorSurface.Post lastAccepted() {
             synchronized (posts) { for (int i = posts.size() - 1; i >= 0; i--) if (posts.get(i).acceptedPaint != null) return posts.get(i); }
             throw new AssertionError("No accepted actual post");
         }
         int acceptedCount() { int count = 0; synchronized (posts) { for (SnapshotCensorSurface.Post p : posts) if (p.acceptedPaint != null) count++; } return count; }
+        SurfaceSubmission lastSubmission() { synchronized (submissions) { assertFalse(submissions.isEmpty()); return submissions.get(submissions.size() - 1); } }
+        void assertSubmissionInventory() {
+            assertTrue(collectSubmissions); assertEquals(surface.postAttempts(), submissionCallbacks.get());
+            assertEquals(submissionCallbacks.get(), submissions.size()); assertEquals(0, submissionOverflow.get());
+            assertEquals(0, surface.submissionObserverFailures()); assertTrue(allSubmissionLeasesReleased.get());
+            long returns = 0, attempt = 0;
+            synchronized (submissions) { for (SurfaceSubmission value : submissions) {
+                assertEquals(++attempt, value.attempt); assertNotEquals(Looper.getMainLooper().getThread().getId(), value.renderThreadId);
+                if (value.holderReturned) returns++;
+            } }
+            assertEquals(surface.postReturns(), returns);
+        }
         boolean hit(int x, int y) { int[] xy = new int[2]; main(() -> surface.getLocationOnScreen(xy)); return taps.matchesPoint(xy[0] + x, xy[1] + y, h.width, h.height, SystemClock.uptimeMillis()); }
         Bitmap buffer() throws Exception {
             AtomicReference<Bitmap> value = new AtomicReference<>(); AtomicInteger status = new AtomicInteger(-1); CountDownLatch copied = new CountDownLatch(1);
@@ -1068,12 +1226,21 @@ public class SnapshotCensorSurfaceAndroidTest {
                         .put("renderThreadId", p.renderThreadId).put("postSerial", p.postSerial).put("mainThread", p.mainThread)
                         .put("accepted", p.acceptedPaint != null).put("compositorUptimeMillis", p.compositorAtMillis)); }
                 File file = new File(activity.getExternalFilesDir(null), "censor-tap-fixtures-20261011/native-surface-metrics-" + System.nanoTime() + ".json");
-                try (FileOutputStream out = new FileOutputStream(file)) { out.write(new JSONObject().put("schema", 2)
+                JSONObject metrics = new JSONObject().put("schema", collectSubmissions ? 3 : 2)
                         .put("mainThread", false).put("actualAccessibility", false).put("pixelAcceptance", false)
                         .put("lockAttempts", surface.lockCount()).put("successfulPosts", surface.postCount())
                         .put("postAttempts", surface.postAttempts()).put("postReturns", surface.postReturns())
                         .put("droppedSuccessfulCompletions", surface.droppedSuccessfulCompletionCount())
-                        .put("endpointFailures", failures.get()).put("posts", rows).toString().getBytes(StandardCharsets.UTF_8)); }
+                        .put("endpointFailures", failures.get()).put("posts", rows);
+                if (collectSubmissions) {
+                    JSONArray attempts = new JSONArray(); synchronized (submissions) { for (SurfaceSubmission value : submissions) attempts.put(submissionJson(value)); }
+                    metrics.put("submissionCallbacks", submissionCallbacks.get()).put("submissionOverflow", submissionOverflow.get())
+                            .put("submissionObserverFailures", surface.submissionObserverFailures()).put("allSubmissionLeasesReleased", allSubmissionLeasesReleased.get())
+                            .put("submissionObservationNanos", surface.submissionObservationNanos()).put("maximumSubmissionObservationNanos", surface.maximumSubmissionObservationNanos())
+                            .put("submissionLabel", submissionLabel).put("controlledPresentationTimeMillis", presentationTime.get())
+                            .put("submissions", attempts);
+                }
+                try (FileOutputStream out = new FileOutputStream(file)) { out.write(metrics.toString().getBytes(StandardCharsets.UTF_8)); }
             }
             scenario.close();
         }

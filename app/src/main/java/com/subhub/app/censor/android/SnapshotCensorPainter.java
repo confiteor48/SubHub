@@ -44,9 +44,11 @@ public final class SnapshotCensorPainter implements AutoCloseable {
         public final long identity;
         public final ProtectionScope protectionScope;
         public final List<SceneEngine.Region> tapInteriors;
-        private PaintedMember(SceneEngine.Mask mask, List<SceneEngine.Region> interiors) {
+        public final SurfaceSubmission.Member recording;
+        private PaintedMember(SceneEngine.Mask mask, List<SceneEngine.Region> interiors, SurfaceSubmission.Member recording) {
             identity = mask.identity; protectionScope = mask.evidenceSource.protectionScope;
             tapInteriors = Collections.unmodifiableList(interiors);
+            this.recording = recording;
         }
     }
     public static final class Result {
@@ -97,6 +99,11 @@ public final class SnapshotCensorPainter implements AutoCloseable {
     public Result draw(Canvas canvas, CensorEngine<PixelFrame>.RenderView view, PreparedCensorPaint prepared,
             CensorAppearance appearance, long generation, long artworkTimeMillis, boolean rectangularClip,
             Presentation presentation) {
+        return draw(canvas, view, prepared, appearance, generation, artworkTimeMillis, rectangularClip, presentation, false);
+    }
+    Result draw(Canvas canvas, CensorEngine<PixelFrame>.RenderView view, PreparedCensorPaint prepared,
+            CensorAppearance appearance, long generation, long artworkTimeMillis, boolean rectangularClip,
+            Presentation presentation, boolean recordGeometry) {
         if (closed) throw new IllegalStateException("closed painter");
         boolean valid = prepared != null && prepared.appearance == appearance && prepared.compatible(view, generation);
         if (valid && canvas.isHardwareAccelerated()) prepared.hardwareRecorded();
@@ -141,7 +148,8 @@ public final class SnapshotCensorPainter implements AutoCloseable {
                 if (appearance.isShowBorder()) border(canvas, destination, appearance, time);
             } finally { canvas.restoreToCount(saved); }
             result.add(new PaintedMember(mask, rectangularClip && ownerClips.get(index) == null
-                    ? interiors(destination, clip) : Collections.emptyList()));
+                    ? interiors(destination, clip) : Collections.emptyList(), recordGeometry && index < SurfaceSubmission.MAXIMUM_MEMBERS
+                    ? recording(mask, destination, clip, ownerClips.get(index)) : null));
         }
         // Final global layer: subsequent overlapping artwork cannot bury a previous member label.
         if (appearance.isShowText()) {
@@ -167,6 +175,14 @@ public final class SnapshotCensorPainter implements AutoCloseable {
             }
         }
         return new Result(result, false, rectangularClip);
+    }
+
+    private static SurfaceSubmission.Member recording(SceneEngine.Mask mask, RectF destination, Rect canvasClip, RectF ownerClip) {
+        try {
+            return new SurfaceSubmission.Member(mask.identity, mask.geometrySource, mask.evidenceSource,
+                    region(destination), new SceneEngine.Region(canvasClip.left, canvasClip.top, canvasClip.right, canvasClip.bottom),
+                    ownerClip == null ? null : region(ownerClip));
+        } catch (RuntimeException | Error unavailable) { return null; } // Missing metadata stays explicitly incomplete.
     }
 
     /** Explicit source-free cold fallback. Its caller supplies ACTIVE scope and real View bounds. */

@@ -99,6 +99,7 @@ public final class SnapshotRenderSession implements AutoCloseable {
     }
 
     private final Owner owner;
+    private final boolean recordGeometry;
     private final ArtworkLoader artwork;
     private final float density;
     private final ExecutorService preparation = Executors.newSingleThreadExecutor(action -> new Thread(() -> {
@@ -120,7 +121,12 @@ public final class SnapshotRenderSession implements AutoCloseable {
 
     public SnapshotRenderSession(Owner owner, ArtworkLoader artwork, float density,
             LatestResourceCoordinator.Delivery delivery, Runnable changed) {
+        this(owner, artwork, density, delivery, changed, false);
+    }
+    SnapshotRenderSession(Owner owner, ArtworkLoader artwork, float density,
+            LatestResourceCoordinator.Delivery delivery, Runnable changed, boolean recordGeometry) {
         this.owner = Objects.requireNonNull(owner); this.artwork = Objects.requireNonNull(artwork);
+        this.recordGeometry = recordGeometry;
         if (!Float.isFinite(density) || density <= 0) throw new IllegalArgumentException("paint density");
         this.density = density; Objects.requireNonNull(changed);
         resources = new LatestResourceCoordinator<>(preparation, delivery, new LatestResourceCoordinator.Observer() {
@@ -172,7 +178,7 @@ public final class SnapshotRenderSession implements AutoCloseable {
                 try {
                     canvas.translate(-x, -y); canvas.clipRect(0, 0, view.snapshot.destination.width, view.snapshot.destination.height);
                     result = painter.draw(canvas, view, paint, config.appearance, config.generation, time,
-                            rectangular, live && !config.appearance.isReverseMode() ? owner::presentation : null);
+                            rectangular, live && !config.appearance.isReverseMode() ? owner::presentation : null, recordGeometry);
                 } finally { canvas.restoreToCount(saved); }
             } else if (view == null && config.appearance.isReverseMode()) {
                 painter.drawColdReverse(canvas, new RectF(visible), config.appearance, time);
@@ -281,6 +287,7 @@ public final class SnapshotRenderSession implements AutoCloseable {
         onDrawingThread(); if (painter != null) { painter.close(); painter = null; }
     }
     public boolean managedResourcesDrained() { return resources.isDrained() && activeDrawings.get() == 0 && !drawCleanupFailed.get(); }
+    int activeDrawingCount() { return activeDrawings.get(); }
     public boolean preparationTerminated() { return preparation.isTerminated(); }
     public int preparationCount() { return preparations.get(); }
     public int preparedOutputCount() { return resources.outputCount(); }
