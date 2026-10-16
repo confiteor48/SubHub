@@ -15,6 +15,7 @@ public final class BoundCensorFixtureService extends AccessibilityService {
     FixtureServiceConnection.Lease<BoundCensorFixtureService> connection;
     public int boundPid;
     public AccessibilityCensorController controller;
+    public final java.util.concurrent.atomic.AtomicInteger scrollCallbacks = new java.util.concurrent.atomic.AtomicInteger();
     @Override protected void onServiceConnected() {
         // Framework lifecycle callbacks identify this object, not a protocol generation.
         if (connection != null) throw new IllegalStateException("Fixture service instance reconnection is unsupported");
@@ -23,6 +24,10 @@ public final class BoundCensorFixtureService extends AccessibilityService {
         Log.i("BoundCensorFixture", "BOUND pid=" + Process.myPid() + " sdk=" + Build.VERSION.SDK_INT);
     }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (Build.VERSION.SDK_INT >= 30 && controller != null
+                && event.getEventType() == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            scrollCallbacks.incrementAndGet(); controller.scrolled(event); return;
+        }
         if (Build.VERSION.SDK_INT >= 30 && controller != null
                 && event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             controller.contentChanged(event.getWindowId());

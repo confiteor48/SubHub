@@ -31,6 +31,7 @@ import com.subhub.app.censor.engine.NativeTextResult;
 import com.subhub.app.censor.engine.NativeReadCost;
 import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.SceneEngine;
+import com.subhub.app.censor.engine.ScrollMotionLedger;
 import com.subhub.app.detection.BBox;
 import com.subhub.app.detection.Detection;
 import com.subhub.app.detection.DetectionEngine;
@@ -483,6 +484,213 @@ public final class BoundCensorControllerAndroidTest {
             assertTrue(h.posts.stream().anyMatch(p -> p.acceptedPaint != null && !p.mainThread));
             assertEquals(-1, h.posts.get(h.posts.size() - 1).compositorAtMillis);
             assertSpacing(h.traces); assertBinding();
+        }
+    }
+
+    @Test public void actualScrollCaptureAndSurfaceCollectSameFrameWitnessAlignmentWithControlledColorModel() throws Exception {
+        try (ActivityScenario<BoundCensorFixtureActivity> activity = ActivityScenario.launch(BoundCensorFixtureActivity.class)) {
+            AtomicReference<ScrollWitnessFeed> feed = new AtomicReference<>();
+            AtomicReference<ScrollWitnessRun> run = new AtomicReference<>();
+            activity.onActivity(actual -> {
+                android.widget.ScrollView scroll = new android.widget.ScrollView(actual);
+                scroll.setId(android.R.id.list); scroll.setOverScrollMode(View.OVER_SCROLL_NEVER); scroll.setVerticalScrollBarEnabled(false);
+                ScrollWitnessFeed source = new ScrollWitnessFeed(actual); feed.set(source);
+                scroll.addView(source, new android.widget.ScrollView.LayoutParams(-1, source.contentHeight));
+                actual.setContentView(scroll); run.set(new ScrollWitnessRun(scroll));
+            });
+            prepareScrollWitness(activity, feed.get());
+            main(() -> {
+                run.get().view.scrollTo(0, 1000);
+                run.get().view.getViewTreeObserver().registerFrameCommitCallback(feed.get().commits::incrementAndGet);
+                run.get().view.invalidate();
+            });
+            await("New hardware frame at initial scroll position", () -> feed.get().commits.get() >= 2);
+            Harness h = new Harness("bound-scroll-witness", false, () -> { }); JSONArray samples = new JSONArray();
+            Throwable primary = null;
+            try (Harness owned = h) {
+                h.markerPixels.set(true); h.start(h.window(), 10, config(2, true, .3f), null, false); h.awaitVisual(10);
+                try {
+                    await("Stationary positive source and composed mask baseline", () -> {
+                        try {
+                            JSONObject sample = witnessSample(feed.get(), "baseline", samples.length() + 1);
+                            samples.put(sample);
+                            return sample.getInt("fullWitnesses") >= 2 && sample.getInt("missingCenters") == 0;
+                        } catch (Exception failure) { throw new IllegalStateException(failure); }
+                    });
+                    main(run.get()::start);
+                    long deadline = SystemClock.uptimeMillis() + 10000;
+                    while (!run.get().completed && SystemClock.uptimeMillis() < deadline) {
+                        long started = SystemClock.uptimeMillis();
+                        samples.put(witnessSample(feed.get(), run.get().phase(started), samples.length() + 1));
+                        Thread.sleep(Math.max(1, 90 - (SystemClock.uptimeMillis() - started)));
+                    }
+                    assertTrue("The real-time source path completed, not a controlled presentation clock", run.get().completed);
+                    samples.put(witnessSample(feed.get(), "after", samples.length() + 1));
+                    assertTrue("Natural framework scroll callbacks", h.service.scrollCallbacks.get() > 8);
+                    assertTrue("Actual scoped provider receipts", h.scrollReceipts.stream().anyMatch(r -> r.sample != null && r.sample.owner > 0
+                            && (r.admission == ScrollMotionLedger.Admission.RECORDED || r.admission == ScrollMotionLedger.Admission.UNKNOWN)));
+                    assertTrue("Repeated real platform acquisitions", h.captureMetadata.size() >= 8);
+                    assertTrue("Actual worker Surface submissions", h.posts.size() >= 8);
+                    assertSpacing(h.traces); assertBinding();
+                } finally { main(run.get()::stop); }
+            } catch (Exception | Error failure) { primary = failure; throw failure; }
+            finally {
+                try { saveWitnessReport(h, run.get(), samples); }
+                catch (Exception | Error failure) { if (primary != null) primary.addSuppressed(failure); else throw failure; }
+            }
+        }
+    }
+
+    private void prepareScrollWitness(ActivityScenario<BoundCensorFixtureActivity> activity, ScrollWitnessFeed feed) throws Exception {
+        CountDownLatch committed = new CountDownLatch(1); AtomicBoolean registered = new AtomicBoolean();
+        AtomicReference<android.view.ViewTreeObserver.OnDrawListener> listener = new AtomicReference<>();
+        activity.onActivity(value -> {
+            View decor = value.getWindow().getDecorView();
+            android.view.ViewTreeObserver.OnDrawListener draw = () -> {
+                if (feed.isAttachedToWindow() && feed.isLaidOut() && feed.getWidth() > 0 && feed.getHeight() == feed.contentHeight
+                        && registered.compareAndSet(false, true)) {
+                    decor.getViewTreeObserver().registerFrameCommitCallback(() -> { feed.commits.incrementAndGet(); committed.countDown(); });
+                    decor.postInvalidateOnAnimation();
+                }
+            };
+            listener.set(draw); decor.getViewTreeObserver().addOnDrawListener(draw); decor.invalidate();
+        });
+        Throwable primary = null;
+        try { assertTrue("Actual attached fixture layout and a new hardware-frame commit", committed.await(8, TimeUnit.SECONDS)); }
+        catch (Exception | Error failure) { primary = failure; throw failure; }
+        finally {
+            try {
+                JSONObject observation = new JSONObject().put("schemaVersion", 1).put("kind", "scroll-witness-setup")
+                        .put("registered", registered.get()).put("commits", feed.commits.get()).put("offsetX", feed.offsetX)
+                        .put("physicalPixelClockKnown", false).put("outcome", primary == null ? "SUCCESS" : "FAILURE");
+                activity.onActivity(value -> {
+                    View decor = value.getWindow().getDecorView();
+                    try { observation.put("attached", feed.isAttachedToWindow()).put("laidOut", feed.isLaidOut()).put("shown", feed.isShown())
+                            .put("width", feed.getWidth()).put("height", feed.getHeight()).put("hardware", decor.isHardwareAccelerated())
+                            .put("windowFocus", decor.hasWindowFocus()).put("windowVisibility", decor.getWindowVisibility())
+                            .put("interactive", context.getSystemService(android.os.PowerManager.class).isInteractive())
+                            .put("keyguardLocked", context.getSystemService(android.app.KeyguardManager.class).isKeyguardLocked()); }
+                    catch (Exception failure) { throw new IllegalStateException(failure); }
+                    decor.getViewTreeObserver().removeOnDrawListener(listener.get());
+                });
+                if (primary != null) {
+                    Bitmap pixels = ui.takeScreenshot();
+                    if (pixels != null) try {
+                        String name = "native-mask-bound-scroll-setup-failed-" + System.nanoTime() + ".png";
+                        try (FileOutputStream stream = new FileOutputStream(new File(directory(), name))) { assertTrue(pixels.compress(Bitmap.CompressFormat.PNG, 100, stream)); }
+                        observation.put("failureImage", name);
+                    } finally { pixels.recycle(); }
+                }
+                try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-window-readiness-" + System.nanoTime() + ".json"))) {
+                    stream.write(observation.toString().getBytes(StandardCharsets.UTF_8));
+                }
+            } catch (Exception | Error failure) { if (primary != null) primary.addSuppressed(failure); else throw failure; }
+        }
+        assertTrue(feed.offsetX > 0 && feed.commits.get() > 0 && feed.getHeight() == feed.contentHeight);
+    }
+
+    /** Both twins are recorded in the SAME Canvas node; no host/source timestamp supplies truth. */
+    private static final class ScrollWitnessFeed extends View {
+        static final int MARKER_HEIGHT = 180;
+        final int contentHeight;
+        final android.graphics.Paint paint = new android.graphics.Paint(); final AtomicInteger commits = new AtomicInteger();
+        volatile int offsetX;
+        ScrollWitnessFeed(Context context) {
+            super(context); contentHeight = context.getResources().getDisplayMetrics().heightPixels * 5;
+            // ScrollView measures its content with UNSPECIFIED height; a plain View otherwise desires zero.
+            setMinimumHeight(contentHeight); setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        }
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            canvas.drawColor(BoundCensorFixtureActivity.UNDERLYING); offsetX = getWidth() / 3;
+            int left = getWidth() / 6, width = getWidth() / 7;
+            for (int top = 200; top + MARKER_HEIGHT < getHeight(); top += 480) {
+                paint.setColor(ScrollWitnessPixels.WITNESS); canvas.drawRect(left, top, left + width, top + MARKER_HEIGHT, paint);
+                paint.setColor(ScrollWitnessPixels.TARGET); canvas.drawRect(left + offsetX, top, left + offsetX + width, top + MARKER_HEIGHT, paint);
+            }
+        }
+    }
+    private static final class ScrollWitnessRun implements android.view.Choreographer.FrameCallback {
+        final android.widget.ScrollView view;
+        volatile long startedAt = -1; volatile boolean completed, stopped; volatile int frames;
+        ScrollWitnessRun(android.widget.ScrollView view) { this.view = view; }
+        void start() { startedAt = SystemClock.uptimeMillis(); android.view.Choreographer.getInstance().postFrameCallback(this); }
+        String phase(long now) {
+            long age = now - startedAt;
+            return age < 3000 ? "forward" : age < 4000 ? "pause" : age < 7000 ? "reverse" : "settle";
+        }
+        @Override public void doFrame(long frameTimeNanos) {
+            if (stopped) return;
+            long age = Math.max(0, SystemClock.uptimeMillis() - startedAt); frames++;
+            int y = age < 3000 ? 1000 + (int) age * 2 : age < 4000 ? 7000
+                    : age < 7000 ? 7000 - (int) (age - 4000) * 2 : 1000;
+            view.scrollTo(0, y);
+            if (age >= 8000) completed = true;
+            else android.view.Choreographer.getInstance().postFrameCallback(this);
+        }
+        void stop() { stopped = true; android.view.Choreographer.getInstance().removeFrameCallback(this); }
+    }
+    private JSONObject witnessSample(ScrollWitnessFeed feed, String phase, int ordinal) throws Exception {
+        if (ordinal > 256) throw new IllegalStateException("Bounded witness sample inventory");
+        long started = SystemClock.uptimeMillis(); Bitmap pixels = ui.takeScreenshot(); long returned = SystemClock.uptimeMillis();
+        assertNotNull("Actual composed screenshot", pixels);
+        String name = "native-mask-bound-scroll-" + ordinal + "-" + System.nanoTime() + ".png";
+        try {
+            try (FileOutputStream out = new FileOutputStream(new File(directory(), name))) { assertTrue(pixels.compress(Bitmap.CompressFormat.PNG, 100, out)); }
+            int width = pixels.getWidth(), height = pixels.getHeight(); int[] colors = new int[width * height];
+            pixels.getPixels(colors, 0, width, 0, 0, width, height);
+            List<ScrollWitnessPixels.Box> witnesses = ScrollWitnessPixels.bands(colors, width, height, ScrollWitnessPixels.WITNESS);
+            List<ScrollWitnessPixels.Box> masks = ScrollWitnessPixels.bands(colors, width, height, ScrollWitnessPixels.COVER);
+            ScrollWitnessPixels.Sample value = ScrollWitnessPixels.measure(witnesses, masks, feed.offsetX, ScrollWitnessFeed.MARKER_HEIGHT);
+            return new JSONObject().put("ordinal", ordinal).put("phaseAtSampling", phase).put("imageFile", name)
+                    .put("acquisitionStartedMillis", started).put("acquisitionReturnedMillis", returned).put("width", width).put("height", height)
+                    .put("offsetX", feed.offsetX).put("markerHeight", ScrollWitnessFeed.MARKER_HEIGHT)
+                    .put("rawWitnessBandCount", witnesses.size()).put("witnessBands", witnessBoxes(witnesses))
+                    .put("rawMaskBandCount", masks.size()).put("maskBands", witnessBoxes(masks))
+                    .put("fullWitnesses", value.witnesses).put("paired", value.paired).put("missingCenters", value.missingCenters)
+                    .put("unpairedMaskBands", value.unpairedMaskBands).put("tallMaskBands", value.tallMaskBands)
+                    .put("absoluteCenterErrorSum", value.paired == 0 ? JSONObject.NULL : value.absoluteCenterErrorSum)
+                    .put("maximumCenterError", value.paired == 0 ? JSONObject.NULL : value.maximumCenterError);
+        } finally { pixels.recycle(); }
+    }
+    private static JSONArray witnessBoxes(List<ScrollWitnessPixels.Box> boxes) throws Exception {
+        JSONArray rows = new JSONArray();
+        for (ScrollWitnessPixels.Box box : boxes) rows.put(new JSONArray().put(box.left).put(box.top).put(box.right).put(box.bottom));
+        return rows;
+    }
+    private void saveWitnessReport(Harness h, ScrollWitnessRun run, JSONArray samples) throws Exception {
+        JSONArray receipts = new JSONArray(), captures = new JSONArray(new java.util.ArrayList<>(h.captureMetadata));
+        for (ScrollMotionLedger.Receipt receipt : new java.util.ArrayList<>(h.scrollReceipts)) {
+            ScrollMotionLedger.Sample sample = receipt.sample;
+            receipts.put(new JSONObject().put("admission", receipt.admission.name()).put("refusal", receipt.refusal.name())
+                    .put("admittedAtMillis", receipt.admittedAtMillis).put("generation", receipt.generation)
+                    .put("epoch", sample.scope.epoch).put("geometry", sample.scope.geometry).put("window", sample.scope.windowId)
+                    .put("owner", sample.owner).put("producer", sample.producer).put("delivery", sample.deliveryIdentity)
+                    .put("sourceAtMillis", sample.sourceAtMillis).put("receivedAtMillis", sample.receivedAtMillis)
+                    .put("readStartedAtMillis", sample.readStartedAtMillis).put("readFinishedAtMillis", sample.readFinishedAtMillis)
+                    .put("yAbsolute", sample.y.absoluteKnown ? sample.y.absolute : JSONObject.NULL)
+                    .put("yDelta", sample.y.deltaKnown ? sample.y.delta : JSONObject.NULL));
+        }
+        JSONArray traces = new JSONArray(), posts = new JSONArray();
+        for (CensorEngine.Trace trace : new java.util.ArrayList<>(h.traces)) traces.put(new JSONObject()
+                .put("stage", trace.stage.name()).put("epoch", trace.epoch).put("source", trace.source)
+                .put("lane", trace.lane == null ? JSONObject.NULL : trace.lane.name()).put("atMillis", trace.atMillis)
+                .put("queueMillis", trace.queueMillis).put("pixelAgeMillis", trace.pixelAgeMillis)
+                .put("work", trace.work == null ? JSONObject.NULL : new JSONObject().put("preprocessMillis", trace.work.preprocessMillis)
+                        .put("runtimeMillis", trace.work.runtimeMillis).put("postprocessMillis", trace.work.postprocessMillis)));
+        for (SnapshotCensorSurface.Post post : new java.util.ArrayList<>(h.posts)) posts.put(new JSONObject()
+                .put("serial", post.postSerial).put("recordedAtMillis", post.recordedAtMillis).put("returnedAtMillis", post.postReturnedAtMillis)
+                .put("admittedAtMillis", post.uiAdmittedAtMillis).put("accepted", post.acceptedPaint != null).put("mainThread", post.mainThread));
+        JSONObject report = new JSONObject().put("schemaVersion", 1).put("kind", "bound-scroll-witness")
+                .put("actualService", true).put("deterministicColorModel", true).put("alignmentAcceptance", false)
+                .put("physicalAcceptance", false).put("pixelClockKnown", false).put("semanticIdentityKnown", false)
+                .put("motionDurationMillis", 8000).put("startedAtMillis", run.startedAt).put("motionCompleted", run.completed)
+                .put("frameCallbacks", run.frames).put("frameworkScrollCallbacks", h.service.scrollCallbacks.get())
+                .put("managedDrain", h.controller.managedResourcesDrained()).put("rawSampleCount", samples.length()).put("samples", samples)
+                .put("rawScrollReceiptCount", receipts.length()).put("scrollReceipts", receipts)
+                .put("rawCaptureMetadataCount", captures.length()).put("captureMetadata", captures)
+                .put("rawTraceCount", traces.length()).put("traces", traces).put("rawPostCount", posts.length()).put("posts", posts);
+        try (FileOutputStream stream = new FileOutputStream(new File(directory(), "native-scroll-witness-" + System.nanoTime() + ".json"))) {
+            stream.write(report.toString().getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -1785,6 +1993,9 @@ public final class BoundCensorControllerAndroidTest {
         final List<CensorEngine.EvidenceReceipt> nativeEvidence = new CopyOnWriteArrayList<>();
         final List<SnapshotCensorSurface.Post> posts = new CopyOnWriteArrayList<>();
         final AtomicInteger models = new AtomicInteger();
+        final AtomicBoolean markerPixels = new AtomicBoolean();
+        final List<JSONObject> captureMetadata = new CopyOnWriteArrayList<>();
+        final List<ScrollMotionLedger.Receipt> scrollReceipts = new CopyOnWriteArrayList<>();
         final AtomicInteger prepared = new AtomicInteger();
         final List<Long> preparedRequests = new CopyOnWriteArrayList<>();
         final List<JSONObject> preparations = new CopyOnWriteArrayList<>();
@@ -1809,6 +2020,13 @@ public final class BoundCensorControllerAndroidTest {
                 AccessibilityCensorController.NativeBoundaryControl nativeBoundary) {
             this.label = label; assertBinding(); lease = boundLease; service = lease.service;
             AccessibilityCensorController.Observer observer = new AccessibilityCensorController.Observer() {
+                @Override public void sourcePrepared(CensorEngine.CaptureRequest request, PixelFrame frame) {
+                    try { captureMetadata.add(new JSONObject().put("request", request.identity).put("epoch", request.epoch)
+                            .put("geometry", request.geometry).put("reportedAtMillis", frame.reportedUptimeMillis)
+                            .put("callbackAtMillis", frame.callbackUptimeMillis).put("kind", frame.kind.name())); }
+                    catch (org.json.JSONException failure) { throw new IllegalStateException(failure); }
+                }
+                @Override public void scrollReceived(ScrollMotionLedger.Receipt receipt) { scrollReceipts.add(receipt); }
                 @Override public void trace(CensorEngine.Trace trace) {
                     traces.add(trace);
                     if (trace.stage == CensorEngine.Stage.CAPTURE_DISPATCHED && Looper.myLooper() == Looper.getMainLooper()) captureOnMain.set(true);
@@ -1868,6 +2086,17 @@ public final class BoundCensorControllerAndroidTest {
                         @Override public void configure(DetectorConfig value) { modelThreshold.set(value.getConfidenceThreshold()); }
                         @Override public VisualDetectorWorker.ModelOutput infer(Bitmap bitmap, int width, int height, int inputWidth,
                                 int inputHeight, BooleanSupplier cancelled, Consumer<DetectionEngine.RunCancellation> binding) {
+                            if (markerPixels.get()) {
+                                long began = System.nanoTime(); int bw = bitmap.getWidth(), bh = bitmap.getHeight(); int[] colors = new int[bw * bh];
+                                bitmap.getPixels(colors, 0, bw, 0, 0, bw, bh); List<Detection> detections = new java.util.ArrayList<>();
+                                for (ScrollWitnessPixels.Box box : ScrollWitnessPixels.bands(colors, bw, bh, ScrollWitnessPixels.TARGET)) {
+                                    int left = box.left * width / bw, top = box.top * height / bh;
+                                    int right = (int) Math.ceil(box.right * width / (double) bw), bottom = (int) Math.ceil(box.bottom * height / (double) bh);
+                                    detections.add(new Detection("FACE_FEMALE", "face", .9f, new BBox(left, top, right - left, bottom - top), false, true));
+                                }
+                                return new VisualDetectorWorker.ModelOutput(detections, true, cancelled.getAsBoolean(),
+                                        new CensorEngine.WorkTiming(0, (System.nanoTime() - began) / 1_000_000L, 0));
+                            }
                             Detection mask = new Detection("FACE_FEMALE", "face", .9f,
                                     new BBox(width / 3, height / 3, width / 3, height / 3), false, true);
                             return new VisualDetectorWorker.ModelOutput(Collections.singletonList(mask), true, cancelled.getAsBoolean(),
