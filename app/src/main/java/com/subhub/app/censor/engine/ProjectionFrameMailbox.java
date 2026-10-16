@@ -14,12 +14,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Never reuse a raw resource in another envelope, including after its disposal. Live aliases are
  * rejected without closing another lease's resource; detecting historical reuse would require an
  * unbounded tombstone inventory. Stop the exact mailbox before replacing its generation. The
- * reader must remain open until its serial producer has actually stopped AND isDrained(), including
- * disposal callbacks actually returning. An acquisition or producer-owned unoffered Frame is outside
- * this mailbox's inventory; isDrained() alone never grants permission to close an ImageReader.
+ * reader must remain open until its serial producer has actually stopped AND all managed raw reads
+ * and disposal calls have returned. Retirement signals that boundary, not successful cleanup; check
+ * latched failures separately. An acquisition or producer-owned unoffered Frame is outside this
+ * inventory. Neither retirement nor isDrained() alone grants permission to close an ImageReader.
  */
 public final class ProjectionFrameMailbox<R> implements AutoCloseable {
     public enum Offer { ACCEPTED, DUPLICATE, STALE, CLOSED, FOREIGN, FAILED, LIVE_ALIAS }
+    public interface RetirementObserver {
+        /** Closed and no managed read/disposal remains; NOT cleanup success or producer quiescence. */
+        void retired(State state);
+    }
 
     /** Exclusive producer-owned image until offered; close discards only an untransferred image. */
     public static final class Frame<R> implements AutoCloseable {
@@ -66,21 +71,27 @@ public final class ProjectionFrameMailbox<R> implements AutoCloseable {
     public static final class State {
         public final boolean closed;
         public final int pending, borrowed, disposing;
-        public final long accepted, replaced, rejected, resourceFailures, protocolFailures;
+        public final long accepted, replaced, rejected, resourceFailures, protocolFailures, retirementCallbackFailures;
         private State(boolean closed, int pending, int borrowed, int disposing, long accepted,
-                long replaced, long rejected, long resourceFailures, long protocolFailures) {
+                long replaced, long rejected, long resourceFailures, long protocolFailures, long retirementCallbackFailures) {
             this.closed = closed; this.pending = pending; this.borrowed = borrowed; this.disposing = disposing;
             this.accepted = accepted; this.replaced = replaced; this.rejected = rejected;
             this.resourceFailures = resourceFailures; this.protocolFailures = protocolFailures;
+            this.retirementCallbackFailures = retirementCallbackFailures;
         }
     }
 
     private final Map<R, Frame<R>> owned = new IdentityHashMap<>();
+    private final RetirementObserver retirement;
     private Frame<R> pending;
     private Read active;
     private long lastSequence, accepted, replaced, rejected, resourceFailures, protocolFailures;
     private int disposing;
-    private boolean closed;
+    private long retirementCallbackFailures;
+    private boolean closed, retirementReported, retirementCompleted;
+
+    public ProjectionFrameMailbox() { this(state -> { }); }
+    public ProjectionFrameMailbox(RetirementObserver retirement) { this.retirement = Objects.requireNonNull(retirement); }
 
     /** Creating metadata does not transfer the caller's image or establish a new capture. */
     public Frame<R> frame(R raw, long sequence, long reportedTimestampNanos,
@@ -132,17 +143,18 @@ public final class ProjectionFrameMailbox<R> implements AutoCloseable {
             if (discard != null) disposing++;
         }
         if (discard != null) dispose(discard);
+        else reportRetirement();
     }
 
-    /** Managed-resource drain only, NOT producer termination. Cleanup failure remains incomplete. */
+    /** Managed-resource and observer completion only, NOT producer termination or reader closure. */
     public synchronized boolean isDrained() {
         return closed && pending == null && active == null && disposing == 0 && owned.isEmpty()
-                && resourceFailures == 0 && protocolFailures == 0;
+                && retirementCompleted && resourceFailures == 0 && protocolFailures == 0 && retirementCallbackFailures == 0;
     }
 
     public synchronized State state() {
         return new State(closed, pending == null ? 0 : 1, active == null ? 0 : 1, disposing,
-                accepted, replaced, rejected, resourceFailures, protocolFailures);
+                accepted, replaced, rejected, resourceFailures, protocolFailures, retirementCallbackFailures);
     }
 
     private void dispose(Frame<R> frame) {
@@ -156,6 +168,21 @@ public final class ProjectionFrameMailbox<R> implements AutoCloseable {
                 if (failed) resourceFailures++;
                 owned.remove(frame.raw); disposing--;
             }
+        }
+        reportRetirement();
+    }
+
+    private void reportRetirement() {
+        State snapshot;
+        synchronized (this) {
+            if (!closed || retirementReported || pending != null || active != null || disposing != 0 || !owned.isEmpty()) return;
+            retirementReported = true; snapshot = state();
+        }
+        try { retirement.retired(snapshot); }
+        catch (RuntimeException | Error observerFailure) {
+            synchronized (this) { retirementCallbackFailures++; }
+        } finally {
+            synchronized (this) { retirementCompleted = true; }
         }
     }
 }

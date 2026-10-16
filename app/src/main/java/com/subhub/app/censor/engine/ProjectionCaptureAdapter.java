@@ -93,7 +93,7 @@ public final class ProjectionCaptureAdapter<R, P> implements CensorEngine.Captur
 
     private static boolean failed(ProjectionFrameMailbox<?> mailbox) {
         ProjectionFrameMailbox.State state = mailbox.state();
-        return state.resourceFailures != 0 || state.protocolFailures != 0;
+        return state.resourceFailures != 0 || state.protocolFailures != 0 || state.retirementCallbackFailures != 0;
     }
 
     private static boolean discard(CensorEngine.Captured<?> prepared) {
