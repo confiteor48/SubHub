@@ -1350,6 +1350,42 @@ public class NativeTextEngineTest {
         }
     }
 
+    @Test public void throwingReplacementTraceCannotLeakNewlyRetainedImageEffects() {
+        Harness h = new Harness(); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        Pixel pixel = h.deliverImage(0, 10, 1000, 2400); h.imageExecutor.runAll();
+        h.finishImage(0, 20, 500); // Actual image presentation is pending, deliberately not drained.
+        h.now = 30; NativeTextResult result = read(0, 25, 1000, 2400, 1000);
+        h.failClockAfter = 3; // Terminal, replacement trace, then snapshot before retaining pixel effects.
+        assertThrows(IllegalStateException.class, () -> h.nativeCompletions.get(0).admit(result));
+        assertEquals(0, h.failClockAfter); h.ui.runAll();
+        try (CensorEngine<Pixel>.RenderView view = h.engine.acquireRenderView()) {
+            assertNotNull(view); assertEquals(1, masks(view).size());
+            assertSame(pixel, view.sourcePixels(view.snapshot.destination.sequence));
+        }
+        h.close(); assertEquals(1, pixel.closes); assertEquals(1, h.drained);
+    }
+
+    @Test public void invalidationTraceFailureStillReleasesPixelsWithoutUndoingResourceQuarantine() {
+        Harness h = new Harness(); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
+        Pixel pixel = h.deliverImage(0, 10, 1000, 2400); h.imageExecutor.runAll();
+        h.finishImage(0, 20, 500); h.ui.runAll(); h.now = 30;
+        h.failClockAfter = 2; // Terminal then the invalidation trace, after cleanup was queued.
+        assertThrows(IllegalStateException.class, () -> h.nativeCompletions.get(0).resourceFailure());
+        assertEquals(0, h.failClockAfter); assertEquals(1, h.engine.resourceFailures());
+        h.ui.runAll(); assertNull(h.engine.acquireRenderView());
+        h.close(); assertEquals(1, pixel.closes); assertEquals(0, h.drained);
+    }
+
+    @Test public void failedParentRenewalClockCannotStrandTheNextActualProviderRead() {
+        Harness h = new Harness(); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll(); h.now = 100;
+        h.failClockAfter = 3; // Terminal, renewal wake, duplicate wake with an unattached timer.
+        assertThrows(IllegalStateException.class, () -> h.nativeCompletions.get(0).failure());
+        assertEquals(0, h.failClockAfter);
+        h.engine.requestNativeTextAt(220, false); h.fire(220); h.nativeExecutor.runAll();
+        assertEquals(2, h.nativeInputs.size());
+        h.close(); assertEquals(1, h.drained);
+    }
+
     @Test public void equalNativeAndImagePartitionNumbersCannotHideEitherKindOfEvidence() {
         for (boolean nativeFirst : new boolean[]{false, true}) {
             Harness h = new Harness(16, 1); h.engine.start(42); h.fire(0); h.nativeExecutor.runAll();
@@ -1603,7 +1639,7 @@ public class NativeTextEngineTest {
     }
     private static final class Harness {
         long now;
-        int drained, nativeCancellations;
+        int drained, nativeCancellations, failClockAfter;
         boolean failNativeBeforeRead, throwNativeBeforeRead, throwNativeCost;
         Runnable afterNativeAccepted = () -> { };
         NativeTextResult.ReadMode nativeBeginMode = NativeTextResult.ReadMode.FULL_DISCOVERY;
@@ -1636,7 +1672,11 @@ public class NativeTextEngineTest {
             if (ocr) workers.add(new CensorEngine.LaneWorker<>(SceneEngine.Lane.TEXT, textExecutor,
                     (input, completion) -> { textInputs.add(input); textCompletions.add(completion); }));
             engine = new CensorEngine<>(new CensorEngine.Policy(334, 0, 8, 2, false),
-                    new SceneEngine.Policy(sources, maximumTracks, 64, 256, 5000, 20000, .5), () -> now,
+                    new SceneEngine.Policy(sources, maximumTracks, 64, 256, 5000, 20000, .5), () -> {
+                        if (failClockAfter > 0 && --failClockAfter == 0)
+                            throw new IllegalStateException("Controlled terminal clock failure");
+                        return now;
+                    },
                     (action, delay) -> { Timed task = new Timed(now + delay, action); timers.add(task); return () -> task.cancelled = true; },
                     (request, callback) -> { assertTrue(request.tryDispatch()); captures.add(new Capture(request, callback)); },
                     workers, ui,

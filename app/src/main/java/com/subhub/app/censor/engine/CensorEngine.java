@@ -637,6 +637,8 @@ public final class CensorEngine<P> implements AutoCloseable {
     private long nativeBasisTreeGeneration = -1;
     private int displayWidth, displayHeight;
     private long nextSource, nextNativeRequest, nativeGeneration, nativeTreeGeneration;
+    /** Historical FULL credit may bridge only successful native parents of this exact segment. */
+    private Object nativeAccountingChain = new Object();
     private long nativeDemandAt = Long.MAX_VALUE, lastNativeTerminatedAt = -1;
     private long nativeAdmittedReadStartedAt = -1, nativeAdmittedEpoch = -1, nativeAdmittedGeneration = -1;
     private NativeJob nativeJob;
@@ -829,6 +831,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             if (change != NativeTextChange.DEMAND) {
                 nativeTreeGeneration++; observationAuthority = new Object();
                 if (change == NativeTextChange.HARD_CONTENT) {
+                    nativeAccountingChain = new Object();
                     nativeGeneration++; scene.fenceNativeEvidence(nativeText.partition); cancelNative(actions);
                 }
             }
@@ -845,6 +848,7 @@ public final class CensorEngine<P> implements AutoCloseable {
             nativeEnabled = enabled;
             if (enabled) demandNative(clock.getAsLong(), actions);
             else {
+                nativeAccountingChain = new Object();
                 nativeGeneration++; nativeDemandAt = Long.MAX_VALUE;
                 nativeTreeGeneration++;
                 cancelNativeTimer(actions); cancelNative(actions);
@@ -1193,6 +1197,7 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     private void invalidate(List<Runnable> actions) {
         epoch++;
+        nativeAccountingChain = new Object();
         scene.reset(epoch);
         if (closed) scrollMotion.close();
         else scrollMotion.reset(new ScrollMotionLedger.Scope(epoch, geometry, protectedWindowId, protectionScope));
@@ -1343,6 +1348,7 @@ public final class CensorEngine<P> implements AutoCloseable {
         NativeJob job = nativeJob;
         if (job == null || job.phase == JobPhase.DONE || job.cancellation) return;
         job.cancellation = true;
+        nativeAccountingChain = new Object();
         actions.add(job.input.lifetime::signalCancellation);
         if (job.phase == JobPhase.QUEUED) {
             job.phase = JobPhase.DONE; job.input.lifetime.finish(); nativeJob = null;
@@ -1377,41 +1383,72 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     private NativeTextAdmission completeNative(NativeJob job, NativeTextResult read, NativeTerminal terminal) {
         List<Runnable> actions = new ArrayList<>();
+        List<Runnable> failedCleanup = new ArrayList<>();
         NativeTextFrame admitted = null;
-        synchronized (this) {
-            if (job.phase == JobPhase.DONE) return null;
-            job.phase = JobPhase.DONE; job.input.lifetime.finish();
-            if (nativeJob == job) nativeJob = null;
-            long now = clock.getAsLong();
-            // Retry cooldown always starts at the actual terminal. Only actual Scene admission
-            // below can replace it with a current-owner successful start-spacing budget.
-            lastNativeTerminatedAt = now;
-            nativeAdmittedReadStartedAt = -1;
-            boolean renew = active && !closed && nativeEnabled && !job.cancellation
-                    && job.epoch == epoch && job.generation == nativeGeneration
-                    && (terminal == NativeTerminal.READ || terminal == NativeTerminal.FAILURE);
-            if (terminal == NativeTerminal.RESOURCE_FAILURE) {
-                if (resourceFailures++ == 0) invalidate(actions);
-                trace(Stage.RESOURCE_FAILED, null, SceneEngine.Lane.TEXT, 0, null, actions);
-            } else if (read != null && active && !closed && nativeEnabled && !job.cancellation
-                    && job.epoch == epoch && job.generation == nativeGeneration && job.readStartedAt >= 0
-                    && read.readStartedAtMillis == job.readStartedAt && read.readFinishedAtMillis <= now
-                    && nativeReadCurrent(job, read) && read.terminalInventoryValid()
-                    && nativeObservationInventoryConsistent(job, read)
-                    && now <= plus(read.readFinishedAtMillis, nativeText.maximumAgeMillis)) {
-                admitted = admitNativeFrame(job, read, 0, now, actions);
+        try {
+            synchronized (this) {
+                if (job.phase == JobPhase.DONE) return null;
+                job.phase = JobPhase.DONE; job.input.lifetime.finish();
+                if (nativeJob == job) nativeJob = null;
+                Presentation previousPending = pendingPresentation;
+                SceneEngine.Snapshot previousCoverage = coverageSnapshot;
+                Object previousPublication = coveragePublication;
+                boolean previousNotification = notificationQueued;
+                TimerTicket previousNativeTimer = nativeTimer, previousPresentationTimer = presentationTimer;
+                boolean terminalFinished = false;
+                try {
+                    long now = clock.getAsLong();
+                    // Retry cooldown always starts at the actual terminal. Only actual Scene admission
+                    // below can replace it with a current-owner successful start-spacing budget.
+                    lastNativeTerminatedAt = now;
+                    nativeAdmittedReadStartedAt = -1;
+                    boolean renew = active && !closed && nativeEnabled && !job.cancellation
+                            && job.epoch == epoch && job.generation == nativeGeneration
+                            && (terminal == NativeTerminal.READ || terminal == NativeTerminal.FAILURE);
+                    if (terminal == NativeTerminal.RESOURCE_FAILURE) {
+                        if (resourceFailures++ == 0) invalidate(actions);
+                        trace(Stage.RESOURCE_FAILED, null, SceneEngine.Lane.TEXT, 0, null, actions);
+                    } else if (read != null && active && !closed && nativeEnabled && !job.cancellation
+                            && job.epoch == epoch && job.generation == nativeGeneration && job.readStartedAt >= 0
+                            && read.readStartedAtMillis == job.readStartedAt && read.readFinishedAtMillis <= now
+                            && nativeReadCurrent(job, read) && read.terminalInventoryValid()
+                            && nativeObservationInventoryConsistent(job, read)
+                            && now <= plus(read.readFinishedAtMillis, nativeText.maximumAgeMillis)) {
+                        admitted = admitNativeFrame(job, read, 0, now, actions);
+                    }
+                    if (admitted != null) {
+                        nativeAdmittedReadStartedAt = job.readStartedAt;
+                        nativeAdmittedEpoch = job.epoch;
+                        nativeAdmittedGeneration = job.generation;
+                    }
+                    // This owns a producer clock, not evidence. Only an admitted real classified read
+                    // above can change witnesses, source age or expiry; all metadata queries stay passive.
+                    if (renew && job.epoch == epoch && job.generation == nativeGeneration
+                            && resourceFailures == 0 && unadoptedDisposals == 0) demandNative(now, actions);
+                    wakeNative(actions); checkDrained(actions);
+                    terminalFinished = true;
+                } finally {
+                    // Scene admission may have restored credit before later owner bookkeeping throws.
+                    if (admitted == null || !terminalFinished) nativeAccountingChain = new Object();
+                    if (!terminalFinished && epoch == job.epoch && resourceFailures == 0) {
+                        scene.discardRestoredNativeAccounting(nativeText.partition, job.input.identity);
+                        nativeAdmittedReadStartedAt = -1;
+                        // No action in this terminal has run. Restore its previous pending metadata;
+                        // never deliver success callbacks or strand an unattached notification/timer.
+                        if (pendingPresentation != previousPending && pendingPresentation != null)
+                            failedCleanup.add(pendingPresentation::release);
+                        pendingPresentation = previousPending;
+                        coverageSnapshot = previousCoverage; coveragePublication = previousPublication;
+                        notificationQueued = previousNotification;
+                        nativeTimer = previousNativeTimer; presentationTimer = previousPresentationTimer;
+                    } else if (!terminalFinished) {
+                        // An invalidation has already retired the old epoch. Its cancellation and
+                        // release actions must still run; old presentation state must not be restored.
+                        failedCleanup.addAll(actions);
+                    }
+                }
             }
-            if (admitted != null) {
-                nativeAdmittedReadStartedAt = job.readStartedAt;
-                nativeAdmittedEpoch = job.epoch;
-                nativeAdmittedGeneration = job.generation;
-            }
-            // This owns a producer clock, not evidence. Only an admitted real classified read
-            // above can change witnesses, source age or expiry; all metadata queries stay passive.
-            if (renew && job.epoch == epoch && job.generation == nativeGeneration
-                    && resourceFailures == 0 && unadoptedDisposals == 0) demandNative(now, actions);
-            wakeNative(actions); checkDrained(actions);
-        }
+        } finally { run(failedCleanup); }
         run(actions);
         synchronized (this) {
             // Notifications can synchronously stop/reconfigure the owner. Historical acceptance
@@ -1425,6 +1462,8 @@ public final class CensorEngine<P> implements AutoCloseable {
 
     /** One shared source/scene/presentation path for terminal reads and explicit positive observations. */
     private NativeTextFrame admitNativeFrame(NativeJob job, NativeTextResult read, int ordinal, long now, List<Runnable> actions) {
+        if (ordinal == 0 && read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY
+                && read.coverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY) nativeAccountingChain = new Object();
         if (displayWidth != 0 && (read.width != displayWidth || read.height != displayHeight)) {
             invalidate(actions); demandNative(now, actions); wake(now, actions); return null;
         }
@@ -1434,7 +1473,7 @@ public final class CensorEngine<P> implements AutoCloseable {
                 read.width, read.height, read.windowId, read.readStartedAtMillis, read.readFinishedAtMillis, now,
                 job.input.protectionScope);
         NativeTextFrame frame = new NativeTextFrame(source, nativeText.partition, read,
-                nativeText.maximumAgeMillis, job.input.identity, job.queuedAt, job.startedAt, ordinal);
+                nativeText.maximumAgeMillis, job.input.identity, job.queuedAt, job.startedAt, ordinal, nativeAccountingChain);
         Set<SceneEngine.Source> retainedNative = scene.nativeOriginsRetainedBy(frame);
         for (SceneEngine.Source retained : retainedNative) basisSources.add(retained.sequence);
         boolean capacity = (long) basisSources.size() + 1 <= maximumBasisSources
@@ -1804,10 +1843,13 @@ public final class CensorEngine<P> implements AutoCloseable {
     }
 
     private void queuePresentation(List<Runnable> actions) {
+        Presentation previous = pendingPresentation;
+        // Trace before acquiring replacement effects; a diagnostic failure cannot orphan retains.
+        if (previous != null)
+            trace(Stage.PRESENTATION_REPLACED, previous.snapshot.destination, null, 0, null, actions);
         Presentation value = buildPresentation(actions);
-        if (pendingPresentation != null) {
-            actions.add(pendingPresentation::release);
-            trace(Stage.PRESENTATION_REPLACED, pendingPresentation.snapshot.destination, null, 0, null, actions);
+        if (previous != null) {
+            actions.add(previous::release);
         }
         pendingPresentation = value;
         notifyPresentation(actions);

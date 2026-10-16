@@ -13,6 +13,8 @@ public final class NativeTextFrame {
     public final long maximumAgeMillis;
     /** Zero is a terminal result. Positive ordinals are nonterminal whole-node observations. */
     public final int observationOrdinal;
+    /** Runtime-minted accounting segment, never a public numeric provenance claim. */
+    private final Object accountingChain;
 
     public NativeTextFrame(SceneEngine.Source source, long partition, NativeTextResult read, long maximumAgeMillis) {
         this(source, partition, read, maximumAgeMillis, -1, -1, -1);
@@ -25,6 +27,12 @@ public final class NativeTextFrame {
 
     public NativeTextFrame(SceneEngine.Source source, long partition, NativeTextResult read, long maximumAgeMillis,
             long requestIdentity, long queuedAtMillis, long startedAtMillis, int observationOrdinal) {
+        this(source, partition, read, maximumAgeMillis, requestIdentity, queuedAtMillis, startedAtMillis,
+                observationOrdinal, null);
+    }
+
+    NativeTextFrame(SceneEngine.Source source, long partition, NativeTextResult read, long maximumAgeMillis,
+            long requestIdentity, long queuedAtMillis, long startedAtMillis, int observationOrdinal, Object accountingChain) {
         this.source = Objects.requireNonNull(source); this.read = Objects.requireNonNull(read);
         if (source.kind != SceneEngine.SourceKind.NATIVE_TEXT || maximumAgeMillis <= 0
                 || source.width != read.width || source.height != read.height || source.windowId != read.windowId
@@ -43,8 +51,22 @@ public final class NativeTextFrame {
         this.maximumAgeMillis = maximumAgeMillis;
         this.requestIdentity = requestIdentity; this.queuedAtMillis = queuedAtMillis; this.startedAtMillis = startedAtMillis;
         this.observationOrdinal = observationOrdinal;
+        this.accountingChain = accountingChain;
         validUntilMillis = source.readFinishedAtMillis >= Long.MAX_VALUE - maximumAgeMillis
                 ? Long.MAX_VALUE : source.readFinishedAtMillis + maximumAgeMillis;
+    }
+
+    /** Trusted-core capability access only; generic public frames cannot mint an engine's token. */
+    Object accountingChainFor(NativeTextResult.Candidate candidate) {
+        if (!read.candidates.contains(candidate)) throw new IllegalArgumentException("foreign native candidate");
+        return accountingChain != null && requestIdentity > 0 && read.scanGeneration >= 0 && read.hardGeneration >= 0
+                && candidate.nodeKey != null && candidate.exactGeometry && candidate.matchProvenanceKnown()
+                && candidate.validatedAtMillis >= read.readStartedAtMillis
+                && candidate.validatedAtMillis <= read.readFinishedAtMillis ? accountingChain : null;
+    }
+
+    boolean sharesAccountingChain(NativeTextFrame previous) {
+        return previous != null && accountingChain != null && accountingChain == previous.accountingChain;
     }
 
     /** Parent intervals may overlap only within this exact acquisition, never by clock retagging. */

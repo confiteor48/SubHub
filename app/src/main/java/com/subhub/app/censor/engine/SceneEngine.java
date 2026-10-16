@@ -422,11 +422,18 @@ public final class SceneEngine {
         public final SourceKind kind;
         public final long producerIdentity;
         public final long sourceSequence;
+        /** Only a typed owner-bound terminal FULL can qualify for a partial bridge. */
+        private final Object nativeAccountingChain;
 
         private EvidenceWitness(SourceKind kind, long producerIdentity, long sourceSequence) {
+            this(kind, producerIdentity, sourceSequence, null);
+        }
+
+        private EvidenceWitness(SourceKind kind, long producerIdentity, long sourceSequence, Object nativeAccountingChain) {
             this.kind = kind;
             this.producerIdentity = producerIdentity;
             this.sourceSequence = sourceSequence;
+            this.nativeAccountingChain = nativeAccountingChain;
         }
 
         @Override public boolean equals(Object other) {
@@ -572,6 +579,8 @@ public final class SceneEngine {
         NativeTextResult.Coverage nativeCoverage;
         int nativeLine;
         long nativeValidUntilMillis;
+        NativeCompleteHistory nativeCompleteHistory;
+        boolean nativeCompletedHistoryRestored;
 
         Track(long identity, Batch batch, Observation observation) {
             this(identity, batch, observation, imageWitness(batch.source));
@@ -608,6 +617,17 @@ public final class SceneEngine {
                 textGroup = batch.lane == Lane.TEXT ? observation.textGroup : 0;
                 negativeSources.clear();
             }
+        }
+    }
+
+    /** Compact historical facts, not old frame/root leases or a second validity clock. */
+    private static final class NativeCompleteHistory {
+        final Object chain;
+        final List<EvidenceWitness> witnesses;
+        NativeCompleteHistory(Object chain, List<EvidenceWitness> witnesses) {
+            if (witnesses.isEmpty() || witnesses.size() > CONSUMPTION_SOURCE_COUNT)
+                throw new IllegalArgumentException("native completed history bound");
+            this.chain = chain; this.witnesses = immutable(witnesses);
         }
     }
 
@@ -1164,12 +1184,27 @@ public final class SceneEngine {
                 }
                 Batch batch = new Batch(source, Lane.TEXT, Collections.singletonList(observation), Collections.emptyList());
                 EvidenceWitness witness = frame.observationOrdinal == 0 && frame.requestIdentity > 0
-                        ? new EvidenceWitness(SourceKind.NATIVE_TEXT, frame.requestIdentity, source.sequence) : null;
+                        ? new EvidenceWitness(SourceKind.NATIVE_TEXT, frame.requestIdentity, source.sequence,
+                            frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE
+                                && frame.read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY
+                                    ? frame.accountingChainFor(candidate) : null) : null;
+                NativeCompleteHistory completed = null;
                 if (match == null) match = new Track(++nextIdentity, batch, observation, witness);
                 else {
+                    // Preserve ordinary public FULL IDs, but never qualify credit across an expired gap.
+                    if (expired(match, source.receivedAtMillis)) demoteNativeAccounting(match);
+                    completed = nativeCompleteContinuation(match, frame, candidate);
                     if (!nativeHistoryContinues(match, frame)) match.sourceWitnesses.clear();
+                    if (completed != null && frame.observationOrdinal == 0
+                            && frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE) {
+                        match.sourceWitnesses.clear(); match.sourceWitnesses.addAll(completed.witnesses);
+                    }
                     match.update(batch, observation, witness);
                 }
+                match.nativeCompleteHistory = frame.observationOrdinal == 0
+                        && frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE ? null : completed;
+                match.nativeCompletedHistoryRestored = completed != null && frame.observationOrdinal == 0
+                        && frame.read.coverage == NativeTextResult.Coverage.COMPLETE_TREE;
                 match.nativeCandidate = candidate; match.nativeLine = line;
                 match.nativeFrame = frame;
                 match.nativeCoverage = frame.read.coverage;
@@ -1186,6 +1221,50 @@ public final class SceneEngine {
         pruneDistinctRelations();
         revision++;
         return true;
+    }
+
+    private NativeCompleteHistory nativeCompleteContinuation(Track track, NativeTextFrame next,
+            NativeTextResult.Candidate candidate) {
+        Object chain = next.accountingChainFor(candidate);
+        if (chain == null || expired(track, next.source.receivedAtMillis)
+                || !next.sharesAccountingChain(track.nativeFrame)
+                || next.read.hardGeneration != track.nativeFrame.read.hardGeneration
+                || candidate.validatedAtMillis < track.nativeCandidate.validatedAtMillis
+                || (track.nativeFrame.observationOrdinal > 0 && !next.followsObservation(track.nativeFrame))
+                || (next.observationOrdinal == 0 && next.read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY
+                    && next.read.coverage == NativeTextResult.Coverage.POSITIVE_NODES_ONLY)) return null;
+        if (track.nativeCompleteHistory != null)
+            return track.nativeCompleteHistory.chain == chain ? track.nativeCompleteHistory : null;
+        // Existing in-progress FULL accounting stays on its original path. Only admitted-address
+        // renewals need a separate COMPLETE-only snapshot alongside their partial bookkeeping.
+        if (next.read.readMode == NativeTextResult.ReadMode.FULL_DISCOVERY || track.nativeFrame.observationOrdinal != 0
+                || track.nativeCoverage != NativeTextResult.Coverage.COMPLETE_TREE
+                || track.nativeFrame.read.readMode != NativeTextResult.ReadMode.FULL_DISCOVERY) return null;
+        List<EvidenceWitness> completed = new ArrayList<>();
+        for (EvidenceWitness witness : track.sourceWitnesses)
+            if (witness.nativeAccountingChain == chain) completed.add(witness);
+        return completed.isEmpty() ? null : new NativeCompleteHistory(chain, completed);
+    }
+
+    private static void demoteNativeAccounting(Track track) {
+        List<EvidenceWitness> ordinary = new ArrayList<>();
+        for (EvidenceWitness witness : track.sourceWitnesses)
+            ordinary.add(new EvidenceWitness(witness.kind, witness.producerIdentity, witness.sourceSequence));
+        track.sourceWitnesses.clear(); track.sourceWitnesses.addAll(ordinary);
+        track.nativeCompleteHistory = null;
+    }
+
+    /** A failed owner terminal must not leave restored hidden facts on ordinary FULL history. */
+    synchronized void discardRestoredNativeAccounting(long partition, long parentIdentity) {
+        boolean changed = false;
+        for (Track track : tracks) {
+            if (track.partition == partition && track.nativeFrame != null
+                    && track.nativeFrame.requestIdentity == parentIdentity && track.nativeCompletedHistoryRestored) {
+                track.sourceWitnesses.clear(); track.nativeCompleteHistory = null;
+                track.nativeCompletedHistoryRestored = false; changed = true;
+            }
+        }
+        if (changed) revision++;
     }
 
     /** Preserve only completed history through one exact in-progress FULL, never partial credit. */
@@ -1231,8 +1310,9 @@ public final class SceneEngine {
     public synchronized void fenceNativeEvidence(long partition) {
         boolean changed = false;
         for (Track track : tracks) {
-            if (track.nativeCandidate != null && track.partition == partition && !track.sourceWitnesses.isEmpty()) {
-                track.sourceWitnesses.clear(); changed = true;
+            if (track.nativeCandidate != null && track.partition == partition
+                    && (!track.sourceWitnesses.isEmpty() || track.nativeCompleteHistory != null)) {
+                track.sourceWitnesses.clear(); track.nativeCompleteHistory = null; changed = true;
             }
         }
         if (changed) revision++;
