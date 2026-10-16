@@ -43,6 +43,8 @@ final class EventScrollTrajectory {
         correctionRate = samplesReceived < 2 ? ACQUISITION_CORRECTION_RATE : CORRECTION_RATE;
         boolean ordered = gap > 0;
         float interval = gap > 0 && gap <= 250 ? gap : fallbackInterval;
+        float deliveryAge = Math.max(0L, now - sourceTime);
+        boolean expired = !ordered || deliveryAge >= interval + 24;
         float nextSpeed = ordered ? delta / interval : 0;
         float observedSpeed = nextSpeed;
         boolean sameDirection = sampled && gap > 0 && gap <= 250 && delta != 0
@@ -54,7 +56,10 @@ final class EventScrollTrajectory {
                         * Math.max(0, 2 * Math.abs(nextSpeed) - Math.abs(lastObservedSpeed));
             }
         }
-        lastObservedSpeed = observedSpeed;
+        lastObservedSpeed = expired ? 0 : observedSpeed;
+        // Android reports movement which happened at sourceTime, not at delivery. A late
+        // callback must not restart an already-expired fling for another whole interval.
+        if (expired) nextSpeed = 0;
         // There is no pre-scroll observation to interpolate at acquisition. Keep the
         // first known position immediate. A multi-screen discontinuity is not a fling
         // that should be animated across unrelated content either.
@@ -89,7 +94,7 @@ final class EventScrollTrajectory {
         // makes masks reverse while the page continues forward. Hold that display-only
         // lead until the bounded forecast catches it, or until fresh input expires.
         // A real stop/reversal, reset, or discontinuity still corrects to authority.
-        holdingOvershoot = sameDirection && error * delta > 0;
+        holdingOvershoot = !expired && sameDirection && error * delta > 0;
         heldPosition = displayed;
         heldDirection = Math.signum(delta);
         braking = Math.abs(speed) < .001f;

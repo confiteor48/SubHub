@@ -167,6 +167,55 @@ public final class CensorOverlayViewTest {
         view.release();
     }
 
+    @Test public void expiredScrollMovesCensorWithoutStartingAnotherFling() {
+        Context context = ApplicationProvider.getApplicationContext();
+        CensorOverlayView view = new CensorOverlayView(context);
+        view.setAppearance(new CensorAppearance(
+                CensorAppearance.Type.BOX, 1, 0f, false, false,
+                CensorAppearance.BorderEffect.CLASSIC, false, Color.MAGENTA,
+                List.of(), false, 100, "rectangle", "SubHub", "Blocked"));
+        ObjectTracker tracker = new ObjectTracker(DetectorConfig.builder().build());
+        List<TrackedObject> tracks = tracker.update(List.of(new Detection(
+                "EXPOSED_TEST", "EXPOSED", 1f, new BBox(20, 20, 60, 60), true, true)));
+        view.setTracks(tracks, 100, 100, null);
+        view.measure(exactly(100), exactly(100));
+        view.layout(0, 0, 100, 100);
+        try {
+            long now = SystemClock.uptimeMillis();
+            view.offsetContent(0, -20, true, now - 1000L);
+            view.setRenderTimeForTest(now + 16L);
+            Bitmap first = draw(view, 100, 100);
+            view.setRenderTimeForTest(now + 96L);
+            Bitmap later = draw(view, 100, 100);
+            try {
+                assertEquals(Color.BLACK, first.getPixel(50, 30));
+                assertEquals(Color.TRANSPARENT, first.getPixel(50, 70));
+                assertTrue("An expired callback must not move the censor again", first.sameAs(later));
+            } catch (AssertionError failure) {
+                try {
+                    File directory = new File(context.getExternalFilesDir(null),
+                            "scroll-delivery-failure-" + System.nanoTime());
+                    if (!directory.mkdir()) throw new java.io.IOException("Cannot retain failed scroll pixels");
+                    for (int i = 0; i < 2; i++) {
+                        try (FileOutputStream output = new FileOutputStream(new File(directory, i + ".png"))) {
+                            if (!(i == 0 ? first : later).compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                                throw new java.io.IOException("Cannot encode failed scroll pixels");
+                            }
+                        }
+                    }
+                } catch (Exception retentionFailure) {
+                    failure.addSuppressed(retentionFailure);
+                }
+                throw failure;
+            } finally {
+                first.recycle();
+                later.recycle();
+            }
+        } finally {
+            view.release();
+        }
+    }
+
     @Test public void animatedRainbowBorderNeverEscapesItsWideTrackedRectangle() {
         Context context = ApplicationProvider.getApplicationContext();
         CensorOverlayView view = new CensorOverlayView(context);
