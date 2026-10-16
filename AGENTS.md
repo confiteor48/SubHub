@@ -115,6 +115,11 @@ Before using performance traces as evidence, compare raw publication counts with
 Every trace-schema change must include a parser fixture for the changed record. Unknown fields or
 unsupported formats must be exposed as incomplete parsing, never silently reported as zero work.
 
+Presentation revisions are opaque signed-long equality tokens, not timestamps. Diagnostics must
+preserve their full domain and use explicit record state, not token sign, to distinguish missing data.
+At a live renderer callback, verify actual Surface-use and drawing-lease counts. Reserve whole-owner
+`managedResourcesDrained()` checks for final shutdown; an open resource owner is not drained.
+
 ## Release procedure
 
 1. Complete the version bump and release notes in reviewable commits.
