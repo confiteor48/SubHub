@@ -63,6 +63,73 @@ public class SnapshotCensorPainterAndroidTest {
     }
     private static Bitmap output() { return Bitmap.createBitmap(320, 320, Bitmap.Config.ARGB_8888); }
 
+    @Test public void estimatedTranslationClipsFullSourceWithoutStretchOrTapAuthority() throws Exception {
+        try (Harness h = new Harness(); SnapshotCensorPainter painter = new SnapshotCensorPainter(1)) {
+            h.engine.start(42);
+            h.image(0, Color.RED, PixelGeometry.display(320, 320, 320, 320), true, region(20, 40, 220, 240));
+            CensorAppearance appearance = appearance(CensorAppearance.Type.PIXELATE, false);
+            try (PreparedCensorPaint prepared = prepare(h, appearance, 1, Collections.emptyList(), PreparedCensorPaint.DEFAULT_MAXIMUM_BYTES)) {
+                Bitmap target = output();
+                try (CensorEngine<PixelFrame>.RenderView view = h.engine.acquireRenderView()) {
+                    SnapshotCensorPainter.Result result = painter.draw(new Canvas(target), view, prepared, appearance, 1, 120, true,
+                            (mask, at) -> new SnapshotCensorPainter.Pose(mask.displayRegion.translated(0, -80), region(0, 80, 320, 300)));
+                    export(target, "estimated-scroll-clipping");
+                    assertEquals(1, result.members.size()); assertTrue(result.members.get(0).tapInteriors.isEmpty());
+                    assertEquals(Color.TRANSPARENT, target.getPixel(100, 60));
+                    assertEquals(Color.BLUE, target.getPixel(100, 100));
+                    assertEquals(Color.TRANSPARENT, target.getPixel(100, 180));
+                    assertEquals(40, view.snapshot.groups.get(0).members.get(0).displayRegion.top, 0);
+                } finally { target.recycle(); }
+            }
+        }
+    }
+
+    @Test public void reverseNeverRevealsEstimatedTranslatedHoles() throws Exception {
+        try (Harness h = new Harness(); SnapshotCensorPainter painter = new SnapshotCensorPainter(1)) {
+            h.engine.start(42); h.image(0, Color.RED, PixelGeometry.display(320, 320, 320, 320), region(40, 40, 140, 140));
+            Bitmap target = output(); target.eraseColor(Color.YELLOW); AtomicInteger poseCalls = new AtomicInteger();
+            try (CensorEngine<PixelFrame>.RenderView view = h.engine.acquireRenderView()) {
+                painter.draw(new Canvas(target), view, null, appearance(CensorAppearance.Type.BOX, true), 1, 120, true,
+                        (mask, at) -> { poseCalls.incrementAndGet(); return new SnapshotCensorPainter.Pose(mask.displayRegion.translated(100, 100), region(0, 0, 320, 320)); });
+                export(target, "estimated-scroll-reverse-refused");
+                assertEquals(0, poseCalls.get()); assertEquals(Color.YELLOW, target.getPixel(90, 90));
+                assertNotEquals(Color.YELLOW, target.getPixel(190, 190));
+            } finally { target.recycle(); }
+        }
+    }
+
+    @Test public void changedPresentationCannotMintOrReuseACurrentPaint() {
+        try (Harness h = new Harness()) {
+            h.engine.start(42); h.image(0, Color.RED, PixelGeometry.display(320, 320, 320, 320), region(40, 40, 140, 140));
+            java.util.concurrent.atomic.AtomicLong revision = new java.util.concurrent.atomic.AtomicLong();
+            java.util.concurrent.atomic.AtomicBoolean changeDuringDraw = new java.util.concurrent.atomic.AtomicBoolean(true);
+            SnapshotRenderSession session = new SnapshotRenderSession(new SnapshotRenderSession.Owner() {
+                @Override public CensorEngine.ActiveScope activeScope() { return h.engine.activeScope(); }
+                @Override public boolean isCurrent(CensorEngine.ActiveScope scope) { return h.engine.isCurrent(scope); }
+                @Override public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return h.engine.acquireRenderView(); }
+                @Override public CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long r,
+                        long g, List<Long> members, boolean reverse) { return h.engine.acknowledgePaint(scope, r, g, members, reverse); }
+                @Override public long presentationRevision() { return revision.get(); }
+                @Override public SnapshotCensorPainter.Pose presentation(SceneEngine.Mask mask, long now) {
+                    if (changeDuringDraw.getAndSet(false)) revision.incrementAndGet();
+                    return new SnapshotCensorPainter.Pose(mask.displayRegion.translated(0, 40), region(0, 0, 320, 320));
+                }
+            }, (policy, r, obsolete) -> Collections.emptyList(), 1, action -> { action.run(); return true; }, () -> { });
+            Bitmap target = output();
+            try {
+                session.configure(appearance(CensorAppearance.Type.BOX, false),
+                        SnapshotPaintPolicy.from(com.subhub.app.detection.DetectionPreset.LOW), 0);
+                assertNull(session.draw(new Canvas(target), 0, 0, new android.graphics.Rect(0, 0, 320, 320), true, true, true, h.engine.activeScope()));
+                try (SnapshotRenderSession.Drawing drawing = session.draw(new Canvas(target), 0, 0,
+                        new android.graphics.Rect(0, 0, 320, 320), true, true, true, h.engine.activeScope())) {
+                    assertNotNull(drawing); assertTrue(session.isCurrent(drawing.paint)); revision.incrementAndGet();
+                    assertFalse(session.isCurrent(drawing.paint)); assertNull(session.acknowledge(drawing.paint));
+                }
+            } finally { target.recycle(); session.close(); session.finishDrawing(); }
+            assertTrue(session.managedResourcesDrained());
+        }
+    }
+
     @Test public void movedMembersUseTheirOwnEvidenceAndBlankGroupGapsRemainUnpainted() {
         try (Harness h = new Harness(); SnapshotCensorPainter painter = new SnapshotCensorPainter(1)) {
             h.engine.start(42, ProtectionScope.normal(7));
@@ -338,8 +405,15 @@ public class SnapshotCensorPainterAndroidTest {
             for (Timed value : new ArrayList<>(timers)) if (!value.ran && !value.cancelled && value.at <= now) { value.ran = true; value.action.run(); }
         }
         Bitmap image(long at, int color, PixelGeometry geometry, SceneEngine.Region... regions) {
+            return image(at, color, geometry, false, regions);
+        }
+        Bitmap image(long at, int color, PixelGeometry geometry, boolean twoColor, SceneEngine.Region... regions) {
             fire(at);
             Bitmap image = Bitmap.createBitmap(geometry.width, geometry.height, Bitmap.Config.ARGB_8888); image.eraseColor(color);
+            if (twoColor) {
+                android.graphics.Paint blue = new android.graphics.Paint(); blue.setColor(Color.BLUE);
+                new Canvas(image).drawRect(20, 140, 220, 240, blue);
+            }
             PixelFrame frame = new PixelFrame(image, geometry, PixelFrame.Kind.ACCESSIBILITY_WINDOW, -1, at, 0);
             callbacks.get(callbacks.size() - 1).success(new CensorEngine.Captured<>(frame, 320, 320, -1, image::recycle)); worker.all();
             List<SceneEngine.Observation> observations = new ArrayList<>();

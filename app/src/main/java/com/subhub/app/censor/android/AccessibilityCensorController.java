@@ -5,7 +5,9 @@ import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Gravity;
+import android.view.ViewConfiguration;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 
@@ -20,6 +22,7 @@ import com.subhub.app.detection.text.NativeTextReader;
 import com.subhub.app.detection.text.TextSmutConfig;
 import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.settings.CensorAppearance;
+import com.subhub.app.service.ReplacementScrollPresentation;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -92,6 +95,8 @@ public final class AccessibilityCensorController implements AutoCloseable {
     private final AccessibilityCensorHost host;
     private final AccessibilityScrollReader scrollReader;
     private final SnapshotCensorSurface surface;
+    private final ReplacementScrollPresentation scrollPresentation = new ReplacementScrollPresentation();
+    private final float displayDensity;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable nativeReadSelected;
     interface NativeBoundaryControl {
@@ -139,17 +144,30 @@ public final class AccessibilityCensorController implements AutoCloseable {
             CensorTapTracker taps, Observer observer, AccessibilityCensorHost.WorkerFactory models,
             Runnable rootAcquired, Runnable nativeReadSelected, NativeBoundaryControl nativeBoundaryControl) {
         onMain(); Objects.requireNonNull(service); this.observer = Objects.requireNonNull(observer);
+        displayDensity = service.getResources().getDisplayMetrics().density;
         this.nativeReadSelected = Objects.requireNonNull(nativeReadSelected);
         this.nativeBoundaryControl = Objects.requireNonNull(nativeBoundaryControl);
         windows = new AccessibilityWindowReader(service, rootAcquired);
         manager = Objects.requireNonNull(service.getSystemService(WindowManager.class));
         AccessibilityCensorHost.Observer bridge = new AccessibilityCensorHost.Observer() {
+            @Override public void sourcePrepared(CensorEngine.CaptureRequest request, PixelFrame frame) {
+                if (sourceCurrent(request.epoch, request.geometry)) {
+                    scrollPresentation.captured(request.epoch, request.geometry, request.identity,
+                            frame.reportedUptimeMillis, frame.callbackUptimeMillis);
+                    surfaceChanged();
+                }
+                observer.sourcePrepared(request, frame);
+            }
             @Override public void prepared(long request, PixelFrame.Kind kind, long nanos, int bytes) {
                 observer.prepared(request, kind, nanos, bytes);
             }
             @Override public void failed(long request, int code) { observer.failed(request, code); }
             @Override public void trace(CensorEngine.Trace trace) { observer.trace(trace); }
-            @Override public void scrollReceived(ScrollMotionLedger.Receipt receipt) { observer.scrollReceived(receipt); }
+            @Override public void scrollReceived(ScrollMotionLedger.Receipt receipt) {
+                if (receipt.sample != null && scrollCurrent(receipt.sample.scope)
+                        && scrollPresentation.observe(receipt)) surfaceChanged();
+                observer.scrollReceived(receipt);
+            }
             @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) {
                 if (current(transition)) observer.providerReady(lane, provider, millis);
             }
@@ -184,6 +202,12 @@ public final class AccessibilityCensorController implements AutoCloseable {
                 CensorEngine.ActiveScope scope = host.activeScope(); return paintEligible(scope) ? scope : null;
             }
             @Override public boolean isCurrent(CensorEngine.ActiveScope scope) { return paintEligible(scope); }
+            @Override public SnapshotCensorPainter.Pose presentation(SceneEngine.Mask mask, long now) {
+                ReplacementScrollPresentation.Pose pose = scrollPresentation.pose(mask, now);
+                return pose == null ? null : new SnapshotCensorPainter.Pose(pose.region, pose.clip);
+            }
+            @Override public long presentationRevision() { return scrollPresentation.revision(); }
+            @Override public boolean presentationAnimating(long now) { return scrollPresentation.isAnimating(now); }
             @Override public CensorEngine<PixelFrame>.RenderView acquireRenderView() {
                 CensorEngine.ActiveScope scope = activeScope();
                 if (scope == null) return null;
@@ -229,6 +253,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
         Transition next = new Transition(selected);
         appearanceGeneration++;
         transition = next; configuration = selected; active = true; contentGeneration.incrementAndGet();
+        scrollPresentation.reset(selected.token, selected.window.id);
         if (Build.VERSION.SDK_INT >= 33 && scrollReader != null) scrollReader.invalidate();
         try {
             surface.presentationAllowed(false);
@@ -283,6 +308,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
     public void stop() {
         onMain(); if (closed) return;
         active = false; configuration = null; transition = null; contentGeneration.incrementAndGet();
+        scrollPresentation.reset(-1, -1);
         if (Build.VERSION.SDK_INT >= 33 && scrollReader != null) scrollReader.invalidate();
         appearanceGeneration++;
         surface.presentationAllowed(false);
@@ -291,6 +317,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
 
     @Override public void close() {
         onMain(); if (closed) return; closed = true; active = false; configuration = null; transition = null;
+        scrollPresentation.reset(-1, -1);
         appearanceGeneration++;
         contentGeneration.incrementAndGet();
         if (Build.VERSION.SDK_INT >= 33 && scrollReader != null) scrollReader.close();
@@ -358,6 +385,8 @@ public final class AccessibilityCensorController implements AutoCloseable {
         Configuration value = configuration;
         ScrollMotionLedger.Scope scope = host.scrollScope();
         if (Build.VERSION.SDK_INT >= 33 && scrollReader != null && value != null && scrollCurrent(scope)) {
+            scrollPresentation.nativeStrategy(value.window.packageName, event.getClassName(), displayDensity,
+                    ViewConfiguration.getScrollFriction(), SystemClock.uptimeMillis());
             scrollReader.offer(event, scope, value.window.packageName);
         }
     }

@@ -30,6 +30,15 @@ import java.util.List;
 
 /** Paints current immutable owner geometry. No retention, camera, association or scene mutation. */
 public final class SnapshotCensorPainter implements AutoCloseable {
+    /** A presentation estimate only; it neither changes evidence nor grants tap coverage. */
+    public static final class Pose {
+        public final SceneEngine.Region region, clip;
+        public Pose(SceneEngine.Region region, SceneEngine.Region clip) {
+            this.region = java.util.Objects.requireNonNull(region);
+            this.clip = java.util.Objects.requireNonNull(clip);
+        }
+    }
+    public interface Presentation { Pose pose(SceneEngine.Mask mask, long timeMillis); }
     /** Actual recorded member coverage; the attached View still owns visible/scope/tap validation. */
     public static final class PaintedMember {
         public final long identity;
@@ -72,7 +81,7 @@ public final class SnapshotCensorPainter implements AutoCloseable {
     /** Caller must acquire a fresh RenderView for EVERY draw, not replay a prepared scene. */
     public Result draw(Canvas canvas, CensorEngine<PixelFrame>.RenderView view, PreparedCensorPaint prepared,
             CensorAppearance appearance, long generation, long artworkTimeMillis) {
-        return draw(canvas, view, prepared, appearance, generation, artworkTimeMillis, false);
+        return draw(canvas, view, prepared, appearance, generation, artworkTimeMillis, false, null);
     }
 
     /**
@@ -82,20 +91,27 @@ public final class SnapshotCensorPainter implements AutoCloseable {
      */
     public Result drawRectangularClip(Canvas canvas, CensorEngine<PixelFrame>.RenderView view, PreparedCensorPaint prepared,
             CensorAppearance appearance, long generation, long artworkTimeMillis) {
-        return draw(canvas, view, prepared, appearance, generation, artworkTimeMillis, true);
+        return draw(canvas, view, prepared, appearance, generation, artworkTimeMillis, true, null);
     }
 
-    private Result draw(Canvas canvas, CensorEngine<PixelFrame>.RenderView view, PreparedCensorPaint prepared,
-            CensorAppearance appearance, long generation, long artworkTimeMillis, boolean rectangularClip) {
+    public Result draw(Canvas canvas, CensorEngine<PixelFrame>.RenderView view, PreparedCensorPaint prepared,
+            CensorAppearance appearance, long generation, long artworkTimeMillis, boolean rectangularClip,
+            Presentation presentation) {
         if (closed) throw new IllegalStateException("closed painter");
         boolean valid = prepared != null && prepared.appearance == appearance && prepared.compatible(view, generation);
         if (valid && canvas.isHardwareAccelerated()) prepared.hardwareRecorded();
         long time = Math.max(0, artworkTimeMillis);
         List<SceneEngine.Mask> visible = new ArrayList<>(); List<RectF> rects = new ArrayList<>();
+        List<RectF> ownerClips = new ArrayList<>();
         Rect clip = canvas.getClipBounds();
         for (SceneEngine.Group group : view.snapshot.groups) for (SceneEngine.Mask mask : group.members) {
-            RectF rect = rect(PaintMapping.padded(mask.displayRegion, appearance.getSizePadding(), PreparedCensorPaint.isText(mask)));
-            if (intersects(rect, clip)) { visible.add(mask); rects.add(rect); }
+            Pose pose = presentation == null || appearance.isReverseMode() ? null : presentation.pose(mask, time);
+            RectF rect = rect(PaintMapping.padded(pose == null ? mask.displayRegion : pose.region,
+                    appearance.getSizePadding(), PreparedCensorPaint.isText(mask)));
+            RectF ownerClip = pose == null ? null : rect(pose.clip);
+            if (intersects(rect, clip) && (ownerClip == null || RectF.intersects(rect, ownerClip))) {
+                visible.add(mask); rects.add(rect); ownerClips.add(ownerClip);
+            }
         }
         List<PaintedMember> result = new ArrayList<>();
         if (appearance.isReverseMode()) {
@@ -115,24 +131,38 @@ public final class SnapshotCensorPainter implements AutoCloseable {
             PreparedCensorPaint.Tile tile = valid && view.sourcePixels(mask.evidenceSource.sequence) != null
                     ? prepared.member(mask) : null;
             SceneEngine.Region requested = PaintMapping.padded(mask.evidenceRegion, appearance.getSizePadding(), PreparedCensorPaint.isText(mask));
-            effect(canvas, destination, tile, requested, valid ? prepared : null, mask.identity,
-                    appearance.getType(), appearance.getIntensity(), appearance, time);
-            if (appearance.isShowBorder()) border(canvas, destination, appearance, time);
-            result.add(new PaintedMember(mask, rectangularClip ? interiors(destination, clip) : Collections.emptyList()));
+            int saved = canvas.save();
+            try {
+                if (ownerClips.get(index) != null) canvas.clipRect(ownerClips.get(index));
+                // Clip the FULL translated destination. Clipping then stretching a source tile
+                // would distort its sampled pixels when the mask leaves the scroll owner.
+                effect(canvas, destination, tile, requested, valid ? prepared : null, mask.identity,
+                        appearance.getType(), appearance.getIntensity(), appearance, time);
+                if (appearance.isShowBorder()) border(canvas, destination, appearance, time);
+            } finally { canvas.restoreToCount(saved); }
+            result.add(new PaintedMember(mask, rectangularClip && ownerClips.get(index) == null
+                    ? interiors(destination, clip) : Collections.emptyList()));
         }
         // Final global layer: subsequent overlapping artwork cannot bury a previous member label.
         if (appearance.isShowText()) {
             List<LabelLayout> labels = new ArrayList<>();
             for (int index = 0; index < visible.size(); index++) {
                 LabelLayout label = labelLayout(rects.get(index), visible.get(index).identity, appearance);
-                if (label != null) labels.add(label);
+                labels.add(label);
             }
             fill.setShader(null); fill.setColor(Color.BLACK); fill.setAlpha(205);
-            for (LabelLayout label : labels) canvas.drawRoundRect(label.band, dp(5), dp(5), fill);
+            for (int index = 0; index < labels.size(); index++) {
+                LabelLayout label = labels.get(index); if (label == null) continue;
+                int saved = canvas.save();
+                if (ownerClips.get(index) != null) canvas.clipRect(ownerClips.get(index));
+                canvas.drawRoundRect(label.band, dp(5), dp(5), fill); canvas.restoreToCount(saved);
+            }
             fill.setAlpha(255);
-            for (LabelLayout label : labels) {
+            for (int index = 0; index < labels.size(); index++) {
+                LabelLayout label = labels.get(index); if (label == null) continue;
                 text.setColor(0xfff8f1fc); text.setTextSize(label.size); text.setShadowLayer(dp(3), 0, dp(1), Color.BLACK);
                 int saved = canvas.save(); canvas.clipRect(label.band);
+                if (ownerClips.get(index) != null) canvas.clipRect(ownerClips.get(index));
                 canvas.drawText(label.value, label.x, label.baseline, text); canvas.restoreToCount(saved); text.clearShadowLayer();
             }
         }

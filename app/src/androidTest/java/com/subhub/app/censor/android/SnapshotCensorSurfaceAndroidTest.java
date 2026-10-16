@@ -24,6 +24,8 @@ import com.subhub.app.censor.engine.LatestResourceCoordinator;
 import com.subhub.app.censor.engine.PixelGeometry;
 import com.subhub.app.censor.engine.ProtectionScope;
 import com.subhub.app.censor.engine.SceneEngine;
+import com.subhub.app.censor.engine.ScrollMotionLedger;
+import com.subhub.app.service.ReplacementScrollPresentation;
 import com.subhub.app.detection.DetectionPreset;
 import com.subhub.app.penance.CensorTapTracker;
 import com.subhub.app.settings.CensorAppearance;
@@ -73,6 +75,86 @@ public class SnapshotCensorSurfaceAndroidTest {
         return new CensorAppearance(type, 70, 0, false, false, CensorAppearance.BorderEffect.CLASSIC,
                 false, Color.WHITE, new EffectPalette(Color.GREEN, Color.BLUE, Color.WHITE),
                 Collections.singletonList("BLOCKED"), reverse, 100, "rectangle", "SubHub", "Access blocked.");
+    }
+
+    @Test public void reusedScrollMovesActualSurfaceBetweenDetectionsThenStopsWithoutTapAuthority() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.image(CensorAppearance.Type.BOX, false); f.composed("hybrid-before", 70, 70, Color.GREEN);
+            int captures = f.h.callbacks.size(), accepted = f.acceptedCount();
+            ReplacementScrollPresentation presentation = new ReplacementScrollPresentation();
+            long epoch = f.h.engine.currentEpoch(), at = SystemClock.uptimeMillis();
+            presentation.reset(42, 7);
+            try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                SceneEngine.Source source = view.snapshot.groups.get(0).members.get(0).geometrySource;
+                presentation.captured(epoch, 42, source.imageRequestIdentity, at - 210, at - 200);
+            }
+            ScrollMotionLedger.Scope scope = new ScrollMotionLedger.Scope(epoch, 42, 7, ProtectionScope.normal(f.taps.scope()));
+            ScrollMotionLedger ledger = new ScrollMotionLedger(8, 4, 16); ledger.reset(scope);
+            for (int index = 0; index < 3; index++) {
+                long time = at - 200 + index * 100;
+                ScrollMotionLedger.Sample sample = new ScrollMotionLedger.Sample(scope, index + 1, 10, 1,
+                        time, time, time + 1, time + 2, ScrollMotionLedger.Coordinate.absolute(0),
+                        ScrollMotionLedger.Coordinate.absolute(200 - index * 20),
+                        new SceneEngine.Region(f.origin[0], f.origin[1], f.origin[0] + 320, f.origin[1] + 320));
+                presentation.observe(ledger.observe(sample, time + 3));
+            }
+            f.presentation.set(presentation); main(f.surface::presentationChanged);
+            await(() -> f.acceptedCount() >= accepted + 2);
+            await(() -> {
+                AtomicBoolean quiet = new AtomicBoolean();
+                main(() -> quiet.set(!presentation.isAnimating(SystemClock.uptimeMillis()) && !f.surface.demandPending()
+                        && f.surface.executingRenderCount() == 0 && f.surface.completionNoticeCount() == 0));
+                return quiet.get();
+            });
+            Bitmap moved = f.buffer();
+            try {
+                export(moved, "hybrid-after"); assertEquals(Color.GREEN, moved.getPixel(70, 120));
+                assertEquals(Color.TRANSPARENT, moved.getPixel(70, 70));
+            } finally { moved.recycle(); }
+            f.composed("hybrid-composed-after", 70, 120, Color.GREEN);
+            assertFalse(f.hit(70, 120)); assertEquals(captures, f.h.callbacks.size());
+            long posts = f.surface.postCount(); Thread.sleep(80); assertEquals(posts, f.surface.postCount());
+            main(() -> { f.h.now = 1 + Harness.TRANSIENT_MILLIS + 1; f.surface.presentationChanged(); });
+            await(() -> f.surface.postCount() > posts);
+            Bitmap expired = f.buffer();
+            try { export(expired, "hybrid-expired"); assertEquals(Color.TRANSPARENT, expired.getPixel(70, 120)); }
+            finally { expired.recycle(); }
+            assertEquals(captures, f.h.callbacks.size()); ledger.close();
+        }
+    }
+
+    @Test public void newSourceUsesItsOwnScrollBaselineAndOriginalSourcePixels() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.image(CensorAppearance.Type.PIXELATE, false); f.prepared();
+            ReplacementScrollPresentation presentation = new ReplacementScrollPresentation(); presentation.reset(42, 7);
+            long epoch = f.h.engine.currentEpoch(), at = SystemClock.uptimeMillis();
+            try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                presentation.captured(epoch, 42, view.snapshot.groups.get(0).members.get(0).geometrySource.imageRequestIdentity, at - 210, at - 200);
+            }
+            ScrollMotionLedger.Scope scope = new ScrollMotionLedger.Scope(epoch, 42, 7, ProtectionScope.normal(f.taps.scope()));
+            ScrollMotionLedger ledger = new ScrollMotionLedger(8, 4, 16); ledger.reset(scope);
+            for (int index = 0; index < 2; index++) {
+                long time = at - 200 + index * 100;
+                ScrollMotionLedger.Sample sample = new ScrollMotionLedger.Sample(scope, index + 1, 10, 1, time, time, time + 1, time + 2,
+                        ScrollMotionLedger.Coordinate.absolute(0), ScrollMotionLedger.Coordinate.absolute(200 - index * 40),
+                        new SceneEngine.Region(f.origin[0], f.origin[1], f.origin[0] + 320, f.origin[1] + 320));
+                presentation.observe(ledger.observe(sample, time + 3));
+            }
+            f.presentation.set(presentation); main(f.surface::presentationChanged);
+            await(() -> !presentation.isAnimating(SystemClock.uptimeMillis()));
+            f.composed("hybrid-old-red", 70, 120, Color.RED);
+            main(() -> {
+                f.h.image(335, f.origin, Color.BLUE);
+                try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                    for (SceneEngine.Group group : view.snapshot.groups) for (SceneEngine.Mask mask : group.members)
+                        if (mask.geometrySource.sequence == 2) presentation.captured(epoch, 42,
+                                mask.geometrySource.imageRequestIdentity, SystemClock.uptimeMillis(), SystemClock.uptimeMillis());
+                }
+                f.surface.presentationChanged();
+            });
+            f.prepared(); f.composed("hybrid-fresh-blue", 70, 70, Color.BLUE);
+            assertEquals(2, f.h.callbacks.size()); ledger.close();
+        }
     }
 
     @Test public void freshEndpointsRepeatedlyAdmitLiteralImageBeforeAnyAdverseControl() throws Exception {
@@ -674,6 +756,7 @@ public class SnapshotCensorSurfaceAndroidTest {
         final AtomicReference<Runnable> recordHook = new AtomicReference<>(), postHook = new AtomicReference<>();
         final AtomicBoolean failNextOwnerRead = new AtomicBoolean();
         final AtomicReference<Thread> lockedCanvasThread = new AtomicReference<>();
+        final AtomicReference<ReplacementScrollPresentation> presentation = new AtomicReference<>();
         SnapshotSurfaceFixtureActivity activity; SnapshotCensorSurface surface; Harness h;
         Fixture() throws Exception { this((policy, revision, obsolete) -> Collections.emptyList(), null); }
         Fixture(SnapshotCensorView.ArtworkLoader loader, SnapshotCensorSurface.Endpoint endpoint) throws Exception {
@@ -692,6 +775,17 @@ public class SnapshotCensorSurfaceAndroidTest {
                 SnapshotCensorView.Owner owner = new SnapshotCensorView.Owner() {
                     @Override public CensorEngine.ActiveScope activeScope() { return h.engine.activeScope(); }
                     @Override public boolean isCurrent(CensorEngine.ActiveScope scope) { return h.engine.isCurrent(scope); }
+                    @Override public SnapshotCensorPainter.Pose presentation(SceneEngine.Mask mask, long now) {
+                        ReplacementScrollPresentation value = presentation.get();
+                        ReplacementScrollPresentation.Pose pose = value == null ? null : value.pose(mask, now);
+                        return pose == null ? null : new SnapshotCensorPainter.Pose(pose.region, pose.clip);
+                    }
+                    @Override public long presentationRevision() {
+                        ReplacementScrollPresentation value = presentation.get(); return value == null ? 0 : value.revision();
+                    }
+                    @Override public boolean presentationAnimating(long now) {
+                        ReplacementScrollPresentation value = presentation.get(); return value != null && value.isAnimating(now);
+                    }
                     @Override public CensorEngine<PixelFrame>.RenderView acquireRenderView() {
                         if (lockedCanvasThread.get() == Thread.currentThread() && failNextOwnerRead.compareAndSet(true, false)) {
                             assertNotEquals(Looper.getMainLooper(), Looper.myLooper());

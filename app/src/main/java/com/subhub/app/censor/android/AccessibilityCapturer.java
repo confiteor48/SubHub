@@ -26,6 +26,7 @@ public final class AccessibilityCapturer implements CensorEngine.Capturer<PixelF
     }
 
     public interface Observer {
+        default void sourcePrepared(CensorEngine.CaptureRequest request, PixelFrame frame) { }
         default void prepared(long requestId, PixelFrame.Kind kind, long nanos, int bytes) { }
         default void failed(long requestId, int platformCode) { }
     }
@@ -175,6 +176,8 @@ public final class AccessibilityCapturer implements CensorEngine.Capturer<PixelF
                 CensorEngine.Captured<PixelFrame> payload = new CensorEngine.Captured<>(accepted,
                         accepted.geometry.displayWidth, accepted.geometry.displayHeight, -1, accepted.bitmap::recycle);
                 try {
+                    try { observer.sourcePrepared(request, accepted); }
+                    catch (RuntimeException observerFailure) { /* Presentation metadata cannot strand pixels. */ }
                     try { observer.prepared(request.identity, accepted.kind, accepted.preparationNanos,
                             accepted.bitmap.getAllocationByteCount()); }
                     catch (RuntimeException observerFailure) { /* Diagnostics cannot strand capture ownership. */ }

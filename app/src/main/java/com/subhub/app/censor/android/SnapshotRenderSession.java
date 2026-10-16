@@ -9,6 +9,7 @@ import android.os.SystemClock;
 
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.LatestResourceCoordinator;
+import com.subhub.app.censor.engine.SceneEngine;
 import com.subhub.app.settings.CensorAppearance;
 
 import java.util.ArrayList;
@@ -35,6 +36,9 @@ public final class SnapshotRenderSession implements AutoCloseable {
         CensorEngine<PixelFrame>.RenderView acquireRenderView();
         CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long revision,
                 long generation, List<Long> members, boolean reverseBackground);
+        default SnapshotCensorPainter.Pose presentation(SceneEngine.Mask mask, long now) { return null; }
+        default long presentationRevision() { return 0; }
+        default boolean presentationAnimating(long now) { return false; }
     }
     public interface ArtworkLoader {
         /** Exclusive software-only inputs under policy limits; the session copies then recycles. */
@@ -51,7 +55,7 @@ public final class SnapshotRenderSession implements AutoCloseable {
     /** Immutable source/config/paint facts only; neither a pixel lease nor destination authority. */
     public static final class Paint {
         public final CensorEngine.ActiveScope scope;
-        public final long revision, generation, recordedAtMillis;
+        public final long revision, generation, recordedAtMillis, presentationRevision;
         public final int x, y;
         public final SnapshotCensorPainter.Result result;
         public final boolean reverse, animated;
@@ -59,15 +63,17 @@ public final class SnapshotRenderSession implements AutoCloseable {
         private final Binding binding;
         private final Rect visible;
         private Paint(SnapshotRenderSession authority, Binding binding, CensorEngine.ActiveScope scope,
-                long revision, SnapshotCensorPainter.Result result, long at, int x, int y, Rect visible) {
+                long revision, long presentationRevision, boolean motion, SnapshotCensorPainter.Result result,
+                long at, int x, int y, Rect visible) {
             this.authority = authority; this.binding = binding; this.scope = scope; this.revision = revision;
             generation = binding.generation; recordedAtMillis = at; this.result = result; this.x = x; this.y = y;
+            this.presentationRevision = presentationRevision;
             this.visible = new Rect(visible); reverse = binding.appearance.isReverseMode();
             CensorAppearance.Type type = binding.appearance.getType();
             boolean coverage = reverse || (result != null && !result.members.isEmpty());
             animated = coverage && (type == CensorAppearance.Type.STATIC || type == CensorAppearance.Type.GLITCH
                     || type == CensorAppearance.Type.TAPE || type == CensorAppearance.Type.ERROR_POPUP
-                    || binding.appearance.isAnimateBorder());
+                    || binding.appearance.isAnimateBorder() || !reverse && motion);
         }
         public Rect visible() { return new Rect(visible); }
     }
@@ -152,6 +158,7 @@ public final class SnapshotRenderSession implements AutoCloseable {
         boolean transferred = false;
         try {
             CensorEngine.ActiveScope scope = owner.activeScope();
+            long presentationRevision = owner.presentationRevision();
             if (scope == null || !owner.isCurrent(scope) || (expectedScope != null && !scope.same(expectedScope))) return null;
             if (live) fence(scope);
             if (painter == null) painter = new SnapshotCensorPainter(density);
@@ -164,13 +171,15 @@ public final class SnapshotRenderSession implements AutoCloseable {
                 int saved = canvas.save();
                 try {
                     canvas.translate(-x, -y); canvas.clipRect(0, 0, view.snapshot.destination.width, view.snapshot.destination.height);
-                    result = rectangular ? painter.drawRectangularClip(canvas, view, paint, config.appearance, config.generation, time)
-                            : painter.draw(canvas, view, paint, config.appearance, config.generation, time);
+                    result = painter.draw(canvas, view, paint, config.appearance, config.generation, time,
+                            rectangular, live && !config.appearance.isReverseMode() ? owner::presentation : null);
                 } finally { canvas.restoreToCount(saved); }
             } else if (view == null && config.appearance.isReverseMode()) {
                 painter.drawColdReverse(canvas, new RectF(visible), config.appearance, time);
             } else return null;
-            Paint paint = new Paint(this, config, scope, revision, result, time, x, y, visible);
+            if (owner.presentationRevision() != presentationRevision || !owner.isCurrent(scope)) return null;
+            Paint paint = new Paint(this, config, scope, revision, presentationRevision,
+                    live && owner.presentationAnimating(time), result, time, x, y, visible);
             Drawing drawing = new Drawing(paint, view, prepared, this); view = null; prepared = null; transferred = true;
             return drawing;
         } finally {
@@ -240,11 +249,13 @@ public final class SnapshotRenderSession implements AutoCloseable {
         }
     }
     public boolean isCurrent(Paint paint) {
-        if (paint == null || paint.authority != this || closed || binding != paint.binding || !owner.isCurrent(paint.scope)) return false;
+        if (paint == null || paint.authority != this || closed || binding != paint.binding || !owner.isCurrent(paint.scope)
+                || owner.presentationRevision() != paint.presentationRevision) return false;
         try (CensorEngine<PixelFrame>.RenderView current = owner.acquireRenderView()) {
-            return paint.revision == -1 ? current == null : current != null && current.snapshot.revision == paint.revision
+            return owner.presentationRevision() == paint.presentationRevision && (paint.revision == -1 ? current == null
+                    : current != null && current.snapshot.revision == paint.revision
                     && current.snapshot.destination.epoch == paint.scope.epoch
-                    && current.snapshot.destination.geometry == paint.scope.geometry;
+                    && current.snapshot.destination.geometry == paint.scope.geometry);
         }
     }
     /** Controller must independently prove exact destination/post/pose and fence observer reentry. */

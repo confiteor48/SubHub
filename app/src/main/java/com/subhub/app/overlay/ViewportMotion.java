@@ -10,7 +10,7 @@ package com.subhub.app.overlay;
  * First observations remain immediate; prediction is bounded and eventually returns to authority.
  * Optional measured-anchor presentation remains a separate, freshness-gated path.</p>
  */
-final class ViewportMotion {
+public final class ViewportMotion {
     private static final long MIN_FALLBACK_MS = 8L;
     private static final long MAX_FALLBACK_MS = 16L;
     private static final long PRESENTATION_DEFAULT_INTERVAL_MS = 16L;
@@ -25,12 +25,12 @@ final class ViewportMotion {
     private final Axis x = new Axis();
     private final Axis y = new Axis();
 
-    void setNativeSpline(boolean enabled, float density, float friction, long now) {
+    public void setNativeSpline(boolean enabled, float density, float friction, long now) {
         x.setNativeSpline(enabled, density, friction, now);
         y.setNativeSpline(enabled, density, friction, now);
     }
 
-    void reset(float x, float y, long nowMillis) {
+    public void reset(float x, float y, long nowMillis) {
         this.x.reset(x, nowMillis);
         this.y.reset(y, nowMillis);
     }
@@ -55,10 +55,16 @@ final class ViewportMotion {
         addDelta(dx, dy, nowMillis, viewportWidth, viewportHeight, authoritative, nowMillis);
     }
 
-    void addDelta(float dx, float dy, long nowMillis, int viewportWidth, int viewportHeight,
+    public void addDelta(float dx, float dy, long nowMillis, int viewportWidth, int viewportHeight,
             boolean authoritative, long eventSourceMillis) {
         x.addDelta(dx, nowMillis, viewportWidth, authoritative, eventSourceMillis);
         y.addDelta(dy, nowMillis, viewportHeight, authoritative, eventSourceMillis);
+    }
+
+    /** Missing provider axes are not stationary measurements and must not brake that axis. */
+    public void addReportedDelta(Float dx, Float dy, long nowMillis, int width, int height, long sourceMillis) {
+        if (dx != null) x.addDelta(dx, nowMillis, width, true, sourceMillis);
+        if (dy != null) y.addDelta(dy, nowMillis, height, true, sourceMillis);
     }
 
     /** Adds a fast, presentation-only motion sample without changing authoritative coordinates. */
@@ -96,7 +102,7 @@ final class ViewportMotion {
         y.clearMeasuredPresentation(nowMillis);
     }
 
-    Position position(long nowMillis) {
+    public Position position(long nowMillis) {
         return new Position(x.position(nowMillis), y.position(nowMillis));
     }
 
@@ -112,7 +118,7 @@ final class ViewportMotion {
         return x.absoluteMeasurement || y.absoluteMeasurement;
     }
 
-    boolean isAnimating(long nowMillis) {
+    public boolean isAnimating(long nowMillis) {
         return x.isAnimating(nowMillis) || y.isAnimating(nowMillis);
     }
 
@@ -487,9 +493,9 @@ final class ViewportMotion {
         return Math.max(minimum, Math.min(maximum, value));
     }
 
-    static final class Position {
-        final float x;
-        final float y;
+    public static final class Position {
+        public final float x;
+        public final float y;
 
         Position(float x, float y) {
             this.x = x;
