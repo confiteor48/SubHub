@@ -57,6 +57,10 @@ a new hardware-frame commit where supported; UI idle and a fixed sleep alone do 
 prove composition. Keep independent screenshot and hit-map assertions, and retain failed
 pixels before assertions discard their evidence. A frame commit is not a physical pixel clock.
 
+Resource preparation is effect-specific: solid boxes draw inline and do not create prepared image
+resources. For those fixture baselines, await a current accepted post and drained render queues,
+not an impossible `resourcesMatchCurrent()` condition.
+
 Every fixture registering or reconfiguring `UiAutomation` must save both
 `enabled_accessibility_services` and `accessibility_enabled` before registration. In teardown,
 switch to `FLAG_DONT_USE_ACCESSIBILITY` before restoring both exact values, then assert restoration.
