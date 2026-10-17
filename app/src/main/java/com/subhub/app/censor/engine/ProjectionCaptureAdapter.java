@@ -11,6 +11,7 @@ public final class ProjectionCaptureAdapter<R, P> implements CensorEngine.Captur
          * values from another owner do not grant authority. Called again after copying/cleanup.
          * Invalidate the engine epoch BEFORE reader retirement/replacement: this lookup is not an
          * atomic publication fence, whereas the engine rejects old-epoch capture completion.
+         * Throw ResourceFailure for a failed current source owner, not an ordinary unavailable scope.
          */
         Target<R> resolve(CensorEngine.CaptureRequest request);
     }
@@ -53,6 +54,7 @@ public final class ProjectionCaptureAdapter<R, P> implements CensorEngine.Captur
     @Override public void capture(CensorEngine.CaptureRequest request, CensorEngine.CaptureCallback<P> callback) {
         Target<R> target;
         try { target = targets.resolve(request); }
+        catch (ResourceFailure failedSource) { callback.resourceFailure(); return; }
         catch (RuntimeException unavailableScope) { callback.failure(0); return; }
         catch (Error uncertainScope) { callback.resourceFailure(); return; }
         if (target == null || !target.matches(request)) { callback.failure(0); return; }
@@ -77,7 +79,8 @@ public final class ProjectionCaptureAdapter<R, P> implements CensorEngine.Captur
             eligible = !resourceFailure && !target.mailbox.state().closed && prepared != null && targets.resolve(request) == target
                     && prepared.width == target.geometry.displayWidth
                     && prepared.height == target.geometry.displayHeight && prepared.pixelAtMillis == -1;
-        } catch (RuntimeException staleScope) { /* Release copied pixels before reporting failure. */ }
+        } catch (ResourceFailure failedSource) { resourceFailure = true; }
+        catch (RuntimeException staleScope) { /* Release copied pixels before reporting failure. */ }
         catch (Error uncertainScope) { resourceFailure = true; }
         if (!eligible) {
             resourceFailure |= discard(prepared);

@@ -120,7 +120,7 @@ jobs:
           if [[ "$PUBLISH_RELEASE" == "true" || "$REPLACEMENT_LAB_CANDIDATE" == "true" ]]; then
             build_args+=("-PciRunNumber=$CI_RUN_NUMBER")
           fi
-          ./gradlew --max-workers=2 --stacktrace testDebugUnitTest lintRelease assembleRelease "${build_args[@]}"
+          ./gradlew --max-workers=2 --stacktrace testDebugUnitTest lintDebug lintRelease assembleDebug assembleDebugAndroidTest assembleRelease "${build_args[@]}"
           grep -F "IMMEDIATE_QUALITY_EXPERIMENT = ${IMMEDIATE_QUALITY_EXPERIMENT};" \
             app/build/generated/source/buildConfig/release/com/subhub/app/BuildConfig.java
           grep -F "REPLACEMENT_LAB_CANDIDATE = ${REPLACEMENT_LAB_CANDIDATE};" \

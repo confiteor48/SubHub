@@ -189,6 +189,25 @@ public class ProjectionCaptureAdapterTest {
         }
     }
 
+    @Test public void initialResolverResourceFailureIsNotAnOrdinaryUnavailableScope() {
+        try (Harness h = new Harness()) {
+            Raw raw = h.offer(1);
+            h.resolveHook = () -> { throw new ProjectionCaptureAdapter.ResourceFailure(new IllegalStateException("source resource")); };
+            h.fire(); assertEquals(0, h.copies); assertEquals(0, raw.closes);
+            assertFalse(h.engine.captureInFlight()); assertEquals(1, h.engine.resourceFailures());
+        }
+    }
+
+    @Test public void finalResolverResourceFailureDisposesPreparedPixelsAndFaultsEngine() {
+        try (Harness h = new Harness()) {
+            int[] resolves = {0};
+            h.resolveHook = () -> { if (++resolves[0] == 2) throw new ProjectionCaptureAdapter.ResourceFailure(new IllegalStateException("source resource")); };
+            Raw raw = h.offer(1); h.fire(); assertEquals(1, raw.closes);
+            assertEquals(1, h.copied.get(0).closes); assertEquals(0, h.work.size());
+            assertFalse(h.engine.captureInFlight()); assertEquals(1, h.engine.resourceFailures());
+        }
+    }
+
     @Test public void finalResolverErrorDisposesPreparedPixelsAndFaultsEngine() {
         try (Harness h = new Harness()) {
             int[] resolves = {0};
