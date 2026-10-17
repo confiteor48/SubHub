@@ -57,6 +57,11 @@ a new hardware-frame commit where supported; UI idle and a fixed sleep alone do 
 prove composition. Keep independent screenshot and hit-map assertions, and retain failed
 pixels before assertions discard their evidence. A frame commit is not a physical pixel clock.
 
+For ImageReader colour-metadata fixtures, supply metadata through the actual producer and assert
+the acquired image's format and dataspace before invoking the code under test. Do not assume
+`setDataSpace()` on an acquired image changes its overridden getter; use a real ImageWriter path
+for explicit source dataspaces. Keep requested reader defaults distinct from received frame metadata.
+
 Resource preparation is effect-specific: solid boxes draw inline and do not create prepared image
 resources. For those fixture baselines, await a current accepted post and drained render queues,
 not an impossible `resourcesMatchCurrent()` condition.
