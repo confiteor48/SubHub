@@ -12,6 +12,7 @@ import android.hardware.DataSpace;
 import android.hardware.HardwareBuffer;
 import android.media.Image;
 import android.media.ImageReader;
+import android.media.ImageWriter;
 import android.os.SystemClock;
 
 import androidx.test.filters.SdkSuppress;
@@ -62,13 +63,13 @@ public class ProjectionImageCopierAndroidTest {
     }
 
     @Test public void unknownAndWideGamutDataspacesAreRejectedRatherThanRelabeled() {
-        withImage(3, false, read -> {
-            ProjectionImageCopier copier = new ProjectionImageCopier(65536, 131072);
-            for (int space : new int[] {DataSpace.DATASPACE_UNKNOWN, DataSpace.DATASPACE_DISPLAY_P3}) {
-                read.raw().setDataSpace(space);
+        ProjectionImageCopier copier = new ProjectionImageCopier(65536, 131072);
+        for (int space : new int[] {DataSpace.DATASPACE_UNKNOWN, DataSpace.DATASPACE_DISPLAY_P3}) {
+            withWrittenImage(space, read -> {
+                assertEquals("actual producer dataspace", space, read.raw().getDataSpace());
                 assertThrows(IllegalArgumentException.class, () -> copier.copy(geometry(3), read));
-            }
-        });
+            });
+        }
     }
 
     @Test public void realTransparentReaderPixelsAreRejectedWithoutPremultiplicationGuess() {
@@ -99,6 +100,57 @@ public class ProjectionImageCopierAndroidTest {
     }
 
     private static PixelGeometry geometry(int width) { return PixelGeometry.display(width, 2, width, 2); }
+
+    private static void withWrittenImage(int space, Consumer<ProjectionFrameMailbox<Image>.Read> action) {
+        // SurfaceImage overrides the getter but inherits Image's setter with a different backing field.
+        // Set metadata on the actual producer instead, then verify the acquired image before copying.
+        ImageReader reader = new ImageReader.Builder(3, 2).setMaxImages(4)
+                .setDefaultHardwareBufferFormat(HardwareBuffer.RGBA_8888).setDefaultDataSpace(space)
+                .setUsage(HardwareBuffer.USAGE_CPU_READ_OFTEN).build();
+        ImageWriter writer = null;
+        ProjectionFrameMailbox<Image> mailbox = new ProjectionFrameMailbox<>();
+        ProjectionFrameMailbox<Image>.Read read = null;
+        Image writable = null, acquired = null;
+        try {
+            writer = ImageWriter.newInstance(reader.getSurface(), 2);
+            writable = writer.dequeueInputImage();
+            assertEquals(android.graphics.PixelFormat.RGBA_8888, writable.getFormat());
+            assertEquals(1, writable.getPlanes().length);
+            Image.Plane plane = writable.getPlanes()[0];
+            assertEquals(4, plane.getPixelStride());
+            ByteBuffer pixels = plane.getBuffer();
+            int origin = pixels.position();
+            for (int y = 0; y < 2; y++) {
+                for (int x = 0; x < 3; x++) {
+                    int pixel = origin + y * plane.getRowStride() + x * plane.getPixelStride();
+                    pixels.put(pixel, (byte) 255); pixels.put(pixel + 1, (byte) 0);
+                    pixels.put(pixel + 2, (byte) 0); pixels.put(pixel + 3, (byte) 255);
+                }
+            }
+            writable.setDataSpace(space);
+            assertEquals(space, writable.getDataSpace());
+            writer.queueInputImage(writable); writable = null;
+            long deadline = SystemClock.uptimeMillis() + 2000;
+            while (acquired == null && SystemClock.uptimeMillis() < deadline) {
+                acquired = reader.acquireLatestImage(); if (acquired == null) SystemClock.sleep(10);
+            }
+            assertNotNull("real producer ImageReader frame", acquired);
+            assertEquals(android.graphics.PixelFormat.RGBA_8888, acquired.getFormat());
+            Image owned = acquired;
+            ProjectionFrameMailbox.Frame<Image> frame = mailbox.frame(owned, 1, owned.getTimestamp(),
+                    SystemClock.uptimeMillis(), owned::close);
+            acquired = null;
+            assertEquals(ProjectionFrameMailbox.Offer.ACCEPTED, mailbox.offer(frame));
+            read = mailbox.take(); assertNotNull(read); action.accept(read);
+        } finally {
+            try { if (read != null) read.close(); }
+            finally {
+                try { mailbox.close(); if (acquired != null) acquired.close(); if (writable != null) writable.close(); }
+                finally { try { if (writer != null) writer.close(); } finally { reader.close(); } }
+            }
+        }
+        assertTrue(mailbox.isDrained());
+    }
 
     private static void withImage(int width, boolean transparent, Consumer<ProjectionFrameMailbox<Image>.Read> action) {
         ImageReader reader = new ImageReader.Builder(width, 2).setMaxImages(4)
