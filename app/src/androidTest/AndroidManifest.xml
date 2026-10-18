@@ -5,5 +5,8 @@
             android:launchMode="singleTask" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
         <activity android:name="com.subhub.app.censor.android.RemoteBoundSourceActivity" android:exported="true"
             android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name="com.subhub.app.censor.android.ProjectionTargetFixtureActivity" android:exported="true"
+            android:launchMode="singleTask" android:configChanges="orientation|screenSize"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
     </application>
 </manifest>

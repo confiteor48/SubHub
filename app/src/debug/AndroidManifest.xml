@@ -11,6 +11,10 @@
         <activity android:name=".censor.android.SnapshotViewFixtureActivity" android:exported="false" />
         <activity android:name=".censor.android.SnapshotSurfaceFixtureActivity" android:exported="false" />
         <activity android:name=".censor.android.BoundCensorFixtureActivity" android:exported="false" />
+        <activity android:name=".censor.android.ProjectionCaptureFixtureActivity" android:exported="false"
+            android:configChanges="orientation|screenSize" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <service android:name=".censor.android.ProjectionCaptureFixtureService" android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
         <service android:name=".censor.android.BoundCensorFixtureService" android:enabled="false"
             android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
