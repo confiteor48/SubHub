@@ -73,6 +73,11 @@ UI-only automation can enable an inactive remembered service and contaminate the
 fixture. Keep rejecting enabled capture intent; use a separately owned fresh-data guest instead of
 clearing an existing guest's settings or app data.
 
+`UiAutomation.executeShellCommand()` executes directly, without shell quote interpretation. For
+validated, nonempty, whitespace-free setting tokens, pass the literal token without added quotes.
+Reject unsupported original values before connecting automation, and verify exact restored values
+both in the fixture and through an independent external read after disconnection.
+
 Recover debug-app internal Censor Lab files with the authorized `run-as com.subhub.app` path.
 Copies in external app storage may not be shell-readable; do not change permissions or repeat
 passed workloads to repair export evidence. Verify the structured payload as well as the command
@@ -85,6 +90,15 @@ focus check does not verify recreated screens.
 Gate Android instrumentation tests that require newer platform APIs with
 `@SdkSuppress(minSdkVersion = ...)`, not `@RequiresApi`. The latter describes production
 API contracts rather than runtime test eligibility and fails Android lint's `UseSdkSuppress` check.
+Keep debug manifest Activities and Services instantiable at the minimum SDK: guard their entry
+points and annotate API-specific helpers, not the whole component. A component-wide `@RequiresApi`
+also raises its manifest requirement, even when its entry point contains a runtime SDK guard.
+For `CensorEngine` capture adapters, an admitted dispatch must precede the capturer's return. To move
+copying off the main thread, schedule the whole capture invocation on the worker; do not return
+before a queued adapter attempts admission. Keep `tryDispatch()` at actual source consumption.
+Full-display buffer coordinates are not View-local coordinates. Bind small native pixel witnesses
+to measured on-screen View bounds, checking those against an independent native bounds source;
+do not force an inset app View to origin zero or compensate the image with guessed offsets.
 Controlled scheduler fixtures must execute only due, uncancelled tasks in deadline
 order. Capture and display-expiry wakes are independent; insertion order can fire an
 expiry in place of a capture and invalidate an otherwise unrelated adapter test.
