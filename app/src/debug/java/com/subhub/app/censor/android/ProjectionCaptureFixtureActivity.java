@@ -63,14 +63,21 @@ public final class ProjectionCaptureFixtureActivity extends Activity {
     public static final class MarkerView extends View {
         private final Paint paint = new Paint();
         private final boolean alternate;
+        private int centerColor;
         public MarkerView(Context context, boolean alternate) {
-            super(context); this.alternate = alternate; setContentDescription("Projection initial source");
+            super(context); this.alternate = alternate; centerColor = alternate ? Color.MAGENTA : Color.GREEN;
+            setContentDescription("Projection initial source");
+        }
+        public void centerColor(int color) {
+            if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) throw new IllegalStateException("main marker mutation");
+            centerColor = color; invalidate();
         }
         @Override protected void onDraw(Canvas canvas) {
             canvas.drawColor(Color.BLACK);
             int[] parts = {1,3,2};
             int[] colors = alternate ? new int[]{Color.CYAN,Color.YELLOW,Color.MAGENTA}
                     : new int[]{Color.RED,Color.BLUE,Color.GREEN};
+            colors[2] = centerColor;
             for (int i = 0; i < parts.length; i++) {
                 int x = getWidth() * parts[i] / 4, y = getHeight() * parts[i] / 4;
                 paint.setColor(colors[i]); canvas.drawRect(x - 8, y - 8, x + 8, y + 8, paint);

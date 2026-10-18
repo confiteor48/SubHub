@@ -9,6 +9,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.hardware.DataSpace;
@@ -21,6 +23,10 @@ import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Gravity;
+import android.view.WindowManager;
+import android.view.SurfaceHolder;
+import android.content.pm.PackageManager;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 import androidx.test.filters.SdkSuppress;
@@ -28,25 +34,39 @@ import androidx.test.platform.app.InstrumentationRegistry;
 
 import com.subhub.app.capture.MediaProjectionLeaseRegistry;
 import com.subhub.app.censor.engine.ProjectionSourceSession;
+import com.subhub.app.censor.engine.CensorEngine;
+import com.subhub.app.censor.engine.SceneEngine;
+import com.subhub.app.penance.CensorTapTracker;
+import com.subhub.app.settings.CensorAppearance;
+import com.subhub.app.settings.EffectPalette;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.Rule;
+import org.junit.rules.TestName;
 
 /** Actual consent/foreground/ImageReader source, not inference, pixel-clock or phone-performance proof. */
 @SdkSuppress(minSdkVersion = 34)
 public final class ProjectionCaptureSourceAndroidTest {
+    private static final String FEEDBACK_CASE = "realAccessibilityOverlayKeepsFreshUnderlyingProjectionPixels";
+    @Rule public final TestName testName = new TestName();
     private final Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
     private final Context target = instrumentation.getTargetContext();
     private final Context test = instrumentation.getContext();
@@ -56,6 +76,17 @@ public final class ProjectionCaptureSourceAndroidTest {
     private ProjectionCaptureFixtureService.Hold hold;
     private ProjectionCaptureFixtureActivity activity;
     private boolean connected, otherStarted;
+    private ComponentName fixtureComponent;
+    private int beforeComponent;
+    private FixtureServiceConnection.Lease<BoundCensorFixtureService> fixtureLease;
+    private SnapshotCensorSurface censor;
+    private WindowManager overlayManager;
+    private final AtomicInteger overlayFailures = new AtomicInteger(), overlayPosts = new AtomicInteger();
+    private File feedbackEvidence;
+    private final FrozenEndpoint frozenEndpoint = new FrozenEndpoint();
+    private final AtomicReference<SurfaceSubmission> lastSubmission = new AtomicReference<>();
+    private long heldPosts, heldDestructions;
+    private long feedbackDeadline;
 
     @Before public void prepare() {
         beforeServices = Settings.Secure.getString(target.getContentResolver(), "enabled_accessibility_services");
@@ -63,28 +94,55 @@ public final class ProjectionCaptureSourceAndroidTest {
         validSetting(beforeServices); validSetting(beforeEnabled);
         assertNull("another projection owner", MediaProjectionLeaseRegistry.owner());
         runId = UUID.randomUUID().toString();
-        // Snapshot settings BEFORE connection, even though these source tests do not bind a service.
-        automation = instrumentation.getUiAutomation(); connected = true;
+        // Only the explicit feedback case binds a service; the other source contracts stay unchanged.
+        boolean feedback = FEEDBACK_CASE.equals(testName.getMethodName());
+        if (feedback) {
+            org.junit.Assume.assumeTrue("Explicit owned-emulator source-eligibility probe only",
+                    "true".equals(InstrumentationRegistry.getArguments().getString("projection_feedback_fixture")));
+            assertTrue("Not authorized on a phone", android.os.Build.FINGERPRINT.contains("generic")
+                    || android.os.Build.MODEL.contains("sdk_gphone"));
+            assertTrue("No other selected service may be activated", beforeServices == null || beforeServices.isEmpty());
+            assertTrue("Inactive initial Accessibility", beforeEnabled == null || beforeEnabled.equals("0"));
+        }
+        automation = feedback ? instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+                : instrumentation.getUiAutomation(); connected = true;
         instrumentation.waitForIdleSync();
     }
 
     @After public void cleanup() throws Exception {
+        Throwable primary = null;
+        for (Cleanup action : new Cleanup[] { this::closeFeedbackSurface, this::closeProjectionFixture,
+                this::retireFeedbackFixture, this::restoreFeedbackSettings }) {
+            try { action.run(); }
+            catch (Exception | Error failure) {
+                if (primary == null) primary = failure;
+                else if (primary != failure) primary.addSuppressed(failure);
+            }
+        }
+        if (primary instanceof Exception) throw (Exception) primary;
+        if (primary instanceof Error) throw (Error) primary;
+    }
+    private interface Cleanup { void run() throws Exception; }
+
+    private void closeProjectionFixture() {
+        if (hold != null) hold.release();
+        if (host == null) {
+            ProjectionCaptureFixtureService.Session latest = ProjectionCaptureFixtureService.latest;
+            if (latest != null && latest.runId.equals(runId)) host = latest;
+        }
+        if (host != null) {
+            host.stop(); await("host closure", () -> host.closed, 8_000); assertHealthyClosure();
+            Bundle clocks = new Bundle();
+            clocks.putString("projectionFixtureCopy", "entry=" + host.copyStartedAt + " return=" + host.copyReturnedAt
+                    + " delivered=" + host.delivered + " refusal=" + host.copyRefusal);
+            instrumentation.sendStatus(0, clocks);
+        }
+        if (otherStarted) other(false, true);
+        if (activity != null) instrumentation.runOnMainSync(activity::finish);
+    }
+
+    private void restoreFeedbackSettings() throws Exception {
         try {
-            if (hold != null) hold.release();
-            if (host == null) {
-                ProjectionCaptureFixtureService.Session latest = ProjectionCaptureFixtureService.latest;
-                if (latest != null && latest.runId.equals(runId)) host = latest;
-            }
-            if (host != null) {
-                host.stop(); await("host closure", () -> host.closed, 8_000); assertHealthyClosure();
-                Bundle clocks = new Bundle();
-                clocks.putString("projectionFixtureCopy", "entry=" + host.copyStartedAt + " return=" + host.copyReturnedAt
-                        + " delivered=" + host.delivered + " refusal=" + host.copyRefusal);
-                instrumentation.sendStatus(0, clocks);
-            }
-            if (otherStarted) other(false, true);
-            if (activity != null) instrumentation.runOnMainSync(activity::finish);
-        } finally {
             if (connected) {
                 automation = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_USE_ACCESSIBILITY);
                 restore("enabled_accessibility_services", beforeServices);
@@ -92,7 +150,302 @@ public final class ProjectionCaptureSourceAndroidTest {
                 assertEquals(beforeServices, Settings.Secure.getString(target.getContentResolver(), "enabled_accessibility_services"));
                 assertEquals(beforeEnabled, Settings.Secure.getString(target.getContentResolver(), "accessibility_enabled"));
             }
+        } finally {
+            if (fixtureComponent != null) {
+                target.getPackageManager().setComponentEnabledSetting(fixtureComponent, beforeComponent, PackageManager.DONT_KILL_APP);
+                assertEquals(beforeComponent, target.getPackageManager().getComponentEnabledSetting(fixtureComponent));
+            }
         }
+    }
+
+    @Test public void realAccessibilityOverlayKeepsFreshUnderlyingProjectionPixels() throws Exception {
+        bindFeedbackFixture();
+        startGranted();
+        ProjectionCaptureFixtureService.Sample baseline = palette(false);
+        assertEquals(PixelFrame.Kind.PROJECTION_DISPLAY, baseline.kind);
+        assertEquals(PixelFormat.RGBA_8888, baseline.format);
+        assertEquals(DataSpace.DATASPACE_SRGB, baseline.dataspace);
+        ProjectionCaptureFixtureService.Witness witness = baseline.witness;
+        Rect bounds = witness.bounds();
+        int x = bounds.centerX(), y = bounds.centerY();
+        feedbackEvidence = new File(new File(target.getFilesDir(), "projection-overlay-feedback"), runId);
+        assertTrue("Exclusive evidence directory", feedbackEvidence.mkdirs());
+        Bundle location = new Bundle(); location.putString("projectionOverlayEvidence", runId);
+        instrumentation.sendStatus(0, location);
+        composed("uncovered", x, y, Color.GREEN);
+        attachFeedbackSurface(x, y);
+        await("Actual accepted nonempty censor post", () -> overlayPosts.get() > 0, 4_000);
+        frozenEndpoint.armed.set(true);
+        instrumentation.runOnMainSync(censor::requestObservedFrame);
+        assertTrue("Render worker held before its next actual holder lock", frozenEndpoint.entered.await(4, TimeUnit.SECONDS));
+        feedbackDeadline = frozenEndpoint.enteredAt + 10_000;
+        heldPosts = frozenEndpoint.posts.get(); heldDestructions = censor.destructionsStarted();
+        SurfaceSubmission held = lastSubmission.get();
+        assertNotNull(held);
+        assertEquals(heldPosts, held.attempt);
+        assertTrue(held.holderReturned && held.canvasClipValidated && held.recordingFinished && held.cleanupSucceeded);
+        assertNotNull(held.paint);
+        assertEquals(SurfaceSubmission.Mode.MEMBERS, held.paint.mode);
+        assertTrue(held.paint.geometryComplete && held.paint.members.stream().anyMatch(member -> member.clippedBounds != null
+                && member.clippedBounds.left <= x && member.clippedBounds.right > x
+                && member.clippedBounds.top <= y && member.clippedBounds.bottom > y));
+        composed("covered-before", x, y, Color.MAGENTA);
+        assertFrozenBuffer(held);
+        assertEquals(0, overlayFailures.get());
+
+        final int challenge = Color.CYAN;
+        long previous = host.sample.sequence;
+        AtomicReference<ProjectionCaptureFixtureService.Sample> observed = new AtomicReference<>();
+        AtomicReference<ProjectionCaptureFixtureService.Sample> firstLater = new AtomicReference<>();
+        host.copiedObserver = (sample, pixels) -> {
+            if (observed.get() != null || sample.witness != witness || sample.sequence <= previous) return;
+            if (firstLater.get() == null) {
+                crop("projection-first-later", pixels, x, y);
+                firstLater.set(sample);
+            }
+            if (sample.top != Color.RED || sample.bottom != Color.BLUE
+                    || sample.overlay != challenge && sample.overlay != Color.MAGENTA) return;
+            crop("projection-probe", pixels, x, y);
+            observed.set(sample); // The immutable witness is ready only after its actual pixels are saved.
+        };
+        CountDownLatch committed = new CountDownLatch(1);
+        instrumentation.runOnMainSync(() -> {
+            ProjectionCaptureFixtureActivity.MarkerView marker = (ProjectionCaptureFixtureActivity.MarkerView)
+                    ((ViewGroup) activity.findViewById(android.R.id.content)).getChildAt(0);
+            marker.getViewTreeObserver().registerFrameCommitCallback(committed::countDown);
+            marker.centerColor(challenge);
+        });
+        assertTrue("Underlying challenge hardware commit", committed.await(feedbackRemaining(), TimeUnit.MILLISECONDS));
+        try {
+            await("A later source contains new underlying challenge or captured censor", () -> observed.get() != null, feedbackRemaining());
+        } finally {
+            ProjectionCaptureFixtureService.Sample latest = observed.get() == null ? firstLater.get() : observed.get();
+            if (latest != null) feedbackStatus(latest, previous, challenge, x, y, observed.get() != null);
+        }
+        ProjectionCaptureFixtureService.Sample probe = observed.get();
+        host.copiedObserver = null;
+        composed("covered-after", x, y, Color.MAGENTA);
+        assertFrozenBuffer(held);
+        Bundle invariant = new Bundle();
+        invariant.putString("projectionOverlayInvariant", "postSerial=" + held.postSerial + " generation=" + held.endpointGeneration
+                + " heldPosts=" + heldPosts + " actualPosts=" + frozenEndpoint.posts.get()
+                + " holdEntered=" + frozenEndpoint.enteredAt + " observedAt=" + SystemClock.uptimeMillis()
+                + " x=" + held.surfaceX + " y=" + held.surfaceY + " width=" + held.surfaceWidth + " height=" + held.surfaceHeight
+                + " destructions=" + heldDestructions + " holdFailures=" + frozenEndpoint.failures.get()
+                + " sourceCurrent=true leaseCurrent=true attached=true visible=true physicalAcceptance=false");
+        instrumentation.sendStatus(0, invariant);
+        assertEquals("Projection source must contain fresh underlying pixels, not censor feedback", challenge, probe.overlay);
+        assertEquals(0, overlayFailures.get());
+        assertEquals(-1, probe.pixelAt);
+    }
+
+    private void assertFrozenBuffer(SurfaceSubmission held) {
+        assertEquals(0, frozenEndpoint.entered.getCount());
+        assertTrue("Common frozen-buffer deadline", SystemClock.uptimeMillis() < feedbackDeadline);
+        assertEquals("No successor real Surface post during challenge/copy", heldPosts, frozenEndpoint.posts.get());
+        assertSame(held, lastSubmission.get());
+        assertEquals(0, frozenEndpoint.failures.get());
+        assertFalse(censor.endpointFailed());
+        assertFalse(host.stopped); assertTrue(host.engine.isCurrent(host.scope));
+        assertTrue(BoundCensorFixtureService.CONNECTIONS.isCurrent(fixtureLease));
+        assertNotNull(fixtureLease.service.getServiceInfo());
+        instrumentation.runOnMainSync(() -> {
+            assertEquals(heldDestructions, censor.destructionsStarted());
+            assertTrue(censor.isAttachedToWindow() && censor.isShown() && censor.getWindowVisibility() == View.VISIBLE);
+            assertTrue(censor.endpointView().isShown() && censor.endpointView().getHolder().getSurface().isValid());
+            int[] origin = new int[2]; censor.endpointView().getLocationOnScreen(origin);
+            assertEquals(held.surfaceX, origin[0]); assertEquals(held.surfaceY, origin[1]);
+            assertEquals(held.surfaceWidth, censor.endpointView().getWidth());
+            assertEquals(held.surfaceHeight, censor.endpointView().getHeight());
+        });
+    }
+
+    private long feedbackRemaining() {
+        long remaining = feedbackDeadline - SystemClock.uptimeMillis();
+        assertTrue("Common frozen-buffer deadline", remaining > 0);
+        return remaining;
+    }
+
+    /** A controlled render-worker pause BEFORE native lock, never a main-thread/compositor freeze. */
+    private static final class FrozenEndpoint implements SnapshotCensorSurface.Endpoint {
+        final AtomicBoolean armed = new AtomicBoolean();
+        final CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        final AtomicInteger posts = new AtomicInteger(), failures = new AtomicInteger();
+        volatile long enteredAt = -1;
+        @Override public Canvas lock(SurfaceHolder holder) {
+            if (armed.get()) {
+                enteredAt = SystemClock.uptimeMillis(); entered.countDown();
+                try {
+                    if (!release.await(20, TimeUnit.SECONDS)) {
+                        failures.incrementAndGet(); throw new IllegalStateException("fixture render hold expired");
+                    }
+                } catch (InterruptedException failure) {
+                    failures.incrementAndGet(); Thread.currentThread().interrupt(); throw new IllegalStateException(failure);
+                }
+            }
+            return holder.lockHardwareCanvas();
+        }
+        @Override public void post(SurfaceHolder holder, Canvas canvas) {
+            holder.unlockCanvasAndPost(canvas); posts.incrementAndGet();
+        }
+    }
+
+    private void crop(String name, Bitmap pixels, int x, int y) {
+        Bitmap cropped = Bitmap.createBitmap(pixels, x - 24, y - 24, 48, 48);
+        try { png(name, cropped); }
+        finally { cropped.recycle(); }
+    }
+
+    private void feedbackStatus(ProjectionCaptureFixtureService.Sample probe, long previous, int challenge,
+            int x, int y, boolean recorded) {
+        Bundle result = new Bundle();
+        result.putString("projectionOverlayProbe", "recorded=" + recorded + " sourceSequence=" + probe.sequence + " previous=" + previous
+                + " sourceColor=" + Integer.toHexString(probe.overlay) + " challenge=" + Integer.toHexString(challenge)
+                + " censor=" + Integer.toHexString(Color.MAGENTA) + " x=" + x + " y=" + y
+                + " copyEntry=" + probe.copyEntry + " copyReturn=" + probe.copyReturn
+                + " sourceTimestamp=" + probe.timestamp + " arrival=" + probe.arrival + " pixelAt=" + probe.pixelAt
+                + " posts=" + overlayPosts.get() + " failures=" + overlayFailures.get()
+                + " pixelFile=" + (recorded ? "projection-probe.png" : "projection-first-later.png")
+                + " heldPosts=" + heldPosts + " actualPosts=" + frozenEndpoint.posts.get()
+                + " holdEntered=" + frozenEndpoint.enteredAt + " holdFailures=" + frozenEndpoint.failures.get()
+                + " physicalAcceptance=false");
+        instrumentation.sendStatus(0, result);
+    }
+
+    private void bindFeedbackFixture() throws Exception {
+        fixtureComponent = new ComponentName(target, BoundCensorFixtureService.class);
+        beforeComponent = target.getPackageManager().getComponentEnabledSetting(fixtureComponent);
+        assertNull(BoundCensorFixtureService.CONNECTIONS.currentLease());
+        long generation = BoundCensorFixtureService.CONNECTIONS.lastGeneration();
+        target.getPackageManager().setComponentEnabledSetting(fixtureComponent, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP);
+        android.view.accessibility.AccessibilityManager manager = target.getSystemService(android.view.accessibility.AccessibilityManager.class);
+        await("Installed fixture discovery", () -> manager.getInstalledAccessibilityServiceList().stream().anyMatch(info ->
+                fixtureComponent.equals(new ComponentName(info.getResolveInfo().serviceInfo.packageName, info.getResolveInfo().serviceInfo.name))), 4_000);
+        restore("enabled_accessibility_services", fixtureComponent.flattenToString());
+        restore("accessibility_enabled", "1");
+        await("Actual nonsuppressed fixture lease", () -> {
+            FixtureServiceConnection.Snapshot<BoundCensorFixtureService, android.accessibilityservice.AccessibilityServiceInfo> snapshot =
+                    BoundCensorFixtureService.CONNECTIONS.ready(BoundCensorFixtureService::getServiceInfo, (service, info) ->
+                            service.boundPid == android.os.Process.myPid() && info.getResolveInfo() != null
+                            && fixtureComponent.equals(new ComponentName(info.getResolveInfo().serviceInfo.packageName, info.getResolveInfo().serviceInfo.name))
+                            && (info.getCapabilities() & android.accessibilityservice.AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT) != 0
+                            && FixtureServiceConnection.activeSelection(Settings.Secure.getString(target.getContentResolver(), "accessibility_enabled"),
+                                    Settings.Secure.getString(target.getContentResolver(), "enabled_accessibility_services"), fixtureComponent.flattenToString()));
+            if (snapshot == null || snapshot.lease.generation <= generation) return false;
+            fixtureLease = snapshot.lease; return true;
+        }, 4_000);
+        assertNull("No second capture controller", fixtureLease.service.controller);
+    }
+
+    private void attachFeedbackSurface(int x, int y) {
+        instrumentation.runOnMainSync(() -> {
+            BoundCensorFixtureService service = fixtureLease.service;
+            overlayManager = service.getSystemService(WindowManager.class);
+            SnapshotRenderSession.Owner owner = new SnapshotRenderSession.Owner() {
+                @Override public CensorEngine.ActiveScope activeScope() { return host.engine.activeScope(); }
+                @Override public boolean isCurrent(CensorEngine.ActiveScope scope) { return host.engine.isCurrent(scope); }
+                @Override public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return host.engine.acquireRenderView(); }
+                @Override public CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long revision,
+                        long generation, List<Long> members, boolean reverse) {
+                    return host.engine.acknowledgePaint(scope, revision, generation, members, reverse);
+                }
+            };
+            censor = new SnapshotCensorSurface(service, owner, (policy, revision, obsolete) -> Collections.emptyList(),
+                    new CensorTapTracker(), new SnapshotCensorSurface.Observer() {
+                        @Override public boolean collectSubmissions() { return true; }
+                        @Override public void submitted(SurfaceSubmission submission) { lastSubmission.set(submission); }
+                        @Override public void resourceFailure() { overlayFailures.incrementAndGet(); }
+                        @Override public void endpointFailure() { overlayFailures.incrementAndGet(); }
+                        @Override public void posted(SnapshotCensorSurface.Post post) {
+                            if (post.acceptedPaint != null && !post.acceptedPaint.members.isEmpty()) overlayPosts.incrementAndGet();
+                        }
+                    }, frozenEndpoint);
+            CensorAppearance appearance = new CensorAppearance(CensorAppearance.Type.BOX, 100, 0, false, false,
+                    CensorAppearance.BorderEffect.CLASSIC, false, Color.MAGENTA,
+                    new EffectPalette(Color.MAGENTA, Color.MAGENTA, Color.MAGENTA), Collections.emptyList(),
+                    false, 100, "rectangle", "SubHub", "Access blocked.");
+            censor.configure(appearance, new SnapshotPaintPolicy(128, 1), 1, true);
+            WindowManager.LayoutParams params = new WindowManager.LayoutParams(-1, -1,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            params.gravity = Gravity.TOP | Gravity.START; params.setFitInsetsTypes(0);
+            params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            overlayManager.addView(censor, params);
+            host.presentationChanged = censor::presentationChanged;
+            host.syntheticMask = new SceneEngine.Region(x - 24, y - 24, x + 24, y + 24);
+            censor.presentationAllowed(true); censor.presentationChanged();
+        });
+    }
+
+    private void composed(String name, int x, int y, int color) {
+        long deadline = feedbackDeadline == 0 ? SystemClock.uptimeMillis() + 4_000 : feedbackDeadline;
+        int actual = 0; Bitmap last = null;
+        try {
+            while (SystemClock.uptimeMillis() < deadline) {
+                if (last != null) last.recycle();
+                last = automation.takeScreenshot();
+                assertNotNull("Actual composed screenshot", last);
+                assertEquals(host.width, last.getWidth()); assertEquals(host.height, last.getHeight());
+                actual = last.getPixel(x, y);
+                if (actual == color) break;
+                SystemClock.sleep(20);
+            }
+            assertNotNull(last); png(name, last); // Keep failed pixels before asserting expected coverage.
+            assertEquals("Composed witness " + name, color, actual);
+        } finally { if (last != null) last.recycle(); }
+    }
+
+    private void png(String name, Bitmap pixels) {
+        File output = new File(feedbackEvidence, name + ".png");
+        try {
+            if (!output.createNewFile()) throw new IOException("evidence already exists");
+            try (FileOutputStream stream = new FileOutputStream(output)) {
+                if (!pixels.compress(Bitmap.CompressFormat.PNG, 100, stream)) throw new IOException("PNG encode failed");
+            }
+        } catch (IOException failure) { throw new IllegalStateException("feedback evidence", failure); }
+    }
+
+    private void closeFeedbackSurface() {
+        frozenEndpoint.release.countDown();
+        if (host != null) { host.copiedObserver = null; host.presentationChanged = () -> { }; }
+        SnapshotCensorSurface closing = censor;
+        if (closing == null) return;
+        instrumentation.runOnMainSync(() -> {
+            Throwable primary = null;
+            try { closing.close(); }
+            catch (RuntimeException | Error failure) { primary = failure; throw failure; }
+            finally {
+                try { if (closing.isAttachedToWindow()) overlayManager.removeViewImmediate(closing); }
+                catch (RuntimeException | Error failure) {
+                    if (primary == null) throw failure;
+                    primary.addSuppressed(failure);
+                }
+            }
+        });
+        await("Actual Snapshot resource closure", () -> closing.managedResourcesDrained() && closing.preparationTerminated(), 5_000);
+        censor = null;
+    }
+
+    private void retireFeedbackFixture() {
+        if (fixtureComponent == null) return;
+        FixtureServiceConnection.Lease<BoundCensorFixtureService> closing = fixtureLease != null
+                ? fixtureLease : BoundCensorFixtureService.CONNECTIONS.currentLease();
+        List<FixtureServiceConnection.Lease<BoundCensorFixtureService>> targets =
+                BoundCensorFixtureService.CONNECTIONS.closureTargets(closing);
+        for (FixtureServiceConnection.Lease<BoundCensorFixtureService> lease : targets) {
+            assertEquals(android.os.Process.myPid(), lease.service.boundPid);
+            assertNull("Feedback fixture must not create a capture controller", lease.service.controller);
+            if (!lease.completedSuccessfully()) instrumentation.runOnMainSync(lease.service::disableSelf);
+        }
+        await("Exact fixture lifecycle and protocol retirement", () -> {
+            for (FixtureServiceConnection.Lease<BoundCensorFixtureService> lease : targets) {
+                assertNull(lease.failure);
+                if (!lease.completedSuccessfully() || lease.service.getServiceInfo() != null) return false;
+            }
+            return BoundCensorFixtureService.CONNECTIONS.currentLease() == null && BoundCensorFixtureService.current == null;
+        }, 5_000);
     }
 
     @Test public void fullDisplaySourceCrossesUidAndRetainsBorrowUntilFenceReturns() throws Exception {

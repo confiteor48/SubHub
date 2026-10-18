@@ -126,6 +126,9 @@ public final class ProjectionCaptureFixtureService extends Service {
         public void release() { release.countDown(); }
     }
 
+    /** Debug observer borrows the copied bitmap synchronously; no Image/Bitmap may escape. */
+    interface CopiedObserver { void copied(Sample sample, Bitmap pixels); }
+
     @androidx.annotation.RequiresApi(34)
     public final class Session {
         final String runId;
@@ -138,6 +141,9 @@ public final class ProjectionCaptureFixtureService extends Service {
         volatile CensorEngine.ActiveScope scope;
         volatile Sample sample, firstSample;
         volatile Witness witness;
+        volatile SceneEngine.Region syntheticMask;
+        volatile Runnable presentationChanged = () -> { };
+        volatile CopiedObserver copiedObserver;
         volatile String rawObservation, copyRefusal;
         volatile long copyStartedAt = -1, copyReturnedAt = -1;
         volatile int requests, dispatches;
@@ -184,6 +190,8 @@ public final class ProjectionCaptureFixtureService extends Service {
                 } finally { copyReturnedAt = SystemClock.uptimeMillis(); }
                 try {
                     Sample observed = new Sample(copied, raw.raw(), attempt, copyStartedAt, copyReturnedAt, witness);
+                    CopiedObserver probe = copiedObserver;
+                    if (probe != null) probe.copied(observed, copied.pixels.bitmap);
                     if (firstSample == null) firstSample = observed;
                     sample = observed;
                 }
@@ -200,12 +208,20 @@ public final class ProjectionCaptureFixtureService extends Service {
                         return () -> main.removeCallbacks(due);
                     }, adapter,
                     Collections.singletonList(new CensorEngine.LaneWorker<>(SceneEngine.Lane.FAST, Runnable::run,
-                            (input, completion) -> { delivered++; completion.cancelled(); })),
+                            (input, completion) -> {
+                                delivered++;
+                                SceneEngine.Region region = syntheticMask;
+                                if (region == null) completion.cancelled();
+                                else completion.success(new SceneEngine.Batch(input.source, SceneEngine.Lane.FAST,
+                                        Collections.singletonList(new SceneEngine.Observation("FIXTURE", 1, 0, region, .99f)),
+                                        Collections.emptyList()), new CensorEngine.WorkTiming(0, 0, 0));
+                            })),
                     Runnable::run, new CensorEngine.Observer() {
                         @Override public void trace(CensorEngine.Trace trace) {
                             if (trace.stage == CensorEngine.Stage.CAPTURE_REQUESTED) requests++;
                             if (trace.stage == CensorEngine.Stage.CAPTURE_DISPATCHED) dispatches++;
                         }
+                        @Override public void presentationChanged() { presentationChanged.run(); }
                         @Override public void drained() { engineDrained = true; }
                     });
             engine.start(1, ProtectionScope.lab(1));
