@@ -29,6 +29,30 @@ import org.junit.Test;
 /** Real Bitmap/ImageReader controls, not MediaProjection consent, display-origin or performance proof. */
 @SdkSuppress(minSdkVersion = 33)
 public class ProjectionImageCopierAndroidTest {
+    @Test public void nativeAlphaTemporariesAreIncludedInTheAcceptedWorkingBudget() {
+        withImage(64, false, read -> {
+            int packed = 64 * 2 * 4;
+            assertThrows(IllegalArgumentException.class,
+                    () -> new ProjectionImageCopier(65536, packed).copy(geometry(64), read));
+            CensorEngine.Captured<PixelFrame> copied = new ProjectionImageCopier(65536, packed * 3L).copy(geometry(64), read);
+            try { assertEquals(Color.RED, copied.pixels.bitmap.getPixel(0, 0)); }
+            finally { copied.close(); }
+        });
+    }
+
+    @Test public void everyReceivedAlphaPixelIncludingLastRowMustBeOpaque() {
+        for (int pixel = 0; pixel < 6; pixel++) {
+            int selected = pixel;
+            withWrittenImage(DataSpace.DATASPACE_SRGB, selected, read -> {
+                Image image = read.raw(); Image.Plane plane = image.getPlanes()[0];
+                assertEquals(DataSpace.DATASPACE_SRGB, image.getDataSpace());
+                int at = plane.getBuffer().position() + (selected / 3) * plane.getRowStride() + (selected % 3) * plane.getPixelStride() + 3;
+                assertEquals("actual received alpha", 127, plane.getBuffer().get(at) & 255);
+                assertThrows(IllegalArgumentException.class, () -> new ProjectionImageCopier(65536, 131072).copy(geometry(3), read));
+            });
+        }
+    }
+
     @Test public void nativeRowsPreserveRgbMetadataAndSourceBufferState() {
         for (int width : new int[] {3, 64}) withImage(width, false, read -> {
             Image image = read.raw(); ByteBuffer input = image.getPlanes()[0].getBuffer();
@@ -102,6 +126,10 @@ public class ProjectionImageCopierAndroidTest {
     private static PixelGeometry geometry(int width) { return PixelGeometry.display(width, 2, width, 2); }
 
     private static void withWrittenImage(int space, Consumer<ProjectionFrameMailbox<Image>.Read> action) {
+        withWrittenImage(space, -1, action);
+    }
+
+    private static void withWrittenImage(int space, int nonopaquePixel, Consumer<ProjectionFrameMailbox<Image>.Read> action) {
         // SurfaceImage overrides the getter but inherits Image's setter with a different backing field.
         // Set metadata on the actual producer instead, then verify the acquired image before copying.
         ImageReader reader = new ImageReader.Builder(3, 2).setMaxImages(4)
@@ -124,7 +152,8 @@ public class ProjectionImageCopierAndroidTest {
                 for (int x = 0; x < 3; x++) {
                     int pixel = origin + y * plane.getRowStride() + x * plane.getPixelStride();
                     pixels.put(pixel, (byte) 255); pixels.put(pixel + 1, (byte) 0);
-                    pixels.put(pixel + 2, (byte) 0); pixels.put(pixel + 3, (byte) 255);
+                    pixels.put(pixel + 2, (byte) 0);
+                    pixels.put(pixel + 3, (byte) (y * 3 + x == nonopaquePixel ? 127 : 255));
                 }
             }
             writable.setDataSpace(space);
