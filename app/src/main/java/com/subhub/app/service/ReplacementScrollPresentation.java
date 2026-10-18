@@ -81,11 +81,11 @@ public final class ReplacementScrollPresentation {
     private final Map<Long, Surface> surfaces = new LinkedHashMap<>();
     private long geometry = -1, generation = -1, revision;
     private int window = -1;
-    private boolean nativeSpline;
+    private boolean nativePackage;
     private float density = 1, friction = .015f;
 
     public synchronized void reset(long geometry, int window) {
-        this.geometry = geometry; this.window = window; generation = -1; nativeSpline = false;
+        this.geometry = geometry; this.window = window; generation = -1; nativePackage = false;
         origins.clear(); producers.clear(); surfaces.clear();
         revision++;
     }
@@ -124,15 +124,13 @@ public final class ReplacementScrollPresentation {
         if (!beforeAdmission || evicted) revision++;
     }
 
-    public synchronized void nativeStrategy(String packageName, CharSequence className, float density,
-            float friction, long now) {
-        boolean enabled = NativeScrollCurvePolicy.supports(packageName, className);
-        if (!Float.isFinite(density) || density <= 0 || !Float.isFinite(friction) || friction <= 0) return;
+    /** Scope configuration, never an unvalidated callback hint or a mode switch for other owners. */
+    public synchronized void configureNativeContext(String packageName, float density, float friction) {
+        if (!surfaces.isEmpty()) throw new IllegalStateException("Native context requires a fresh scope");
+        if (!Float.isFinite(density) || density <= 0 || !Float.isFinite(friction) || friction <= 0)
+            throw new IllegalArgumentException("Native curve configuration");
         this.density = density; this.friction = friction;
-        if (nativeSpline == enabled) return;
-        nativeSpline = enabled;
-        for (Surface surface : surfaces.values()) surface.motion.setNativeSpline(enabled, density, friction, now);
-        revision++;
+        nativePackage = NativeScrollCurvePolicy.supports(packageName, "androidx.recyclerview.widget.RecyclerView");
     }
 
     public synchronized boolean observe(ScrollMotionLedger.Receipt receipt) {
@@ -171,7 +169,8 @@ public final class ReplacementScrollPresentation {
         }
         if (surface == null) {
             if (surfaces.size() >= MAXIMUM_OWNERS) return false;
-            surface = new Surface(sample.reportedViewport, nativeSpline, density, friction, receipt.admittedAtMillis);
+            surface = new Surface(sample.reportedViewport, nativePackage && sample.ownerKind == ScrollMotionLedger.OwnerKind.RECYCLER_VIEW,
+                    density, friction, receipt.admittedAtMillis);
             surfaces.put(sample.owner, surface);
         }
         if (!surface.history.isEmpty() && sample.sourceAtMillis < surface.history.getLast().at) {
@@ -191,6 +190,10 @@ public final class ReplacementScrollPresentation {
                 sample.sourceAtMillis, sample.receivedAtMillis);
         if (absolute) surface.trustedProducer = sample.producer;
         if (duplicate) return false;
+        // Only this admitted owner's validated provider kind selects its trajectory. Existing
+        // setNativeSpline preserves the current displayed position on a genuine kind change.
+        surface.motion.setNativeSpline(nativePackage && sample.ownerKind == ScrollMotionLedger.OwnerKind.RECYCLER_VIEW,
+                density, friction, receipt.admittedAtMillis);
         if (dx != null) surface.x -= dx;
         if (dy != null) surface.y -= dy;
         surface.motion.addReportedDelta(dx == null ? null : -dx.floatValue(), dy == null ? null : -dy.floatValue(),

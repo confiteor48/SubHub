@@ -16,6 +16,15 @@ public final class ScrollMotionLedger implements AutoCloseable {
     public enum Refusal { NONE, SCOPE, CLOCK, OWNER, CAPACITY, ORDER, CONFLICT, OVERFLOW,
         INVALID_COORDINATE, EXPLICIT_GAP, SOURCE, HISTORY, UNKNOWN_AXIS, CLOSED }
 
+    /** Advisory provider class only, not proof that an image member moves with this owner. */
+    public enum OwnerKind {
+        UNKNOWN, RECYCLER_VIEW, OTHER;
+        public static OwnerKind fromProviderClass(CharSequence name) {
+            if (name == null || name.length() == 0) return UNKNOWN;
+            return "androidx.recyclerview.widget.RecyclerView".contentEquals(name) ? RECYCLER_VIEW : OTHER;
+        }
+    }
+
     public static final class Scope {
         public final long epoch, geometry;
         public final int windowId;
@@ -76,16 +85,25 @@ public final class ScrollMotionLedger implements AutoCloseable {
         public final long owner, producer, sourceAtMillis, receivedAtMillis, readStartedAtMillis, readFinishedAtMillis;
         public final Coordinate x, y;
         public final SceneEngine.Region reportedViewport;
+        public final OwnerKind ownerKind;
 
         public Sample(Scope scope, long deliveryIdentity, long owner, long producer, long sourceAtMillis, long receivedAtMillis,
                 long readStartedAtMillis, long readFinishedAtMillis, Coordinate x, Coordinate y,
                 SceneEngine.Region reportedViewport) {
+            this(scope, deliveryIdentity, owner, producer, sourceAtMillis, receivedAtMillis,
+                    readStartedAtMillis, readFinishedAtMillis, x, y, reportedViewport, OwnerKind.UNKNOWN);
+        }
+
+        public Sample(Scope scope, long deliveryIdentity, long owner, long producer, long sourceAtMillis, long receivedAtMillis,
+                long readStartedAtMillis, long readFinishedAtMillis, Coordinate x, Coordinate y,
+                SceneEngine.Region reportedViewport, OwnerKind ownerKind) {
             this.scope = Objects.requireNonNull(scope); this.deliveryIdentity = deliveryIdentity;
             this.owner = owner; this.producer = producer;
             this.sourceAtMillis = sourceAtMillis; this.receivedAtMillis = receivedAtMillis;
             this.readStartedAtMillis = readStartedAtMillis; this.readFinishedAtMillis = readFinishedAtMillis;
             this.x = Objects.requireNonNull(x); this.y = Objects.requireNonNull(y);
             this.reportedViewport = reportedViewport;
+            this.ownerKind = Objects.requireNonNull(ownerKind);
         }
 
         private boolean clocksValid(long admittedAt) {
@@ -99,6 +117,7 @@ public final class ScrollMotionLedger implements AutoCloseable {
                     && owner == other.owner && producer == other.producer
                     && sourceAtMillis == other.sourceAtMillis && receivedAtMillis == other.receivedAtMillis
                     && readStartedAtMillis == other.readStartedAtMillis && readFinishedAtMillis == other.readFinishedAtMillis
+                    && ownerKind == other.ownerKind
                     && x.same(other.x) && y.same(other.y) && sameViewport(reportedViewport, other.reportedViewport);
         }
 

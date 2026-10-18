@@ -56,8 +56,12 @@ public final class AccessibilityScrollReader implements AutoCloseable {
             y = ScrollMotionLedger.Coordinate.accessibility(event.getScrollY(), event.getMaxScrollY(), event.getScrollDeltaY());
         }
         ScrollMotionLedger.Sample sample(long owner, long producer, long started, long finished, SceneEngine.Region viewport) {
+            return sample(owner, producer, started, finished, viewport, ScrollMotionLedger.OwnerKind.UNKNOWN);
+        }
+        ScrollMotionLedger.Sample sample(long owner, long producer, long started, long finished, SceneEngine.Region viewport,
+                ScrollMotionLedger.OwnerKind ownerKind) {
             return new ScrollMotionLedger.Sample(scope, identity, owner, producer, sourceTime, receiptTime,
-                    started, finished, x, y, viewport);
+                    started, finished, x, y, viewport, ownerKind);
         }
     }
     private static final class Identity {
@@ -181,6 +185,7 @@ public final class AccessibilityScrollReader implements AutoCloseable {
         IdentityHashMap<AccessibilityNodeInfo, Boolean> distinct = new IdentityHashMap<>();
         long producer = 0, owner = 0;
         SceneEngine.Region viewport = null;
+        ScrollMotionLedger.OwnerKind ownerKind = ScrollMotionLedger.OwnerKind.UNKNOWN;
         boolean invalid = false;
         try {
             if (identityScope == null || !identityScope.same(pending.scope)) {
@@ -201,6 +206,7 @@ public final class AccessibilityScrollReader implements AutoCloseable {
                     owner = intern(node, pending.identity);
                     Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
                     if (!bounds.isEmpty()) viewport = new SceneEngine.Region(bounds.left, bounds.top, bounds.right, bounds.bottom);
+                    ownerKind = ScrollMotionLedger.OwnerKind.fromProviderClass(node.getClassName());
                     break;
                 }
                 if (hop == MAXIMUM_PARENT_HOPS) break;
@@ -216,7 +222,7 @@ public final class AccessibilityScrollReader implements AutoCloseable {
         long finished = SystemClock.uptimeMillis();
         if (!eligible(pending, lease) || cleanupFailed.get()) { lease.release(); return; }
         ScrollMotionLedger.Sample sample = pending.sample(invalid ? 0 : owner, invalid ? 0 : producer,
-                started, finished, invalid ? null : viewport);
+                started, finished, invalid ? null : viewport, invalid ? ScrollMotionLedger.OwnerKind.UNKNOWN : ownerKind);
         postOwned(pending, lease, sample, false);
     }
 

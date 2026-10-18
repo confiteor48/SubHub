@@ -146,6 +146,52 @@ public final class AccessibilityScrollReaderAndroidTest {
         }
     }
 
+    @Test public void validatedOwnerKindIgnoresDifferentAndSpoofedFrameworkEventLabels() throws Exception {
+        createReader();
+        JSONArray rows = new JSONArray();
+        for (int index = 0; index < 2; index++) {
+            final int selected = index;
+            final int y = (index + 1) * 50;
+            Bundle command = new Bundle(); command.putInt("scrollToY", y);
+            command.putBoolean("motionOwnerRecyclerLabel", index == 0);
+            command.putBoolean("motionEventRecyclerLabel", index == 1);
+            AccessibilityEvent event = ui.executeAndWaitForEvent(() -> target(command), candidate ->
+                    candidate.getEventType() == AccessibilityEvent.TYPE_VIEW_SCROLLED
+                            && "com.subhub.app.test".contentEquals(candidate.getPackageName())
+                            && candidate.getWindowId() == scope.windowId && candidate.getScrollY() == y, 6000);
+            try {
+                String eventClass = index == 0 ? "android.widget.ScrollView" : "androidx.recyclerview.widget.RecyclerView";
+                String ownerClass = index == 0 ? "androidx.recyclerview.widget.RecyclerView" : "android.widget.ScrollView";
+                assertEquals("Literal framework callback label", eventClass, event.getClassName().toString());
+                AccessibilityNodeInfo source = event.getSource(0); assertNotNull(source);
+                try {
+                    assertTrue("Actual nearest owner is this fixture source", source.isScrollable());
+                    assertEquals(scope.windowId, source.getWindowId());
+                    assertEquals("Actual provider label differs from event", ownerClass, source.getClassName().toString());
+                } finally { source.recycle(); }
+                instrumentation.runOnMainSync(() -> reader.offer(event, scope, "com.subhub.app.test"));
+                await("Copied validated owner-kind delivery", () -> samples.size() == selected + 1);
+                ScrollMotionLedger.Sample sample = samples.get(index);
+                ScrollMotionLedger.OwnerKind expected = index == 0 ? ScrollMotionLedger.OwnerKind.RECYCLER_VIEW : ScrollMotionLedger.OwnerKind.OTHER;
+                assertEquals(expected, sample.ownerKind); assertTrue(sample.owner > 0); assertEquals(sample.owner, sample.producer);
+                JSONObject row = new JSONObject(); row.put("eventClass", eventClass); row.put("providerClass", ownerClass);
+                row.put("ownerKind", sample.ownerKind.name()); row.put("delivery", sample.deliveryIdentity);
+                row.put("owner", sample.owner); row.put("producer", sample.producer); row.put("window", sample.scope.windowId);
+                row.put("sourceAt", sample.sourceAtMillis); row.put("receivedAt", sample.receivedAtMillis);
+                row.put("readStartedAt", sample.readStartedAtMillis); row.put("readFinishedAt", sample.readFinishedAtMillis);
+                row.put("y", sample.y.absolute); rows.put(row);
+                save("owner-kind-" + index + ".json", row.toString(2).getBytes(StandardCharsets.UTF_8));
+            } finally { event.recycle(); }
+        }
+        assertEquals("Provider identity survives a genuine class-label change", samples.get(0).owner, samples.get(1).owner);
+        assertEquals(2, reads.get()); assertTrue(gaps.isEmpty()); assertFalse(resourceFailure.get());
+        JSONObject proof = new JSONObject(); proof.put("schemaVersion", 1); proof.put("rows", rows);
+        proof.put("syntheticProviderLabels", true); proof.put("actualXImplementationTested", false);
+        proof.put("physicalAcceptance", false); proof.put("curvePhysicsChanged", false);
+        save("owner-kind-proof.json", proof.toString(2).getBytes(StandardCharsets.UTF_8));
+        nativeAssertionPassed = true;
+    }
+
     @Test public void frameworkEventsUseIndependentProducersAndNeverGrantViewportMemberSupport() throws Exception {
         createReader(); offerScroll("scrollToY", 50); offerScroll("scrollToY", 100);
         offerScroll("independentScrollToY", 60); offerScroll("independentScrollToY", 100);

@@ -17,13 +17,14 @@ public final class ReplacementScrollPresentationTest {
     private final ReplacementScrollPresentation presentation = new ReplacementScrollPresentation();
     private final ScrollMotionLedger ledger = new ScrollMotionLedger(64, 16, 256);
     private long delivery;
+    private ScrollMotionLedger.OwnerKind ownerKind = ScrollMotionLedger.OwnerKind.UNKNOWN;
 
     public ReplacementScrollPresentationTest() { presentation.reset(42, 7); ledger.reset(SCOPE); }
     private void captured(long request, long time) { presentation.captured(1, 42, request, time, time + 10); }
     private ScrollMotionLedger.Receipt event(long producer, long owner, long time, long arrival,
             ScrollMotionLedger.Coordinate x, ScrollMotionLedger.Coordinate y, SceneEngine.Region bounds) {
         ScrollMotionLedger.Sample sample = new ScrollMotionLedger.Sample(SCOPE, ++delivery, owner, producer,
-                time, arrival, arrival + 1, arrival + 2, x, y, bounds);
+                time, arrival, arrival + 1, arrival + 2, x, y, bounds, ownerKind);
         ScrollMotionLedger.Receipt receipt = ledger.observe(sample, arrival + 3);
         presentation.observe(receipt); return receipt;
     }
@@ -75,8 +76,8 @@ public final class ReplacementScrollPresentationTest {
     @Test public void eightSecondFastPauseReverseSweepKeepsEveryFreshOriginStable() {
         for (boolean nativeX : new boolean[]{false, true}) {
             presentation.reset(42, 7); ledger.reset(SCOPE); delivery = 0;
-            presentation.nativeStrategy(nativeX ? "com.twitter.android" : "org.chromium.chrome.stable",
-                    "androidx.recyclerview.widget.RecyclerView", 1, .015f, 1000);
+            presentation.configureNativeContext(nativeX ? "com.twitter.android" : "org.chromium.chrome.stable", 1, .015f);
+            ownerKind = ScrollMotionLedger.OwnerKind.RECYCLER_VIEW;
             long nextEvent = 1000;
             for (int frame = 1; frame <= 24; frame++) {
                 long sourceAt = 1025 + frame * 350;
@@ -192,8 +193,8 @@ public final class ReplacementScrollPresentationTest {
     @Test public void preparingUnusedOriginCannotInvalidateUnchangedExistingPaint() {
         for (boolean nativeCurve : new boolean[]{false, true}) {
             presentation.reset(42, 7); ledger.reset(SCOPE); delivery = 0;
-            presentation.nativeStrategy(nativeCurve ? "com.twitter.android" : "org.chromium.chrome.stable",
-                    "androidx.recyclerview.widget.RecyclerView", 1, .015f, 1000);
+            presentation.configureNativeContext(nativeCurve ? "com.twitter.android" : "org.chromium.chrome.stable", 1, .015f);
+            ownerKind = ScrollMotionLedger.OwnerKind.RECYCLER_VIEW;
             captured(1, 1050); position(1000, 0); position(1100, 100); position(1200, 200);
             double oldPose = top(1, 1216); long oldRevision = presentation.revision();
             boolean oldAnimation = presentation.isAnimating(1216);

@@ -258,6 +258,7 @@ public final class AccessibilityCensorController implements AutoCloseable {
         appearanceGeneration++;
         transition = next; configuration = selected; active = true; contentGeneration.incrementAndGet();
         scrollPresentation.reset(selected.token, selected.window.id);
+        scrollPresentation.configureNativeContext(selected.window.packageName, displayDensity, ViewConfiguration.getScrollFriction());
         if (Build.VERSION.SDK_INT >= 33 && scrollReader != null) scrollReader.invalidate();
         try {
             surface.presentationAllowed(false);
@@ -389,8 +390,6 @@ public final class AccessibilityCensorController implements AutoCloseable {
         Configuration value = configuration;
         ScrollMotionLedger.Scope scope = host.scrollScope();
         if (Build.VERSION.SDK_INT >= 33 && scrollReader != null && value != null && scrollCurrent(scope)) {
-            scrollPresentation.nativeStrategy(value.window.packageName, event.getClassName(), displayDensity,
-                    ViewConfiguration.getScrollFriction(), SystemClock.uptimeMillis());
             scrollReader.offer(event, scope, value.window.packageName);
         }
     }

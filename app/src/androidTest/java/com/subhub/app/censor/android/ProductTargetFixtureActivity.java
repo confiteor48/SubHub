@@ -24,6 +24,7 @@ public final class ProductTargetFixtureActivity extends Activity {
     private TextView fixedLabel;
     private TextView addedLabel;
     private boolean compoundMotionScroll;
+    private boolean motionOwnerRecyclerLabel, motionEventRecyclerLabel;
     private long motionFrameCommit;
     private long nativeCommand;
     private long nativeMutation;
@@ -38,6 +39,11 @@ public final class ProductTargetFixtureActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); apply(intent); }
     private void apply(Intent intent) {
         if (intent.getBooleanExtra("finish", false)) { finish(); return; }
+        if (intent.hasExtra("motionOwnerRecyclerLabel")) {
+            motionOwnerRecyclerLabel = intent.getBooleanExtra("motionOwnerRecyclerLabel", false);
+            if (scroll != null) scroll.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+        }
+        if (intent.hasExtra("motionEventRecyclerLabel")) motionEventRecyclerLabel = intent.getBooleanExtra("motionEventRecyclerLabel", false);
         if (intent.getBooleanExtra("motionFixture", false) && !motionFixture) createMotionFixture();
         if (intent.getBooleanExtra("nativeScrollFixture", false) && !nativeScrollFixture) createNativeScrollFixture();
         if (intent.getBooleanExtra("scrollFixture", false) && scroll == null) {
@@ -150,8 +156,15 @@ public final class ProductTargetFixtureActivity extends Activity {
         motionMedia = fixtureBox(android.R.id.summary, "local-media", 0xff2460df);
         content.addView(motionMedia, boxParams(width / 2, 650, box));
         scroll = new android.widget.ScrollView(this) {
+            @Override public void onInitializeAccessibilityNodeInfo(android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(info);
+                // A declared provider-label fixture, not an actual X/AndroidX implementation.
+                if (motionOwnerRecyclerLabel) info.setClassName("androidx.recyclerview.widget.RecyclerView");
+            }
             @Override public void onInitializeAccessibilityEvent(android.view.accessibility.AccessibilityEvent event) {
                 super.onInitializeAccessibilityEvent(event);
+                if (motionEventRecyclerLabel && event.getEventType() == android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED)
+                    event.setClassName("androidx.recyclerview.widget.RecyclerView");
                 if (compoundMotionScroll && event.getEventType() == android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED) {
                     // The framework event is mutable here, before its cross-process sealed delivery.
                     event.appendRecord(android.view.accessibility.AccessibilityRecord.obtain());

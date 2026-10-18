@@ -16,6 +16,8 @@ SCROLL = {'schemaVersion', 'clockDomain', 'connection', 'epoch', 'geometry', 'wi
           'delivery', 'owner', 'producer', 'sourceAtMillis', 'receivedAtMillis', 'readStartedAtMillis', 'readFinishedAtMillis',
           'admittedAtMillis', 'admission', 'refusal', 'generation', 'producerCount', 'intervalCount', 'x', 'y',
           'reportedViewport', 'pixelPhaseKnown', 'memberApplicabilityKnown', 'physicalErrorKnown'}
+SCROLL_V2 = SCROLL | {'ownerKind'}
+SCROLL_OWNER_KINDS = ('UNKNOWN', 'RECYCLER_VIEW', 'OTHER')
 AXIS = {'valid', 'absoluteKnown', 'absolute', 'deltaKnown', 'delta'}
 NATIVE = {'schemaVersion', 'clockDomain', 'connection', 'epoch', 'sequence', 'request', 'queuedAtMillis', 'startedAtMillis',
           'readStartedAtMillis', 'readFinishedAtMillis', 'receivedAtMillis', 'maximumAgeMillis', 'coverage', 'scanGeneration',
@@ -169,8 +171,11 @@ def integer(value, minimum=0):
 
 
 def scroll_row(row, observed_at):
-    if set(row) != SCROLL or type(row['admission']) is not str or type(row['refusal']) is not str or row['admission'] not in ADMISSIONS or row['refusal'] not in REFUSALS:
+    expected = SCROLL_V2 if row['schemaVersion'] == 2 else SCROLL
+    if set(row) != expected or type(row['admission']) is not str or type(row['refusal']) is not str or row['admission'] not in ADMISSIONS or row['refusal'] not in REFUSALS:
         raise ValueError('Unknown/incomplete scroll receipt')
+    if row['schemaVersion'] == 2 and (type(row['ownerKind']) is not str or row['ownerKind'] not in SCROLL_OWNER_KINDS):
+        raise ValueError('Unknown scroll owner kind')
     for key in ('epoch', 'delivery', 'owner', 'producer', 'admittedAtMillis', 'generation', 'producerCount', 'intervalCount'):
         integer(row[key])
     integer(row['geometry'], -2**63)
@@ -324,7 +329,7 @@ def analyze(records, expected_events=None, dropped_events=None):
         if not separator or prefix not in ('REPLACEMENT_TRACE', 'REPLACEMENT_POST', 'REPLACEMENT_SCROLL', 'REPLACEMENT_NATIVE', 'REPLACEMENT_NATIVE_COST_START', 'REPLACEMENT_NATIVE_COST'):
             raise ValueError('Unknown selected replacement record')
         row = decode(payload)
-        versions=(1,2,3,4) if prefix in ('REPLACEMENT_NATIVE_COST_START','REPLACEMENT_NATIVE_COST','REPLACEMENT_NATIVE') else (1,)
+        versions=(1,2,3,4) if prefix in ('REPLACEMENT_NATIVE_COST_START','REPLACEMENT_NATIVE_COST','REPLACEMENT_NATIVE') else ((1,2) if prefix == 'REPLACEMENT_SCROLL' else (1,))
         if type(row) is not dict or row.get('schemaVersion') not in versions or type(row['schemaVersion']) is not int or row.get('clockDomain') != 'UPTIME_MILLIS':
             raise ValueError('Unsupported replacement schema/clock')
         integer(row.get('connection'), 1)
@@ -405,6 +410,9 @@ def analyze(records, expected_events=None, dropped_events=None):
         nativeCandidates=sum(row['candidateCount'] for row in natives),
         scrollAdmissions=dict(Counter(row['admission'] for row in scrolls)),
         scrollRefusals=dict(Counter(row['refusal'] for row in scrolls)),
+        scrollOwnerKinds=dict(Counter(row['ownerKind'] for row in scrolls if row['schemaVersion'] == 2)),
+        missingScrollOwnerKindRows=sum(row['schemaVersion'] == 1 for row in scrolls),
+        scrollOwnerKindProvenanceComplete=bool(scrolls) and all(row['schemaVersion'] == 2 for row in scrolls),
         unknownScrollAxisRows=sum(any(not row[axis]['absoluteKnown'] and not row[axis]['deltaKnown'] for axis in ('x', 'y')) for row in scrolls),
         missingScrollReadRows=sum(row['readStartedAtMillis'] == -1 and row['readFinishedAtMillis'] == -1 for row in scrolls),
         unknownPixelAgeRows=sum(row['pixelAgeMillis'] == -1 for row in traces),

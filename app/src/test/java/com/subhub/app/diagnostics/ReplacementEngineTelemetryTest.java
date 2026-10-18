@@ -148,6 +148,22 @@ public final class ReplacementEngineTelemetryTest {
         ledger.reset(new ScrollMotionLedger.Scope(2, 3, 4, ProtectionScope.normal(7))); return ledger;
     }
 
+    @Test public void scrollOwnerKindIsBoundedAdvisoryMetadataNotTheSelectedCurve() {
+        for (ScrollMotionLedger.OwnerKind kind : ScrollMotionLedger.OwnerKind.values()) {
+            try (ScrollMotionLedger ledger = scrollLedger()) {
+                ScrollMotionLedger.Sample sample = new ScrollMotionLedger.Sample(
+                        new ScrollMotionLedger.Scope(2, 3, 4, ProtectionScope.normal(7)), 1, 8, 9, 100, 101, 102, 102,
+                        ScrollMotionLedger.Coordinate.delta(0), ScrollMotionLedger.Coordinate.delta(0), null, kind);
+                String value = ReplacementEngineTelemetry.scroll(5, ledger.observe(sample, 103));
+                assertTrue(value.startsWith("REPLACEMENT_SCROLL {\"schemaVersion\":2,"));
+                assertTrue(value.contains("\"ownerKind\":\"" + kind.name() + "\""));
+                assertFalse(value.contains("androidx.")); assertFalse(value.contains("package"));
+                assertFalse(value.contains("className")); assertFalse(value.contains("selectedCurve"));
+                assertTrue(value.endsWith("\"pixelPhaseKnown\":false,\"memberApplicabilityKnown\":false,\"physicalErrorKnown\":false}"));
+            }
+        }
+    }
+
     @Test public void unknownScrollAxesStayNullRatherThanBecomingLiteralZero() {
         try (ScrollMotionLedger ledger = scrollLedger()) {
             String value = ReplacementEngineTelemetry.scroll(5, ledger.observe(scrollSample(1, 100, 102,
@@ -163,7 +179,7 @@ public final class ReplacementEngineTelemetryTest {
             String value = ReplacementEngineTelemetry.scroll(5, ledger.observe(scrollSample(1, 100, 102,
                     ScrollMotionLedger.Coordinate.delta(0), ScrollMotionLedger.Coordinate.absoluteAndDelta(100, -40),
                     new SceneEngine.Region(10, 20, 500, 800)), 103));
-            assertTrue(value.startsWith("REPLACEMENT_SCROLL {\"schemaVersion\":1,"));
+            assertTrue(value.startsWith("REPLACEMENT_SCROLL {\"schemaVersion\":2,"));
             assertTrue(value.contains("\"connection\":5,\"epoch\":2,\"geometry\":3,\"windowId\":4,\"protectionOrigin\":\"NORMAL\",\"tapScope\":7"));
             assertTrue(value.contains("\"delivery\":1,\"owner\":8,\"producer\":9"));
             assertTrue(value.contains("\"sourceAtMillis\":100,\"receivedAtMillis\":101,\"readStartedAtMillis\":102,\"readFinishedAtMillis\":102,\"admittedAtMillis\":103"));

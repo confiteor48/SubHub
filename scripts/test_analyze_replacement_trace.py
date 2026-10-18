@@ -412,6 +412,39 @@ class ReplacementTraceReaderTest(unittest.TestCase):
         self.assertEqual(result['scrollAdmissions'], {'BASELINE': 1})
         self.assertFalse(result['physicalMotionQualified'])
 
+    def test_scroll_owner_kinds_preserve_legacy_missing_separately_from_explicit_unknown(self):
+        rows = [self.altered_scroll(schemaVersion=2, ownerKind=kind)
+                for kind in ('UNKNOWN', 'RECYCLER_VIEW', 'OTHER')]
+        for sequence, row in enumerate(rows, 1): row['sequence'] = sequence
+        result = reader.analyze(rows, 3, 0)
+        self.assertEqual(result['scrollOwnerKinds'], {'UNKNOWN': 1, 'RECYCLER_VIEW': 1, 'OTHER': 1})
+        self.assertEqual(result['missingScrollOwnerKindRows'], 0)
+        self.assertTrue(result['scrollOwnerKindProvenanceComplete'])
+        self.assertEqual(result['rawSelectedPublications'], result['parsedSelectedPublications'])
+        legacy = self.scroll(); legacy['sequence'] = 4
+        mixed = reader.analyze(rows + [legacy], 4, 0)
+        self.assertEqual(mixed['scrollOwnerKinds'], result['scrollOwnerKinds'])
+        self.assertEqual(mixed['missingScrollOwnerKindRows'], 1)
+        self.assertFalse(mixed['scrollOwnerKindProvenanceComplete'])
+        self.assertFalse(mixed['physicalMotionQualified'])
+        self.assertFalse(reader.analyze([], 0, 0)['scrollOwnerKindProvenanceComplete'])
+
+    def test_scroll_owner_kind_schema_fields_and_enum_are_strict(self):
+        for changes in (dict(schemaVersion=2), dict(ownerKind='UNKNOWN'),
+                        dict(schemaVersion=2, ownerKind=None), dict(schemaVersion=2, ownerKind=1),
+                        dict(schemaVersion=2, ownerKind='androidx.recyclerview.widget.RecyclerView'),
+                        dict(schemaVersion=2, ownerKind='recycler_view'),
+                        dict(schemaVersion=3, ownerKind='UNKNOWN')):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                reader.analyze([self.altered_scroll(**changes)], 1, 0)
+
+    def test_scroll_schema_two_does_not_enable_other_record_schema_two(self):
+        for event in (self.row(), self.post()):
+            prefix, _, payload = event['message'].partition(' ')
+            body = reader.decode(payload); body['schemaVersion'] = 2
+            event['message'] = prefix + ' ' + json.dumps(body)
+            with self.assertRaises(ValueError): reader.analyze([event], 1, 0)
+
     def test_unknown_axis_is_distinct_from_literal_observed_zero(self):
         unknown = dict(valid=True, absoluteKnown=False, absolute=None, deltaKnown=False, delta=None)
         result = reader.analyze([self.altered_scroll(x=unknown)], 1, 0)
@@ -440,7 +473,7 @@ class ReplacementTraceReaderTest(unittest.TestCase):
             if change == 'extra': body['memberSupport'] = True
             elif change == 'missing': body.pop('producer')
             elif change == 'null': body['generation'] = None
-            else: body['schemaVersion'] = 2
+            else: body['schemaVersion'] = 3
             event['message'] = 'REPLACEMENT_SCROLL ' + json.dumps(body)
             with self.assertRaises(ValueError): reader.analyze([event], 1, 0)
 

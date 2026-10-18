@@ -92,11 +92,12 @@ public final class ReplacementEngineTelemetry {
         if (connection <= 0) throw new IllegalArgumentException("Replacement connection identity");
         ScrollMotionLedger.Sample sample = value.sample;
         SceneEngine.Region viewport = sample.reportedViewport;
-        return "REPLACEMENT_SCROLL {\"schemaVersion\":1,\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":"
+        return "REPLACEMENT_SCROLL {\"schemaVersion\":2,\"clockDomain\":\"UPTIME_MILLIS\",\"connection\":"
                 + connection + ",\"epoch\":" + sample.scope.epoch + ",\"geometry\":" + sample.scope.geometry
                 + ",\"windowId\":" + sample.scope.windowId + ",\"protectionOrigin\":\"" + sample.scope.protection.origin.name()
                 + "\",\"tapScope\":" + sample.scope.protection.tapScope + ",\"delivery\":" + sample.deliveryIdentity
                 + ",\"owner\":" + sample.owner + ",\"producer\":" + sample.producer
+                + ",\"ownerKind\":\"" + sample.ownerKind.name() + "\""
                 + ",\"sourceAtMillis\":" + sample.sourceAtMillis + ",\"receivedAtMillis\":" + sample.receivedAtMillis
                 + ",\"readStartedAtMillis\":" + sample.readStartedAtMillis + ",\"readFinishedAtMillis\":" + sample.readFinishedAtMillis
                 + ",\"admittedAtMillis\":" + value.admittedAtMillis + ",\"admission\":\"" + value.admission.name()
