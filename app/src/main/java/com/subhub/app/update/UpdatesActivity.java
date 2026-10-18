@@ -26,9 +26,11 @@ import com.subhub.app.security.ControllerPinManager;
 
 import java.io.File;
 import java.text.DateFormat;
+import java.time.ZoneId;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -87,9 +89,20 @@ public final class UpdatesActivity extends AppCompatActivity {
         binding.devUpdates.setOnCheckedChangeListener((button, checked) -> {
             if (changingAutomatic || !ControllerPinManager.isDomModeActive()) return;
             state.setDevUpdates(checked);
+            UpdateScheduler.synchronize(this, false);
             render();
             checkNow();
         });
+        render();
+    }
+
+    @Override protected void onRestoreInstanceState(Bundle savedInstanceState) {
+        changingAutomatic = true;
+        try {
+            super.onRestoreInstanceState(savedInstanceState);
+        } finally {
+            changingAutomatic = false;
+        }
         render();
     }
 
@@ -144,6 +157,8 @@ public final class UpdatesActivity extends AppCompatActivity {
                         DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT)
                                 .format(new Date(last))));
         boolean dom = ControllerPinManager.isDomModeActive();
+        binding.automaticChecks.setText(state.devUpdates()
+                ? R.string.update_automatic_dev_toggle : R.string.update_automatic_toggle);
         binding.automaticChecks.setEnabled(dom);
         binding.devUpdates.setEnabled(dom && !checking);
         binding.automaticHelp.setText(dom
@@ -221,8 +236,11 @@ public final class UpdatesActivity extends AppCompatActivity {
         binding.releaseNotesCard.setVisibility(history.isEmpty() ? View.GONE : View.VISIBLE);
         if (history.isEmpty()) return;
         StringBuilder fingerprint = new StringBuilder();
+        fingerprint.append(getResources().getConfiguration().getLocales().toLanguageTags())
+                .append(':').append(ZoneId.systemDefault().getId()).append(';');
         for (ReleaseHistoryItem item : history) {
-            fingerprint.append(item.tag).append(':').append(item.notes.hashCode()).append(';');
+            fingerprint.append(item.tag).append(':').append(item.notes.hashCode())
+                    .append(':').append(item.publishedAt).append(':').append(item.prerelease).append(';');
         }
         String value = fingerprint.toString();
         if (value.equals(historyFingerprint)) return;
@@ -264,12 +282,15 @@ public final class UpdatesActivity extends AppCompatActivity {
         if (item.versionName.equals(BuildConfig.VERSION_NAME)) {
             return getString(R.string.update_history_installed);
         }
+        if (item.prerelease) {
+            Locale locale = getResources().getConfiguration().getLocales().get(0);
+            String timestamp = ReleaseTimestampFormatter.preview(item.publishedAt,
+                    locale == null ? Locale.getDefault() : locale, ZoneId.systemDefault());
+            return timestamp.isEmpty() ? getString(R.string.update_history_preview)
+                    : getString(R.string.update_history_preview_date, timestamp);
+        }
         String date = item.publishedAt.length() >= 10
                 ? item.publishedAt.substring(0, 10) : "";
-        if (item.prerelease && !date.isEmpty()) {
-            return getString(R.string.update_history_preview_date, date);
-        }
-        if (item.prerelease) return getString(R.string.update_history_preview);
         return date.isEmpty() ? getString(R.string.update_history_published) : date;
     }
 

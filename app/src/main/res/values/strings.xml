@@ -962,6 +962,7 @@
     <string name="update_install_permission">Allow SubHub to install its signed update, then return here.</string>
     <string name="update_automatic_title">Automatic Checks</string>
     <string name="update_automatic_toggle">Check every six hours</string>
+    <string name="update_automatic_dev_toggle">Check every 15 minutes</string>
     <string name="update_automatic_help">Downloads always wait for your approval.</string>
     <string name="update_dev_toggle">Dev updates</string>
     <string name="update_dev_help">Include development builds from GitHub. These may be less stable. Turning this off waits for a newer stable release; it does not downgrade your installed app.</string>

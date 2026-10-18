@@ -129,6 +129,19 @@ public final class GitHubReleaseRepositoryTest {
 
     @Test public void sixHourScheduleIsStable() {
         assertEquals(6L * 60L * 60L * 1000L, UpdateScheduler.INTERVAL_MILLIS);
+        assertEquals(UpdateScheduler.INTERVAL_MILLIS, UpdateScheduler.intervalMillis(false));
+    }
+
+    @Test public void developmentChannelUsesFifteenMinutesForPeriodicAndStaleChecks() {
+        long interval = 15L * 60L * 1000L;
+        assertEquals(interval, UpdateScheduler.intervalMillis(true));
+        long last = 1_800_000_000_000L;
+        assertFalse(UpdateScheduler.checkDue(last + interval - 1, last, true));
+        assertTrue(UpdateScheduler.checkDue(last + interval, last, true));
+        assertFalse(UpdateScheduler.checkDue(last + interval, last, false));
+        assertFalse(UpdateScheduler.checkDue(last + UpdateScheduler.INTERVAL_MILLIS - 1, last, false));
+        assertTrue(UpdateScheduler.checkDue(last + UpdateScheduler.INTERVAL_MILLIS, last, false));
+        assertFalse(UpdateScheduler.checkDue(last - 1, last, true));
     }
 
     @Test public void manifestChangelogWinsOverReleaseDownloadGuidance() throws Exception {
