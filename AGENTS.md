@@ -87,6 +87,10 @@ exports and shutdown observers, and reconcile actual closure separately.
 For keyboard regressions, check initial launch, activity recreation, and tap-to-edit
 separately. Android can restore an EditText's focus after `onCreate`, so a launch-only
 focus check does not verify recreated screens.
+Checked widget state can also be restored after `onCreate` and invoke change listeners.
+When preferences are authoritative, fence persistence, scheduling, and network side effects
+during framework view-state restoration, then render from those preferences. Native
+recreation regressions must cover both directions when saved widgets and stored values differ.
 Gate Android instrumentation tests that require newer platform APIs with
 `@SdkSuppress(minSdkVersion = ...)`, not `@RequiresApi`. The latter describes production
 API contracts rather than runtime test eligibility and fails Android lint's `UseSdkSuppress` check.
