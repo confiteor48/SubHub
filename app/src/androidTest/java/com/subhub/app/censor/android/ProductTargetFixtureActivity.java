@@ -14,6 +14,13 @@ public final class ProductTargetFixtureActivity extends Activity {
     public static final String NATIVE_SCROLL_Y = "com.subhub.app.test.nativeScrollY";
     public static final String NATIVE_ADDED = "com.subhub.app.test.nativeAdded";
     public static final String NATIVE_MUTATION = "com.subhub.app.test.nativeMutation";
+    public static final String VISUAL_COMMAND = "com.subhub.app.test.visualCommand";
+    public static final String VISUAL_FRAME = "com.subhub.app.test.visualFrame";
+    public static final String VISUAL_FRAME_AT = "com.subhub.app.test.visualFrameAt";
+    public static final String VISUAL_SHA = "com.subhub.app.test.visualSha";
+    public static final String VISUAL_BOUNDS = "com.subhub.app.test.visualBounds";
+    public static final String VISUAL_GEOMETRY = "com.subhub.app.test.visualGeometry";
+    private static final String POSITIVE_SHA = "88431cd9653ccd539741b555fb0a46b61558b301d4110412b5bc28b5e3ea6cb5";
     private TextView label;
     private FrameLayout root;
     private android.widget.ScrollView scroll;
@@ -28,17 +35,46 @@ public final class ProductTargetFixtureActivity extends Activity {
     private long motionFrameCommit;
     private long nativeCommand;
     private long nativeMutation;
+    private android.widget.ImageView visualImage;
+    private android.graphics.Bitmap visualBitmap;
+    private android.net.Uri visualUri;
+    private android.os.ResultReceiver visualRetirementReceiver;
+    private boolean visualStreamsClosed;
+    private final android.os.Handler safety = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable safetyFinish = this::finish;
+    private long visualCommand, visualFrame, visualFrameAt = -1;
+    private long visualDrawCount;
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state); getWindow().setWindowAnimations(0); overridePendingTransition(0, 0);
         root = new FrameLayout(this); root.setBackgroundColor(UNDERLYING);
         label = new TextView(this); label.setTextColor(0xff000000); label.setTextSize(20);
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(-2, -2); params.topMargin = 120; params.leftMargin = 48;
-        root.addView(label, params); setContentView(root); apply(getIntent());
-        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(this::finish, 60000);
+        root.addView(label, params); setContentView(root);
+        safety.postDelayed(safetyFinish, 60000); apply(getIntent());
     }
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); apply(intent); }
     private void apply(Intent intent) {
-        if (intent.getBooleanExtra("finish", false)) { finish(); return; }
+        if (intent.getBooleanExtra("finish", false)) {
+            if (visualUri != null && visualUri.toString().equals(intent.getStringExtra("visualRetireUri")) && visualStreamsClosed) {
+                visualRetirementReceiver = intent.getParcelableExtra("visualRetirementReceiver");
+            }
+            finish(); return;
+        }
+        if (intent.getBooleanExtra("positiveVisualFixture", false)) preparePositiveVisual(intent);
+        if (visualImage != null) {
+            if (intent.hasExtra("visualCommand")) visualCommand = intent.getLongExtra("visualCommand", 0);
+            if (visualCommand <= 0) throw new IllegalArgumentException("Positive fixture command");
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                long selected = visualCommand;
+                root.getViewTreeObserver().registerFrameCommitCallback(() -> {
+                    if (visualCommand != selected) return;
+                    visualFrame = selected; visualFrameAt = android.os.SystemClock.uptimeMillis();
+                    root.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+                });
+                root.invalidate();
+            }
+            return;
+        }
         if (intent.hasExtra("motionOwnerRecyclerLabel")) {
             motionOwnerRecyclerLabel = intent.getBooleanExtra("motionOwnerRecyclerLabel", false);
             if (scroll != null) scroll.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
@@ -102,6 +138,114 @@ public final class ProductTargetFixtureActivity extends Activity {
                 motionFrameCommit++; root.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
             });
             root.invalidate();
+        }
+    }
+
+    /** Only the fixed, bounded granted public fixture. This is never a product image loader. */
+    private void preparePositiveVisual(Intent intent) {
+        android.net.Uri uri = intent.getData();
+        if (uri == null || !"content".equals(uri.getScheme()) || !"com.subhub.app.updates".equals(uri.getAuthority())
+                || uri.getPath() == null || !uri.getPath().matches("/censor_lab_exports/visual-reentry-[a-f0-9]{32}\\.png")) {
+            throw new IllegalArgumentException("Narrow positive fixture grant required");
+        }
+        if (visualImage != null) {
+            if (!uri.equals(visualUri)) throw new IllegalArgumentException("Do not replace live fixture pixels");
+            return;
+        }
+        // The opt-in cohort has multiple independent bounded waits; keep its safety timer separate
+        // from ordinary fixture tests without refreshing it on each return command.
+        safety.removeCallbacks(safetyFinish); safety.postDelayed(safetyFinish, 180000);
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            int total = 0;
+            try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) throw new IllegalStateException("Missing fixture stream");
+                byte[] buffer = new byte[8192]; int count;
+                while ((count = input.read(buffer)) != -1) {
+                    total += count; if (total > 791555) throw new IllegalStateException("Oversized fixture");
+                    digest.update(buffer, 0, count);
+                }
+            }
+            if (total != 791555 || !POSITIVE_SHA.equals(hex(digest.digest()))) throw new IllegalStateException("Changed fixture bytes");
+            android.graphics.BitmapFactory.Options dimensions = new android.graphics.BitmapFactory.Options();
+            dimensions.inJustDecodeBounds = true;
+            try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                android.graphics.BitmapFactory.decodeStream(input, null, dimensions);
+            }
+            if (dimensions.outWidth != 512 || dimensions.outHeight != 512) throw new IllegalStateException("Fixture dimensions");
+            android.graphics.Bitmap decoded;
+            try (java.io.InputStream input = getContentResolver().openInputStream(uri)) {
+                decoded = android.graphics.BitmapFactory.decodeStream(input);
+            }
+            // All reads are synchronous on this main thread and every stream is closed here.
+            // Subsequent commands reuse decoded pixels; no background reader owns the URI.
+            visualStreamsClosed = true;
+            if (decoded == null || decoded.getWidth() != 512 || decoded.getHeight() != 512) throw new IllegalStateException("Fixture decode");
+            visualBitmap = decoded; visualUri = uri;
+            visualImage = new android.widget.ImageView(this) {
+                @Override protected void onDraw(android.graphics.Canvas canvas) { super.onDraw(canvas); visualDrawCount++; }
+            };
+            visualImage.setId(android.R.id.icon);
+            visualImage.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+            visualImage.setContentDescription("Positive visual fixture");
+            visualImage.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER); visualImage.setImageBitmap(decoded);
+            root.removeAllViews(); root.setId(android.R.id.custom); root.setBackgroundColor(android.graphics.Color.WHITE);
+            root.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+            root.setAccessibilityDelegate(new android.view.View.AccessibilityDelegate() {
+                @Override public void onInitializeAccessibilityNodeInfo(android.view.View host, android.view.accessibility.AccessibilityNodeInfo info) {
+                    super.onInitializeAccessibilityNodeInfo(host, info);
+                    info.getExtras().putLong(VISUAL_COMMAND, visualCommand);
+                    info.getExtras().putLong(VISUAL_FRAME, visualFrame);
+                    info.getExtras().putLong(VISUAL_FRAME_AT, visualFrameAt);
+                    info.getExtras().putString(VISUAL_SHA, POSITIVE_SHA);
+                    int[] screen = new int[2]; visualImage.getLocationOnScreen(screen);
+                    info.getExtras().putIntArray(VISUAL_BOUNDS,
+                            new int[]{screen[0], screen[1], screen[0] + visualImage.getWidth(), screen[1] + visualImage.getHeight()});
+                    android.graphics.drawable.Drawable drawable = visualImage.getDrawable();
+                    if (drawable != null) {
+                        android.graphics.Rect bounds = drawable.getBounds(); float[] matrix = new float[9];
+                        visualImage.getImageMatrix().getValues(matrix);
+                        android.os.Bundle geometry = new android.os.Bundle();
+                        geometry.putIntArray("bitmapSize", new int[]{visualBitmap.getWidth(), visualBitmap.getHeight()});
+                        geometry.putIntArray("viewOrigin", screen);
+                        geometry.putIntArray("viewSize", new int[]{visualImage.getWidth(), visualImage.getHeight()});
+                        geometry.putIntArray("padding", new int[]{visualImage.getPaddingLeft(), visualImage.getPaddingTop(),
+                                visualImage.getPaddingRight(), visualImage.getPaddingBottom()});
+                        geometry.putIntArray("drawableBounds", new int[]{bounds.left, bounds.top, bounds.right, bounds.bottom});
+                        geometry.putFloatArray("imageMatrix", matrix);
+                        geometry.putBoolean("attached", visualImage.isAttachedToWindow()); geometry.putBoolean("shown", visualImage.isShown());
+                        geometry.putBoolean("windowFocus", visualImage.hasWindowFocus());
+                        geometry.putFloat("viewAlpha", visualImage.getAlpha()); geometry.putFloat("rootAlpha", root.getAlpha());
+                        geometry.putLong("drawCount", visualDrawCount);
+                        geometry.putIntArray("viewScroll", new int[]{visualImage.getScrollX(), visualImage.getScrollY()});
+                        info.getExtras().putBundle(VISUAL_GEOMETRY, geometry);
+                    }
+                }
+            });
+            root.addView(visualImage, new FrameLayout.LayoutParams(-1, -1));
+        } catch (java.io.IOException | java.security.NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("Positive fixture preparation failed", failure);
+        }
+    }
+
+    private static String hex(byte[] digest) {
+        StringBuilder value = new StringBuilder();
+        for (byte item : digest) value.append(String.format(java.util.Locale.ROOT, "%02x", item & 255));
+        return value.toString();
+    }
+
+    @Override protected void onDestroy() {
+        safety.removeCallbacks(safetyFinish);
+        android.os.ResultReceiver acknowledgement = isFinishing() && visualStreamsClosed ? visualRetirementReceiver : null;
+        String retiredUri = visualUri == null ? null : visualUri.toString();
+        // Android owns the retired View/texture lifetime; never recycle pixels under a queued draw.
+        if (visualImage != null) visualImage.setImageDrawable(null);
+        visualImage = null; visualBitmap = null; visualUri = null;
+        super.onDestroy();
+        if (acknowledgement != null && retiredUri != null) {
+            android.os.Bundle data = new android.os.Bundle();
+            data.putString("retiredUri", retiredUri); data.putString("inputSha256", POSITIVE_SHA); data.putBoolean("streamsClosed", true);
+            acknowledgement.send(1, data);
         }
     }
 
