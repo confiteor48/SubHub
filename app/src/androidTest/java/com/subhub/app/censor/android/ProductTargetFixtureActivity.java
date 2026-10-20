@@ -20,6 +20,7 @@ public final class ProductTargetFixtureActivity extends Activity {
     public static final String VISUAL_SHA = "com.subhub.app.test.visualSha";
     public static final String VISUAL_BOUNDS = "com.subhub.app.test.visualBounds";
     public static final String VISUAL_GEOMETRY = "com.subhub.app.test.visualGeometry";
+    public static final String VISUAL_SCROLL = "com.subhub.app.test.visualScroll";
     private static final String POSITIVE_SHA = "88431cd9653ccd539741b555fb0a46b61558b301d4110412b5bc28b5e3ea6cb5";
     private TextView label;
     private FrameLayout root;
@@ -44,6 +45,9 @@ public final class ProductTargetFixtureActivity extends Activity {
     private final Runnable safetyFinish = this::finish;
     private long visualCommand, visualFrame, visualFrameAt = -1;
     private long visualDrawCount;
+    private android.widget.ScrollView visualScroll;
+    private final java.util.List<android.widget.ImageView> visualCopies = new java.util.ArrayList<>();
+    private PositivePhotoScrollMotion visualMotion;
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state); getWindow().setWindowAnimations(0); overridePendingTransition(0, 0);
         root = new FrameLayout(this); root.setBackgroundColor(UNDERLYING);
@@ -62,6 +66,10 @@ public final class ProductTargetFixtureActivity extends Activity {
         }
         if (intent.getBooleanExtra("positiveVisualFixture", false)) preparePositiveVisual(intent);
         if (visualImage != null) {
+            if (intent.getBooleanExtra("positiveScrollStart", false)) {
+                if (visualMotion == null) throw new IllegalStateException("Scroll target not selected");
+                visualMotion.start();
+            }
             if (intent.hasExtra("visualCommand")) visualCommand = intent.getLongExtra("visualCommand", 0);
             if (visualCommand <= 0) throw new IllegalArgumentException("Positive fixture command");
             if (android.os.Build.VERSION.SDK_INT >= 29) {
@@ -220,9 +228,44 @@ public final class ProductTargetFixtureActivity extends Activity {
                         geometry.putIntArray("viewScroll", new int[]{visualImage.getScrollX(), visualImage.getScrollY()});
                         info.getExtras().putBundle(VISUAL_GEOMETRY, geometry);
                     }
+                    if (visualMotion != null) info.getExtras().putBundle(VISUAL_SCROLL, visualMotion.snapshot());
                 }
             });
-            root.addView(visualImage, new FrameLayout.LayoutParams(-1, -1));
+            if (intent.getBooleanExtra("positiveVisualScrollFixture", false)) {
+                android.widget.LinearLayout content = new android.widget.LinearLayout(this);
+                content.setOrientation(android.widget.LinearLayout.VERTICAL);
+                visualCopies.add(visualImage);
+                for (int index = 1; index < 5; index++) {
+                    android.widget.ImageView image = new android.widget.ImageView(this);
+                    image.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+                    image.setImageBitmap(decoded);
+                    image.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+                    image.setContentDescription("Positive visual fixture copy");
+                    visualCopies.add(image);
+                }
+                for (android.widget.ImageView image : visualCopies)
+                    content.addView(image, new android.widget.LinearLayout.LayoutParams(-1, 1));
+                visualScroll = new android.widget.ScrollView(this) {
+                    @Override protected void onMeasure(int widthSpec, int heightSpec) {
+                        int height = android.view.View.MeasureSpec.getSize(heightSpec);
+                        if (height > 0) {
+                            for (android.widget.ImageView image : visualCopies) {
+                                android.view.ViewGroup.LayoutParams layout = image.getLayoutParams();
+                                if (layout.height != height) { layout.height = height; image.setLayoutParams(layout); }
+                            }
+                            content.setMinimumHeight(5 * height);
+                        }
+                        super.onMeasure(widthSpec, heightSpec);
+                    }
+                };
+                visualScroll.setId(android.R.id.list);
+                visualScroll.setPadding(0, 0, 0, 0);
+                visualScroll.setOverScrollMode(android.view.View.OVER_SCROLL_NEVER);
+                visualScroll.setVerticalScrollBarEnabled(false);
+                visualScroll.addView(content, new android.widget.ScrollView.LayoutParams(-1, -2));
+                visualMotion = new PositivePhotoScrollMotion(visualScroll);
+                root.addView(visualScroll, new FrameLayout.LayoutParams(-1, -1));
+            } else root.addView(visualImage, new FrameLayout.LayoutParams(-1, -1));
         } catch (java.io.IOException | java.security.NoSuchAlgorithmException failure) {
             throw new IllegalStateException("Positive fixture preparation failed", failure);
         }
@@ -236,10 +279,13 @@ public final class ProductTargetFixtureActivity extends Activity {
 
     @Override protected void onDestroy() {
         safety.removeCallbacks(safetyFinish);
+        if (visualMotion != null) visualMotion.close();
         android.os.ResultReceiver acknowledgement = isFinishing() && visualStreamsClosed ? visualRetirementReceiver : null;
         String retiredUri = visualUri == null ? null : visualUri.toString();
         // Android owns the retired View/texture lifetime; never recycle pixels under a queued draw.
         if (visualImage != null) visualImage.setImageDrawable(null);
+        for (android.widget.ImageView image : visualCopies) image.setImageDrawable(null);
+        visualCopies.clear(); visualMotion = null; visualScroll = null;
         visualImage = null; visualBitmap = null; visualUri = null;
         super.onDestroy();
         if (acknowledgement != null && retiredUri != null) {

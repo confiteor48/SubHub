@@ -42,6 +42,7 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
     private final Context context;
     private final android.app.UiAutomation ui;
     private final File output;
+    private final boolean scrollingTarget;
     private final List<JSONObject> rows = new ArrayList<>();
     private long firstRequest = -1, firstEpoch = -1, firstAt = -1, frozenAt = -1, freezeOrdinal = -1;
     private String stopReason;
@@ -53,13 +54,17 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
     private volatile long retirementAt = -1;
 
     ProductFirstObservedCensor(Context context, android.app.UiAutomation ui, String namespace) throws Exception {
+        this(context, ui, namespace, false);
+    }
+    ProductFirstObservedCensor(Context context, android.app.UiAutomation ui, String namespace, boolean scrollingTarget) throws Exception {
         this.context = context; this.ui = ui;
+        this.scrollingTarget = scrollingTarget;
         assertNotNull(namespace); assertTrue(namespace.matches("first_visible_[a-f0-9]{32}"));
         output = new File(context.getFilesDir(), "product-first-observed-censor/" + namespace);
         assertFalse("Exclusive diagnostic namespace", output.exists()); assertTrue(output.mkdirs());
         write("started.json", new JSONObject().put("schemaVersion", 1).put("namespace", namespace)
                 .put("pid", Process.myPid()).put("inputSha256", INPUT_SHA).put("modelSha256", MODEL_SHA)
-                .put("changedRuntime", false).put("pixelAcceptance", false));
+                .put("changedRuntime", false).put("pixelAcceptance", false).put("scrollingTarget", scrollingTarget));
     }
 
     void prepareInput() throws Exception {
@@ -96,7 +101,7 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
         context.startActivity(new Intent().setComponent(new ComponentName(TARGET,ProductTargetFixtureActivity.class.getName()))
                 .setDataAndType(inputUri,"image/png")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK|Intent.FLAG_ACTIVITY_NO_ANIMATION|Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                .putExtra("positiveVisualFixture",true).putExtra("visualCommand",1L));
+                .putExtra("positiveVisualFixture",true).putExtra("positiveVisualScrollFixture",scrollingTarget).putExtra("visualCommand",1L));
         sourcePhoto=android.graphics.BitmapFactory.decodeFile(sharedInput.getAbsolutePath());assertNotNull(sourcePhoto);
         JSONArray attempts=new JSONArray();boolean passed=false,firstFailed=false;
         try {
@@ -107,8 +112,9 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
                 long readStart=now();Bitmap pixels=ui.takeScreenshot();long readEnd=now();
                 if(pixels==null){attempts.put(new JSONObject().put("readStart",readStart).put("readEnd",readEnd).put("screenshot",false));continue;}
                 boolean retained=false;
+                JSONObject after=null;
                 try {
-                    JSONObject after=PositivePhotoWitness.inspect(ui);
+                    after=PositivePhotoWitness.inspect(ui);
                     JSONObject result=after!=null&&PositivePhotoWitness.sameGeometry(before,after)?PositivePhotoWitness.evaluate(before,pixels,sourcePhoto):null;
                     long checked=now();passed=result!=null&&result.getBoolean("matches")&&checked<=deadline;
                     attempts.put(new JSONObject().put("readStart",readStart).put("readEnd",readEnd).put("checkedAt",checked)
@@ -116,6 +122,9 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
                     if(passed){savePixels("prebind-input-control.png",pixels);retained=true;break;}
                     if(!firstFailed){savePixels("prebind-first-failed.png",pixels);firstFailed=true;retained=true;}
                 } catch(Exception|Error failure) {
+                    attempts.put(new JSONObject().put("readStart",readStart).put("readEnd",readEnd).put("checkedAt",now())
+                            .put("before",before).put("after",nullable(after)).put("screenshot",true).put("passed",false)
+                            .put("failureType",failure.getClass().getName()));
                     if(!retained&&!firstFailed){savePixels("prebind-first-failed.png",pixels);firstFailed=true;}
                     throw failure;
                 } finally {pixels.recycle();}
@@ -127,6 +136,29 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
 
     @Override public void foreground(AccessibilityWindowReader.Window window){latestWindow=window;}
     synchronized boolean visible(){return visible;}
+    File outputDirectory() { return output; }
+    JSONObject scrollContext(CensorProductSession owner) throws Exception {
+        SnapshotCensorSurface.Post post = latestPost;
+        AccessibilityWindowReader.Window window = latestWindow;
+        JSONObject value = new JSONObject().put("observedAtMillis", now())
+                .put("ownerIdentity", owner == null ? -1 : System.identityHashCode(owner))
+                .put("currentOwner", owner != null && owner == ProductCensorQualification.current())
+                .put("windowId", window == null ? -1 : window.id)
+                .put("windowPackage", window == null ? JSONObject.NULL : window.packageName)
+                .put("compositorPostAttributionKnown", false).put("capturedFramePixelsKnown", false);
+        if (post == null) return value.put("post", JSONObject.NULL);
+        CensorEngine.PaintReceipt paint = post.acceptedPaint;
+        JSONArray members = new JSONArray();
+        if (paint != null) for (SceneEngine.Mask member : paint.members)
+            members.put(new JSONObject().put("identity", member.identity).put("category", member.category)
+                    .put("evidenceSource", source(member.evidenceSource)).put("geometrySource", source(member.geometrySource))
+                    .put("displayRegion", region(member.displayRegion)));
+        return value.put("post", new JSONObject().put("serial", post.postSerial)
+                .put("accepted", paint != null).put("revision", paint == null ? JSONObject.NULL : paint.revision)
+                .put("canvas", paint == null || paint.canvas == null ? JSONObject.NULL : source(paint.canvas))
+                .put("scopeCurrent", paint != null && owner != null && paint.scope.same(owner.controller().activeScope()))
+                .put("members", members));
+    }
 
     void observeVisible(CensorProductSession owner) throws Exception {
         SnapshotCensorSurface.Post before=latestPost;
@@ -141,8 +173,11 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
         boolean saved=false;
         try {
             JSONObject afterGeometry=PositivePhotoWitness.inspect(ui);
-            boolean stable=before==latestPost&&window==latestWindow&&paint.scope.same(owner.controller().activeScope())
-                    &&ProductCensorQualification.current()==owner&&afterGeometry!=null&&PositivePhotoWitness.sameGeometry(geometry,afterGeometry);
+            AccessibilityWindowReader.Window afterWindow=latestWindow;
+            boolean logical=afterWindow!=null&&window.id==afterWindow.id&&TARGET.equals(afterWindow.packageName)
+                    &&paint.scope.same(owner.controller().activeScope())&&ProductCensorQualification.current()==owner
+                    &&afterGeometry!=null&&PositivePhotoWitness.sameGeometry(geometry,afterGeometry);
+            boolean stable=before==latestPost&&window==afterWindow&&logical;
             JSONObject check=PositivePhotoWitness.evaluate(geometry,pixels,sourcePhoto);
             JSONArray photo=check.getJSONArray("witnesses");
             boolean background=photo.getJSONObject(1).getBoolean("matches")&&photo.getJSONObject(3).getBoolean("matches")&&photo.getJSONObject(4).getBoolean("matches");
@@ -174,16 +209,18 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
             }
             long checked=now();boolean inBudget;
             synchronized(this){inBudget=firstAt>=0&&checked<=firstAt+8000;}
-            boolean passed=stable&&background&&winner!=null&&inBudget;
+            boolean passed=(scrollingTarget?logical:stable)&&background&&winner!=null&&inBudget;
             JSONObject candidate=winner==null?null:new JSONObject().put("identity",winner.identity).put("evidenceSource",source(winner.evidenceSource)).put("geometrySource",source(winner.geometrySource));
             record("PIXEL_OBSERVATION",row->row.put("readStartedAtMillis",start).put("readEndedAtMillis",end).put("checkedAtMillis",checked)
-                    .put("stableMetadata",stable).put("backgroundMatches",background).put("withinBudget",inBudget).put("passed",passed)
+                    .put("stableMetadata",stable).put("logicalContextStable",logical)
+                    .put("admissionEndpoint",scrollingTarget?"STATIONARY_MOTION_ADMISSION":"FIRST_OBSERVED_VISIBLE_CENSOR")
+                    .put("backgroundMatches",background).put("withinBudget",inBudget).put("passed",passed)
                     .put("windowId",window.id).put("postSerial",before.postSerial).put("revision",paint.revision).put("appearanceGeneration",paint.appearanceGeneration)
                     .put("epoch",paint.scope.epoch).put("geometry",paint.scope.geometry).put("photoGeometry",geometry).put("photoResult",check)
                     .put("probes",probes).put("candidate",nullable(candidate)).put("compositorPostAttributionKnown",false).put("capturedFramePixelsKnown",false));
             if(passed){
                 savePixels("first-observed-censor.png",pixels);saved=true;
-                synchronized(this){visible=true;visibleAt=checked;freeze("FIRST_OBSERVED_VISIBLE_CENSOR",checked);}
+                synchronized(this){visible=true;visibleAt=checked;freeze(scrollingTarget?"STATIONARY_MOTION_ADMITTED":"FIRST_OBSERVED_VISIBLE_CENSOR",checked);}
             }else if(!new File(output,"first-failed-censor.png").exists()){savePixels("first-failed-censor.png",pixels);saved=true;}
         }catch(Exception|Error failure){
             if(!saved&&!new File(output,"first-failed-censor.png").exists())savePixels("first-failed-censor.png",pixels);
@@ -306,6 +343,8 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
                 .put("rawRowCount", rows.size()).put("rawKindCounts", counts).put("rows", new JSONArray(rows))
                 .put("diagnosticFailures", diagnosticFailures).put("changedRuntime", false)
                 .put("visible",visible).put("visibleObservedAtMillis",visibleAt).put("capturedFramePixelsKnown",false).put("compositorPostAttributionKnown",false)
+                .put("admissionEndpoint",scrollingTarget?"STATIONARY_MOTION_ADMISSION":"FIRST_OBSERVED_VISIBLE_CENSOR")
+                .put("firstVisibleLatencyClaimed",false).put("currentPaintPersistenceKnown",false)
                 .put("frameworkCallbackReturnKnown", false).put("pixelClockKnown", false).put("performanceImprovement", false));
     }
 

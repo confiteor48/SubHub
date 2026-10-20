@@ -42,14 +42,22 @@ import java.security.MessageDigest;
 @SdkSuppress(minSdkVersion = 34)
 public final class ProductFirstObservedCensorAndroidTest {
     @Test public void firstObservedCensorRequiresQualifiedPhotoAndActualPaint() throws Exception {
+        run(false);
+    }
+    @Test public void realPhotoLongFastScrollAndReversalsRetainAllObservations() throws Exception {
+        run(true);
+    }
+    private void run(boolean scrolling) throws Exception {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         Context context = instrumentation.getTargetContext();
         assertEquals("true", InstrumentationRegistry.getArguments().getString("bound_censor_fixture"));
         assertTrue("Owned emulator only", ProductCensorQualification.supported());
         String namespace = InstrumentationRegistry.getArguments().getString("product_first_visible_run");
         assertNotNull(namespace); assertTrue(namespace.matches("first_visible_[a-f0-9]{32}"));
-        JSONObject setup=new JSONObject(new String(java.nio.file.Files.readAllBytes(new File(context.getFilesDir(),"first-visible-setup/"+namespace+"/setup.json").toPath()),java.nio.charset.StandardCharsets.UTF_8));
-        assertTrue(setup.getBoolean("passed"));assertEquals(namespace,setup.getString("namespace"));
+        String setupNamespace = scrolling ? InstrumentationRegistry.getArguments().getString("product_first_visible_setup_run") : namespace;
+        assertNotNull(setupNamespace); assertTrue(setupNamespace.matches("first_visible_[a-f0-9]{32}"));
+        JSONObject setup=new JSONObject(new String(java.nio.file.Files.readAllBytes(new File(context.getFilesDir(),"first-visible-setup/"+setupNamespace+"/setup.json").toPath()),java.nio.charset.StandardCharsets.UTF_8));
+        assertTrue(setup.getBoolean("passed"));assertEquals(setupNamespace,setup.getString("namespace"));
         String services = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
         String enabled = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED);
         assertFalse("No enabled capture intent may be borrowed", "1".equals(enabled) && services != null
@@ -66,6 +74,7 @@ public final class ProductFirstObservedCensorAndroidTest {
         AtomicReference<CensorProductSession> owner = new AtomicReference<>();
         AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
         UiAutomation ui = null; ProductFirstObservedCensor recorder = null; Throwable bodyFailure = null;
+        PositivePhotoScrollObservation scrollObservation = null;
         DailyIsolation daily = new DailyIsolation(context, namespace);
         try {
             daily.isolate();
@@ -97,7 +106,7 @@ public final class ProductFirstObservedCensorAndroidTest {
             ui = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
             AccessibilityServiceInfo info = ui.getServiceInfo(); assertNotNull(info);
             info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS; ui.setServiceInfo(info);
-            recorder = new ProductFirstObservedCensor(context, ui, namespace);
+            recorder = new ProductFirstObservedCensor(context, ui, namespace, scrolling);
             recorder.prepareInput(); recorder.launchAndAwaitTarget();
             ProductCensorQualification.fixtureModels(recorder::initialize); ProductCensorQualification.fixtureObserver(recorder);
             ComponentName component = new ComponentName(context, ScreenshotAccessibilityService.class);
@@ -120,9 +129,14 @@ public final class ProductFirstObservedCensorAndroidTest {
             });
             while (!recorder.outcomeFrozen()) { recorder.observeVisible(owner.get()); Thread.sleep(10); }
             assertTrue("An actual source-supported visible censor within the unchanged observation budget", recorder.visible());
+            if (scrolling) {
+                scrollObservation = new PositivePhotoScrollObservation(context, ui, recorder, owner.get());
+                scrollObservation.run();
+            }
         } catch (Exception | Error failure) { bodyFailure = failure; }
         finally {
             ProductFirstObservedCensor probe = recorder;
+            PositivePhotoScrollObservation motion = scrollObservation;
             CensorProductSession actual = owner.get() == null ? ProductCensorQualification.current() : owner.get();
             step(cleanupFailure, () -> {
                 if (actual != null) {
@@ -133,6 +147,7 @@ public final class ProductFirstObservedCensorAndroidTest {
                     main(() -> ProductCensorQualification.disconnected(actual));
                 }
             });
+            step(cleanupFailure, () -> { if (motion != null) motion.exportAndRecycle(); });
             step(cleanupFailure, () -> { if (probe != null) probe.retireTargetAndInput(); });
             // Every restoration is attempted even when a previous drain, retirement or export failed.
             AtomicReference<UiAutomation> automation = new AtomicReference<>(ui);
