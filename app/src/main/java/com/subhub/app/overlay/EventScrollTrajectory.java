@@ -15,6 +15,8 @@ final class EventScrollTrajectory {
     private boolean braking;
     private boolean holdingOvershoot;
     private boolean constrainLagCorrection;
+    private boolean zeroResidualBrake;
+    private float zeroResidualVelocity, zeroResidualDuration;
     private float heldPosition, heldDirection;
     private float lastObservedSpeed;
     private int samplesReceived;
@@ -30,6 +32,7 @@ final class EventScrollTrajectory {
         braking = false;
         holdingOvershoot = false;
         constrainLagCorrection = false;
+        zeroResidualBrake = false;
         heldPosition = heldDirection = 0;
         lastObservedSpeed = 0;
         samplesReceived = 0;
@@ -38,6 +41,7 @@ final class EventScrollTrajectory {
     void measure(float measured, float delta, long sourceTime, long now, int viewportSize) {
         float displayed = position(now);
         float displayedVelocity = velocity(now);
+        zeroResidualBrake = false;
         float fallbackInterval = 114;
         long gap = lastSourceTime < 0 ? Math.round(fallbackInterval) : sourceTime - lastSourceTime;
         if (gap > 250) samplesReceived = 0;
@@ -65,8 +69,9 @@ final class EventScrollTrajectory {
         // There is no pre-scroll observation to interpolate at acquisition. Keep the
         // first known position immediate. A multi-screen discontinuity is not a fling
         // that should be animated across unrelated content either.
-        if (!sampled || gap > 250
-                || Math.abs(measured - displayed) > Math.max(96f, viewportSize * .5f)) {
+        boolean discontinuity = !sampled || gap > 250
+                || Math.abs(measured - displayed) > Math.max(96f, viewportSize * .5f);
+        if (discontinuity) {
             displayed = measured;
             displayedVelocity = nextSpeed;
         }
@@ -108,6 +113,19 @@ final class EventScrollTrajectory {
             errorVelocity = error * displayedVelocity >= 0 ? 0
                     : Math.copySign(Math.min(Math.abs(displayedVelocity), limit), displayedVelocity);
         }
+        if (!expired && sameDirection && !discontinuity && !braking && error == 0
+                && Math.signum(displayedVelocity) == Math.signum(speed)
+                && Math.abs(displayedVelocity) > Math.abs(speed) && peak * displayedVelocity > 0) {
+            float duration = 2 * Math.abs(peak) / Math.abs(displayedVelocity);
+            // Preserve the real admission velocity without borrowing more travel or time.
+            // This branch replaces both forecast and correction, then rejoins the old cap.
+            if (Float.isFinite(duration) && duration > 0 && duration <= coastMs + BRAKE_MS
+                    && duration <= returnStartMs) {
+                zeroResidualBrake = true;
+                zeroResidualVelocity = displayedVelocity;
+                zeroResidualDuration = duration;
+            }
+        }
         anchoredAt = now;
         lastSourceTime = Math.max(lastSourceTime, sourceTime);
         sampled = true;
@@ -117,6 +135,13 @@ final class EventScrollTrajectory {
     float position(long now) {
         if (!sampled) return initialPosition;
         float age = Math.max(0L, now - anchoredAt);
+        if (zeroResidualBrake) {
+            if (age < zeroResidualDuration) {
+                return exact + zeroResidualVelocity * age * (1 - age / (2 * zeroResidualDuration));
+            }
+            float t = Math.max(0, Math.min(1, (age - returnStartMs) / RETURN_MS));
+            return exact + peak * (1 - smooth(t));
+        }
         if (holdingOvershoot) {
             if (age <= returnStartMs) return furthest(heldPosition, exact + forecast(age));
             float t = Math.min(1, (age - returnStartMs) / RETURN_MS);
@@ -128,6 +153,11 @@ final class EventScrollTrajectory {
     float velocity(long now) {
         if (!sampled) return initialVelocity;
         float age = Math.max(0L, now - anchoredAt);
+        if (zeroResidualBrake) {
+            if (age < zeroResidualDuration) return zeroResidualVelocity * (1 - age / zeroResidualDuration);
+            float t = Math.max(0, Math.min(1, (age - returnStartMs) / RETURN_MS));
+            return -peak * (30 * t * t * (t * (t - 2) + 1)) / RETURN_MS;
+        }
         if (holdingOvershoot) {
             if (age <= returnStartMs) {
                 return heldDirection * (exact + forecast(age) - heldPosition) > 0
@@ -184,6 +214,7 @@ final class EventScrollTrajectory {
 
     float predictionAmplitude() { return holdingOvershoot ? heldPeakOffset() : peak; }
     long predictionPeakMillis() {
+        if (zeroResidualBrake) return Math.round(zeroResidualDuration);
         return holdingOvershoot && heldDirection * (heldPosition - exact - peak) >= 0
                 ? 0 : Math.round(coastMs + BRAKE_MS);
     }
