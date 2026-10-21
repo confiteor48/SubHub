@@ -14,6 +14,7 @@ final class EventScrollTrajectory {
     private boolean sampled;
     private boolean braking;
     private boolean holdingOvershoot;
+    private boolean constrainLagCorrection;
     private float heldPosition, heldDirection;
     private float lastObservedSpeed;
     private int samplesReceived;
@@ -28,6 +29,7 @@ final class EventScrollTrajectory {
         sampled = false;
         braking = false;
         holdingOvershoot = false;
+        constrainLagCorrection = false;
         heldPosition = heldDirection = 0;
         lastObservedSpeed = 0;
         samplesReceived = 0;
@@ -89,6 +91,7 @@ final class EventScrollTrajectory {
         returnStartMs = Math.max(coastMs + BRAKE_MS, returnDelay);
         error = displayed - exact;
         errorVelocity = displayedVelocity - speed;
+        constrainLagCorrection = !expired && sameDirection && error * delta < 0;
         // Slower forward input is not reverse input. An old forecast can already be
         // ahead of the newest measured coordinate. Pulling that error back immediately
         // makes masks reverse while the page continues forward. Hold that display-only
@@ -134,7 +137,7 @@ final class EventScrollTrajectory {
             return -heldPeakOffset() * (30 * t * t * (t * (t - 2) + 1)) / RETURN_MS;
         }
         if (braking) return brakeVelocity(age);
-        float correction = age >= CORRECTION_END_MS ? 0
+        float correction = age >= CORRECTION_END_MS || hasCaughtForecast(age) ? 0
                 : (float) ((errorVelocity - correctionRate
                 * (errorVelocity + correctionRate * error) * age)
                 * Math.exp(-correctionRate * age));
@@ -147,7 +150,7 @@ final class EventScrollTrajectory {
             return error * (2 * t * t * t - 3 * t * t + 1)
                     + errorVelocity * MEASURED_BRAKE_MS * (t * t * t - 2 * t * t + t);
         }
-        if (age >= CORRECTION_END_MS) return 0;
+        if (age >= CORRECTION_END_MS || hasCaughtForecast(age)) return 0;
         return (float) ((error + (errorVelocity + correctionRate * error) * age)
                 * Math.exp(-correctionRate * age));
     }
@@ -192,6 +195,14 @@ final class EventScrollTrajectory {
         float t = Math.min(1, age / MEASURED_BRAKE_MS);
         return error * (6 * t * t - 6 * t) / MEASURED_BRAKE_MS
                 + errorVelocity * (3 * t * t - 4 * t + 1);
+    }
+
+    private boolean hasCaughtForecast(float age) {
+        if (!constrainLagCorrection) return false;
+        float remaining = error + (errorVelocity + correctionRate * error) * age;
+        // A lagging continuity error may catch the forecast, but must not cross
+        // ahead and then decay backwards while the provider still moves forward.
+        return error < 0 ? remaining >= 0 : remaining <= 0;
     }
 
     private static float smooth(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
