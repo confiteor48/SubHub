@@ -138,6 +138,20 @@ Before using performance traces as evidence, compare raw publication counts with
 Every trace-schema change must include a parser fixture for the changed record. Unknown fields or
 unsupported formats must be exposed as incomplete parsing, never silently reported as zero work.
 
+Select byte and row bounds for each artifact's schema. Expanded raw traces must not pass through
+a smaller maintenance-manifest reader; exercise the actual file reader above the small-manifest
+limit and at the raw-trace refusal boundary. Preserve observer failures and recover completed
+captures offline rather than repeating the producer to obtain a successful receipt.
+
+`SceneEngine.Source.pixelAtMillis == -1` explicitly means unknown. Preserve and test that sentinel;
+never substitute receipt time or a raw API-reported stamp. Validate each clock field's own contract
+instead of applying a blanket nonnegative range to every timestamp.
+
+Reconcile copied drawing members and accepted POST members in both directions using literal
+post serial, endpoint generation and member identity. Bind geometry and evidence source identities
+separately because mixed origins are valid. A matching subset is not complete member coverage;
+missing or truncated copies must remain explicitly incomplete.
+
 Presentation revisions are opaque signed-long equality tokens, not timestamps. Diagnostics must
 preserve their full domain and use explicit record state, not token sign, to distinguish missing data.
 At a live renderer callback, verify actual Surface-use and drawing-lease counts. Reserve whole-owner
