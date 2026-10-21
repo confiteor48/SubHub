@@ -108,6 +108,7 @@ public final class ProductFirstObservedCensorAndroidTest {
             info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS; ui.setServiceInfo(info);
             recorder = new ProductFirstObservedCensor(context, ui, namespace, scrolling);
             recorder.prepareInput(); recorder.launchAndAwaitTarget();
+            ProductCensorQualification.fixtureInputObserver(recorder::inputBoundary);
             ProductCensorQualification.fixtureModels(recorder::initialize); ProductCensorQualification.fixtureObserver(recorder);
             ComponentName component = new ComponentName(context, ScreenshotAccessibilityService.class);
             long setupDeadline = ProductFirstObservedCensor.now() + 12000;
@@ -162,6 +163,7 @@ public final class ProductFirstObservedCensorAndroidTest {
             step(cleanupFailure, () -> new StatsRepository(context).sessionStamp());
             step(cleanupFailure, () -> ProductCensorQualification.fixtureModels(null));
             step(cleanupFailure, () -> ProductCensorQualification.fixtureObserver(null));
+            step(cleanupFailure, () -> ProductCensorQualification.fixtureInputObserver(null));
             step(cleanupFailure, () -> ProductCensorQualification.fixtureStatistics(StatsRepository::new));
             step(cleanupFailure, () -> ProductCensorQualification.fixturePenance(PenanceManager::new));
             step(cleanupFailure, daily::restore);
@@ -176,6 +178,7 @@ public final class ProductFirstObservedCensorAndroidTest {
             });
             step(cleanupFailure, () -> { if (probe != null) probe.restored(restorationFailure.get() == null, restorationFailure.get()); });
             if (restorationFailure.get() != null) append(cleanupFailure, restorationFailure.get());
+            step(cleanupFailure, () -> { if (probe != null && scrolling) probe.submissionsClosed(actual); });
             Throwable originalBody = bodyFailure;
             step(cleanupFailure, () -> { if (probe != null) probe.exportClosed(actual, originalBody, cleanupFailure.get()); });
         }

@@ -122,6 +122,8 @@ public final class ProductCensorQualification {
             @Override public void scrollReceived(com.subhub.app.censor.engine.ScrollMotionLedger.Receipt receipt) { observer.scrollReceived(receipt); probe.scrollReceived(receipt); }
             @Override public void evidenceAccepted(CensorEngine.EvidenceReceipt receipt) { observer.evidenceAccepted(receipt); probe.evidenceAccepted(receipt); }
             @Override public void painted(CensorEngine.PaintReceipt receipt) { observer.painted(receipt); probe.painted(receipt); }
+            @Override public boolean collectSubmissions() { return observer.collectSubmissions() || probe.collectSubmissions(); }
+            @Override public void submitted(SurfaceSubmission submission) { observer.submitted(submission); probe.submitted(submission); }
             @Override public void posted(SnapshotCensorSurface.Post receipt) { observer.posted(receipt); probe.posted(receipt); }
             @Override public void endpointFailure() { observer.endpointFailure(); probe.endpointFailure(); }
             @Override public void resourceFailure() { observer.resourceFailure(); probe.resourceFailure(); }

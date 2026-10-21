@@ -176,6 +176,8 @@ public final class CensorProductSession implements AutoCloseable {
                         observer.evidenceAccepted(receipt);
                     }
                     @Override public void painted(com.subhub.app.censor.engine.CensorEngine.PaintReceipt receipt) { observer.painted(receipt); }
+                    @Override public boolean collectSubmissions() { return observer.collectSubmissions(); }
+                    @Override public void submitted(SurfaceSubmission submission) { observer.submitted(submission); }
                     @Override public void posted(SnapshotCensorSurface.Post receipt) { observer.posted(receipt); }
                     @Override public void endpointFailure() { main.post(() -> fail(new IllegalStateException("Replacement presentation endpoint failed"))); observer.endpointFailure(); }
                     @Override public void resourceFailure() { main.post(() -> fail(new IllegalStateException("Replacement resource ownership failed"))); observer.resourceFailure(); }

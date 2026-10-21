@@ -16,6 +16,7 @@ import androidx.core.content.FileProvider;
 import androidx.test.filters.SdkSuppress;
 import com.subhub.app.censor.engine.CensorEngine;
 import com.subhub.app.censor.engine.SceneEngine;
+import com.subhub.app.censor.engine.ScrollMotionLedger;
 import com.subhub.app.detection.DetectorConfig;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -52,6 +53,8 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
     private boolean launched;
     private volatile boolean targetRetired;
     private volatile long retirementAt = -1;
+    private int submissionCallbacks, submissionOverflow, endpointFailures;
+    private boolean submissionLeasesReleased = true, submissionsOffMain = true;
 
     ProductFirstObservedCensor(Context context, android.app.UiAutomation ui, String namespace) throws Exception {
         this(context, ui, namespace, false);
@@ -270,6 +273,27 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
         record("PREPARED", row -> row.put("request", request).put("frameKind", kind.name()).put("preparationNanos", nanos)
                 .put("bytes", bytes).put("sourcePixelAtMillis", JSONObject.NULL).put("rawFrameworkCallbackAtMillis", JSONObject.NULL));
     }
+    void inputBoundary(int type, int contentTypes, int windowId, long sourceAt, long receivedAt, String route, boolean completed) {
+        record("INPUT_BOUNDARY", row -> row.put("schemaVersion", 1).put("type", type).put("contentTypes", contentTypes)
+                .put("windowId", windowId).put("sourceAtMillis", sourceAt).put("receivedAtMillis", receivedAt)
+                .put("route", route).put("completed", completed));
+    }
+    @Override public void scrollReceived(ScrollMotionLedger.Receipt receipt) {
+        record("SCROLL_RECEIVED", row -> {
+            ScrollMotionLedger.Sample sample = receipt.sample;
+            row.put("schemaVersion", 1).put("admission", receipt.admission.name()).put("refusal", receipt.refusal.name())
+                    .put("generation", receipt.generation).put("admittedAtMillis", receipt.admittedAtMillis)
+                    .put("producerCount", receipt.producerCount).put("intervalCount", receipt.intervalCount)
+                    .put("sample", sample == null ? JSONObject.NULL : new JSONObject().put("epoch", sample.scope.epoch).put("geometry", sample.scope.geometry)
+                            .put("windowId", sample.scope.windowId).put("protectionOrigin", sample.scope.protection.origin.name())
+                            .put("tapScope", sample.scope.protection.tapScope).put("delivery", sample.deliveryIdentity)
+                            .put("owner", sample.owner).put("producer", sample.producer).put("ownerKind", sample.ownerKind.name())
+                            .put("sourceAtMillis", sample.sourceAtMillis).put("receivedAtMillis", sample.receivedAtMillis)
+                            .put("readStartedAtMillis", sample.readStartedAtMillis).put("readFinishedAtMillis", sample.readFinishedAtMillis)
+                            .put("x", coordinate(sample.x)).put("y", coordinate(sample.y))
+                            .put("reportedViewport", sample.reportedViewport == null ? JSONObject.NULL : region(sample.reportedViewport)));
+        });
+    }
     @Override public void batchAccepted(SceneEngine.Batch batch) {
         acceptedBatches.add(batch);
         record("BATCH", row -> {
@@ -300,10 +324,73 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
             row.put("serial", post.postSerial).put("endpointGeneration", post.endpointGeneration).put("accepted", paint != null)
                     .put("recordedAtMillis", post.recordedAtMillis).put("postReturnedAtMillis", post.postReturnedAtMillis)
                     .put("uiAdmittedAtMillis", post.uiAdmittedAtMillis).put("compositorAtMillis", post.compositorAtMillis)
+                    .put("queuedNanos", post.queuedNanos).put("lockNanos", post.lockNanos)
+                    .put("recordingNanos", post.recordingNanos).put("postNanos", post.postNanos)
+                    .put("renderThreadId", post.renderThreadId).put("mainThread", post.mainThread)
                     .put("revision", paint == null ? JSONObject.NULL : paint.revision)
                     .put("canvas", paint == null || paint.canvas == null ? JSONObject.NULL : source(paint.canvas)).put("members", members);
         });
         latestPost=post;
+    }
+    @Override public boolean collectSubmissions() { return scrollingTarget; }
+    @Override public synchronized void submitted(SurfaceSubmission value) {
+        CensorProductSession owner = ProductCensorQualification.current();
+        SnapshotCensorSurface surface = owner == null ? null : owner.controller().surface();
+        Integer users = surface == null ? null : surface.surfaceUseCount();
+        Integer drawings = surface == null ? null : surface.renderer().activeDrawingCount();
+        boolean onMain = Looper.myLooper() == Looper.getMainLooper();
+        submissionLeasesReleased &= users != null && users == 0 && drawings != null && drawings == 0;
+        submissionsOffMain &= !onMain && value.renderThreadId == Thread.currentThread().getId();
+        if (++submissionCallbacks > 4096) { submissionOverflow++; return; }
+        record("SUBMISSION", row -> row.put("schemaVersion", 1).put("value", submission(value))
+                .put("surfaceUsers", nullable(users)).put("drawingLeases", nullable(drawings))
+                .put("callbackMainThread", onMain).put("callbackThreadId", Thread.currentThread().getId()));
+    }
+    synchronized void submissionsClosed(CensorProductSession owner) {
+        SnapshotCensorSurface surface = owner == null ? null : owner.controller().surface();
+        record("SUBMISSION_SUMMARY", row -> row.put("schemaVersion", 1).put("metrics", surface == null ? JSONObject.NULL : new JSONObject()
+                .put("schema", 3).put("mainThread", !submissionsOffMain).put("actualAccessibility", true).put("pixelAcceptance", false)
+                .put("lockAttempts", surface.lockCount()).put("successfulPosts", surface.postCount())
+                .put("postAttempts", surface.postAttempts()).put("postReturns", surface.postReturns())
+                .put("droppedSuccessfulCompletions", surface.droppedSuccessfulCompletionCount()).put("endpointFailures", endpointFailures)
+                .put("submissionCallbacks", submissionCallbacks).put("submissionOverflow", submissionOverflow)
+                .put("submissionObserverFailures", surface.submissionObserverFailures()).put("allSubmissionLeasesReleased", submissionLeasesReleased)
+                .put("submissionObservationNanos", surface.submissionObservationNanos())
+                .put("maximumSubmissionObservationNanos", surface.maximumSubmissionObservationNanos())
+                .put("submissionLabel", "product-long-scroll-recording").put("controlledPresentationTimeMillis", -1)));
+        assertNotNull("Actual surface owner retained through final export", surface);
+        assertTrue("Final owner drain is not a live callback lease check", owner.managedResourcesDrained());
+        assertTrue("Existing opt-in reached both product bridges", submissionCallbacks > 0);
+        assertEquals("No copied submission overflow", 0, submissionOverflow);
+        assertEquals("Every actual attempt delivered", surface.postAttempts(), submissionCallbacks);
+        assertEquals("No submission observer failure", 0, surface.submissionObserverFailures());
+        assertTrue("Actual holder and drawing leases released at each callback", submissionLeasesReleased);
+        assertTrue("Submission callbacks remained on their rendering thread", submissionsOffMain);
+    }
+    private static JSONObject submission(SurfaceSubmission value) throws Exception {
+        Object paintJson = JSONObject.NULL;
+        if (value.paint != null) {
+            SurfaceSubmission.Paint paint = value.paint; JSONArray members = new JSONArray();
+            for (SurfaceSubmission.Member member : paint.members) members.put(new JSONObject().put("identity", member.identity)
+                    .put("geometrySource", submissionSource(member.geometryEpoch, member.geometry, member.geometrySequence, member.geometryRequest, member.geometryKind))
+                    .put("evidenceSource", submissionSource(member.evidenceEpoch, member.evidenceGeometry, member.evidenceSequence, member.evidenceRequest, member.evidenceKind))
+                    .put("destination", region(member.destination)).put("canvasClip", region(member.canvasClip))
+                    .put("ownerClip", member.ownerClip == null ? JSONObject.NULL : region(member.ownerClip))
+                    .put("clippedBounds", member.clippedBounds == null ? JSONObject.NULL : region(member.clippedBounds)));
+            paintJson = new JSONObject().put("mode", paint.mode.name()).put("epoch", paint.epoch).put("geometry", paint.geometry)
+                    .put("sceneRevision", paint.sceneRevision).put("presentationRevision", paint.presentationRevision).put("sampledUptimeMillis", paint.sampledAtMillis)
+                    .put("rawMembers", paint.rawMembers).put("geometryComplete", paint.geometryComplete).put("members", members);
+        }
+        return new JSONObject().put("attempt", value.attempt).put("postSerial", value.postSerial).put("generation", value.endpointGeneration)
+                .put("postEndedUptimeMillis", value.postEndedAtMillis).put("renderThreadId", value.renderThreadId)
+                .put("queuedElapsedNanos", value.queuedNanos).put("lockElapsedNanos", value.lockNanos)
+                .put("recordingElapsedNanos", value.recordingNanos).put("postElapsedNanos", value.postNanos)
+                .put("surface", new JSONArray().put(value.surfaceX).put(value.surfaceY).put(value.surfaceWidth).put(value.surfaceHeight))
+                .put("holderReturned", value.holderReturned).put("canvasClipValidated", value.canvasClipValidated).put("recordingFinished", value.recordingFinished)
+                .put("cleanupSucceeded", value.cleanupSucceeded).put("compositorUptimeMillis", value.compositorAtMillis).put("paint", paintJson);
+    }
+    private static JSONObject submissionSource(long epoch, long geometry, long sequence, long request, SceneEngine.SourceKind kind) throws Exception {
+        return new JSONObject().put("epoch", epoch).put("geometry", geometry).put("sequence", sequence).put("request", request).put("kind", kind.name());
     }
     @Override public void providerReady(SceneEngine.Lane lane, String provider, long millis) {
         record("PROVIDER_READY", row -> row.put("lane", lane.name()).put("provider", provider).put("reportedMillis", millis));
@@ -311,7 +398,7 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
     @Override public void modelUnavailable(SceneEngine.Lane lane) { record("UNAVAILABLE", row -> row.put("lane", lane.name())); }
     @Override public void sessionFailure(Throwable failure) { record("FAULT", row -> row.put("failureType", failure.getClass().getName())); }
     @Override public void resourceFailure() { record("RESOURCE_FAILURE", row -> { }); }
-    @Override public void endpointFailure() { record("ENDPOINT_FAILURE", row -> { }); }
+    @Override public synchronized void endpointFailure() { endpointFailures++; record("ENDPOINT_FAILURE", row -> { }); }
     @Override public void drained() { record("DRAIN_NOTICE", row -> row.put("provesExecutorTermination", false)); }
     @Override public void executorsTerminated(boolean disposed) { record("EXECUTORS_TERMINATED", row -> row.put("disposed", disposed)); }
 
@@ -397,6 +484,10 @@ final class ProductFirstObservedCensor implements CensorProductSession.Observer 
         return new JSONObject().put("epoch", value.epoch).put("sequence", value.sequence).put("imageRequestIdentity", value.imageRequestIdentity)
                 .put("kind", value.kind.name()).put("geometry", value.geometry).put("width", value.width).put("height", value.height)
                 .put("pixelAtMillis", value.pixelAtMillis).put("receivedAtMillis", value.receivedAtMillis);
+    }
+    private static JSONObject coordinate(ScrollMotionLedger.Coordinate value) throws Exception {
+        return new JSONObject().put("valid", value.valid).put("absoluteKnown", value.absoluteKnown).put("absolute", value.absolute)
+                .put("deltaKnown", value.deltaKnown).put("delta", value.delta);
     }
     private static JSONArray region(SceneEngine.Region value) throws Exception { return new JSONArray(new double[]{value.left, value.top, value.right, value.bottom}); }
     private static Object nullable(Object value) { return value == null ? JSONObject.NULL : value; }
