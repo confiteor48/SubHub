@@ -312,6 +312,17 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
                 if (task.started.compareAndSet(false, true)) failSubmission();
             }
         }
+        // Scroll sampling follows display callbacks, not the previous post's UI round trip.
+        // Every callback still observes fresh main-thread geometry and coalesces one latest pose.
+        demandMotionFrame(pose);
+    }
+    private void demandMotionFrame(Pose pose) {
+        if (!pose.paint || pose.scope == null || !lifetime(pose) || !poseCurrent(pose)) return;
+        boolean moving;
+        try { moving = session.presentationAnimating(pose.scope, pose.configuration, SystemClock.uptimeMillis()); }
+        catch (RuntimeException | Error unavailable) { return; } // No extra demand from a failed advisory query.
+        // Owner queries may synchronously close, reconfigure, move or revoke this endpoint.
+        if (moving && lifetime(pose) && poseCurrent(pose)) demand();
     }
     private void renderLoop() {
         while (true) {

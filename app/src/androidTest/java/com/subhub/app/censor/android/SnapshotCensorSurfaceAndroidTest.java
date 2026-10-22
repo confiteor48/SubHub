@@ -301,6 +301,188 @@ public class SnapshotCensorSurfaceAndroidTest {
         }
     }
 
+    @Test public void naturalScrollFrameDemandDoesNotWaitForHeldUiAcknowledgement() throws Exception {
+        HeldDelivery delivery = new HeldDelivery();
+        try (Fixture f = new Fixture((policy, revision, obsolete) -> Collections.emptyList(), null, delivery, null, true)) {
+            f.submissionLabel = "natural-motion-held-ack";
+            f.image(CensorAppearance.Type.BOX, false); f.quiet();
+            ReplacementScrollPresentation presentation = new ReplacementScrollPresentation();
+            ScrollMotionLedger ledger = new ScrollMotionLedger(8, 4, 16);
+            CountDownLatch observed = new CountDownLatch(1);
+            List<long[]> samples = new ArrayList<>();
+            AtomicInteger admittedBefore = new AtomicInteger(), demandBefore = new AtomicInteger();
+            AtomicLong began = new AtomicLong();
+            AtomicBoolean cancelled = new AtomicBoolean();
+            android.view.Choreographer.FrameCallback ticks = new android.view.Choreographer.FrameCallback() {
+                @Override public void doFrame(long frameTimeNanos) {
+                    if (cancelled.get()) return;
+                    long now = SystemClock.uptimeMillis();
+                    samples.add(new long[]{now, frameTimeNanos, f.demands.get(), f.surface.postAttempts(),
+                            f.posts.size(), f.surface.executingRenderCount(), f.surface.pendingPoseCount(),
+                            f.surface.completionNoticeCount(), delivery.size(), presentation.isAnimating(now) ? 1 : 0});
+                    if (samples.size() == 6) observed.countDown();
+                    else android.view.Choreographer.getInstance().postFrameCallback(this);
+                }
+            };
+            try {
+                main(() -> {
+                    long epoch = f.h.engine.currentEpoch(), at = SystemClock.uptimeMillis(); began.set(at);
+                    presentation.reset(42, 7);
+                    try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                        SceneEngine.Source source = view.snapshot.groups.get(0).members.get(0).geometrySource;
+                        presentation.captured(epoch, 42, source.imageRequestIdentity, at - 210, at - 200);
+                    }
+                    ScrollMotionLedger.Scope scope = new ScrollMotionLedger.Scope(epoch, 42, 7, ProtectionScope.normal(f.taps.scope()));
+                    ledger.reset(scope);
+                    for (int index = 0; index < 3; index++) {
+                        long time = at - 200 + index * 100;
+                        presentation.observe(ledger.observe(new ScrollMotionLedger.Sample(scope, index + 1, 10, 1,
+                                time, time, time + 1, time + 2, ScrollMotionLedger.Coordinate.absolute(0),
+                                ScrollMotionLedger.Coordinate.absolute(200 - index * 20),
+                                new SceneEngine.Region(f.origin[0], f.origin[1], f.origin[0] + 320, f.origin[1] + 320)), time + 3));
+                    }
+                    f.presentation.set(presentation); delivery.hold.set(true);
+                    admittedBefore.set(f.posts.size()); demandBefore.set(f.demands.get());
+                    f.surface.requestFrame();
+                    android.view.Choreographer.getInstance().postFrameCallback(ticks);
+                });
+                assertTrue("Six independently observed natural callbacks", observed.await(5, TimeUnit.SECONDS));
+                await(() -> delivery.size() == 1);
+                JSONArray rows = new JSONArray();
+                for (long[] sample : samples) rows.put(new JSONObject().put("entryUptimeMillis", sample[0])
+                        .put("suppliedFrameTimeNanos", sample[1]).put("drawDemands", sample[2]).put("postAttempts", sample[3])
+                        .put("uiPosts", sample[4]).put("renderWorkers", sample[5]).put("pendingPoses", sample[6])
+                        .put("completionNotices", sample[7]).put("heldActions", sample[8]).put("motionLive", sample[9] == 1));
+                f.demandProbe = new JSONObject().put("schema", 1).put("beganUptimeMillis", began.get())
+                        .put("drawDemandsBefore", demandBefore.get()).put("uiPostsBefore", admittedBefore.get())
+                        .put("oneInitialRequest", true).put("freshInputsDuringObservation", 0).put("manualObservedRequests", 0)
+                        .put("callbacks", rows);
+                Bitmap buffer = f.buffer();
+                try { export(buffer, "natural-motion-held-ack-buffer"); } finally { buffer.recycle(); }
+                for (long[] sample : samples) {
+                    assertTrue("Observation must stay inside actual finite motion", sample[9] == 1);
+                    assertTrue("Exclude unrelated750ms tap refresh", sample[0] - began.get() < CensorTapTracker.DISPLAY_REFRESH_MILLIS);
+                    assertEquals("No UI acknowledgement or stolen notice", admittedBefore.get(), sample[4]);
+                    assertTrue(sample[5] <= 1 && sample[6] <= 1 && sample[7] <= 1 && sample[8] <= 1);
+                }
+                assertTrue("live scroll frame demand must not wait for UI acknowledgement",
+                        samples.get(samples.size() - 1)[2] - demandBefore.get() >= 4);
+                assertEquals(1, delivery.size());
+            } finally {
+                main(() -> {
+                    cancelled.set(true); android.view.Choreographer.getInstance().removeFrameCallback(ticks);
+                    f.surface.presentationAllowed(false); f.presentation.set(null);
+                });
+                delivery.hold.set(false);
+                if (delivery.size() == 1) main(delivery.only());
+                ledger.close();
+            }
+            f.quiet(); f.assertSubmissionInventory();
+        }
+    }
+
+    @Test public void motionDemandOwnerReentryCannotContinueDisabledPresentation() throws Exception { motionDemandRefusal(0); }
+    @Test public void motionDemandOwnerReentryCannotContinueReplacedScope() throws Exception { motionDemandRefusal(1); }
+    @Test public void motionDemandOwnerReentryCannotContinueReverseConfiguration() throws Exception { motionDemandRefusal(2); }
+    @Test public void failedAdvisoryMotionQueryCannotEscapeOrSpinDisplayCallbacks() throws Exception { motionDemandRefusal(3); }
+    @Test public void motionDemandOwnerReentryCannotContinueClosedEndpoint() throws Exception { motionDemandRefusal(4); }
+    @Test public void motionDemandOwnerReentryCannotContinueChangedGeometry() throws Exception { motionDemandRefusal(5); }
+
+    private void motionDemandRefusal(int mode) throws Exception {
+        HeldDelivery delivery = new HeldDelivery();
+        try (Fixture f = new Fixture((policy, revision, obsolete) -> Collections.emptyList(), null, delivery, null, true);
+                ScrollMotionLedger ledger = new ScrollMotionLedger(8, 4, 16)) {
+            f.submissionLabel = "motion-demand-refusal-" + mode;
+            f.image(CensorAppearance.Type.BOX, false); f.quiet();
+            ReplacementScrollPresentation presentation = new ReplacementScrollPresentation();
+            CountDownLatch observed = new CountDownLatch(1);
+            AtomicInteger callbacks = new AtomicInteger(), beforeDemands = new AtomicInteger(), beforeQueries = new AtomicInteger();
+            AtomicLong began = new AtomicLong(), ended = new AtomicLong(), queryAt = new AtomicLong();
+            AtomicBoolean cancelled = new AtomicBoolean(), queryMotionLive = new AtomicBoolean();
+            AtomicInteger endDemands = new AtomicInteger(), endQueries = new AtomicInteger();
+            AtomicInteger beforePreparation = new AtomicInteger(), beforeUiPosts = new AtomicInteger();
+            AtomicInteger endPreparation = new AtomicInteger(), endUiPosts = new AtomicInteger(), heldAtEnd = new AtomicInteger();
+            int[] ownership = new int[3];
+            android.view.Choreographer.FrameCallback ticks = new android.view.Choreographer.FrameCallback() {
+                @Override public void doFrame(long frameTimeNanos) {
+                    if (cancelled.get()) return;
+                    if (callbacks.incrementAndGet() == 6) { ended.set(SystemClock.uptimeMillis()); observed.countDown(); }
+                    else android.view.Choreographer.getInstance().postFrameCallback(this);
+                }
+            };
+            try {
+                main(() -> {
+                    long at = SystemClock.uptimeMillis(), epoch = f.h.engine.currentEpoch(); began.set(at);
+                    presentation.reset(42, 7);
+                    try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                        SceneEngine.Source source = view.snapshot.groups.get(0).members.get(0).geometrySource;
+                        presentation.captured(epoch, 42, source.imageRequestIdentity, at - 210, at - 200);
+                    }
+                    ScrollMotionLedger.Scope scope = new ScrollMotionLedger.Scope(epoch, 42, 7, ProtectionScope.normal(f.taps.scope())); ledger.reset(scope);
+                    for (int index = 0; index < 3; index++) {
+                        long time = at - 200 + index * 100;
+                        presentation.observe(ledger.observe(new ScrollMotionLedger.Sample(scope, index + 1, 10, 1,
+                                time, time, time + 1, time + 2, ScrollMotionLedger.Coordinate.absolute(0),
+                                ScrollMotionLedger.Coordinate.absolute(200 - index * 20),
+                                new SceneEngine.Region(f.origin[0], f.origin[1], f.origin[0] + 320, f.origin[1] + 320)), time + 3));
+                    }
+                    f.presentation.set(presentation); delivery.hold.set(true);
+                    beforeDemands.set(f.demands.get()); beforeQueries.set(f.mainMotionQueries.get());
+                    beforePreparation.set(f.renderer().preparationCount()); beforeUiPosts.set(f.posts.size());
+                    f.motionQueryHook.set(() -> {
+                        long queried = SystemClock.uptimeMillis(); queryAt.set(queried);
+                        queryMotionLive.set(presentation.isAnimating(queried));
+                        if (mode == 0) f.surface.presentationAllowed(false);
+                        else if (mode == 1) f.h.engine.stop();
+                        // Reverse BOX becomes PIXELATE and independently wakes on preparation readiness.
+                        else if (mode == 2) f.surface.configure(appearance(CensorAppearance.Type.ERROR_POPUP, true), SnapshotPaintPolicy.from(DetectionPreset.LOW), 0, true);
+                        else if (mode == 3) throw new IllegalStateException("Controlled advisory query failure");
+                        else if (mode == 4) f.surface.close();
+                        else f.surface.endpointView().setScaleX(.9f); // No requestFrame or configuration callback.
+                    });
+                    f.surface.requestFrame(); android.view.Choreographer.getInstance().postFrameCallback(ticks);
+                });
+                assertTrue(observed.await(5, TimeUnit.SECONDS));
+                main(() -> {
+                    endQueries.set(f.mainMotionQueries.get()); endDemands.set(f.demands.get());
+                    endPreparation.set(f.renderer().preparationCount()); endUiPosts.set(f.posts.size()); heldAtEnd.set(delivery.size());
+                    ownership[0] = f.surface.pendingPoseCount(); ownership[1] = f.surface.executingRenderCount();
+                    ownership[2] = f.surface.completionNoticeCount();
+                });
+                f.motionRefusalProbe = new JSONObject().put("schema", 1).put("mode", mode)
+                        .put("beganUptimeMillis", began.get()).put("endedUptimeMillis", ended.get()).put("queryUptimeMillis", queryAt.get())
+                        .put("queryMotionLive", queryMotionLive.get()).put("naturalCallbacks", callbacks.get())
+                        .put("drawDemandsBefore", beforeDemands.get()).put("drawDemandsAtEnd", endDemands.get())
+                        .put("mainQueriesBefore", beforeQueries.get()).put("mainQueriesAtEnd", endQueries.get())
+                        .put("initialRequests", 1).put("manualObservedRequests", 0);
+                if (mode == 2) {
+                    f.reverseIsolationProbe = new JSONObject().put("schema", 1).put("style", "ERROR_POPUP")
+                            .put("reverseRequested", true).put("preparationBefore", beforePreparation.get())
+                            .put("preparationAtEnd", endPreparation.get()).put("uiPostsBefore", beforeUiPosts.get())
+                            .put("uiPostsAtEnd", endUiPosts.get()).put("heldActionsAtEnd", heldAtEnd.get())
+                            .put("completionHolding", delivery.hold.get());
+                    assertEquals("Reverse fixture must not enqueue asynchronous preparation", beforePreparation.get(), endPreparation.get());
+                    assertEquals("Reverse fixture must not admit held completion", beforeUiPosts.get(), endUiPosts.get());
+                    assertEquals("One bounded completion remains held", 1, heldAtEnd.get());
+                    assertTrue(delivery.hold.get());
+                }
+                assertTrue("Refusal must be exercised during actual live motion", queryMotionLive.get());
+                assertEquals("Actual main-owner reentry was exercised once", beforeQueries.get() + 1, endQueries.get());
+                if (mode == 5) assertEquals("Geometry query must not renew beyond the one initial request", beforeDemands.get() + 1, endDemands.get());
+                else assertTrue("No self-renewing demand after query refusal/reentry", endDemands.get() - beforeDemands.get() <= 2);
+                assertTrue(ownership[0] <= 1 && ownership[1] <= 1 && ownership[2] <= 1);
+                assertTrue("Exclude unrelated tap-refresh wake", ended.get() - began.get() < CensorTapTracker.DISPLAY_REFRESH_MILLIS);
+            } finally {
+                main(() -> {
+                    cancelled.set(true); android.view.Choreographer.getInstance().removeFrameCallback(ticks);
+                    f.motionQueryHook.set(null); f.surface.presentationAllowed(false); f.presentation.set(null);
+                });
+                delivery.hold.set(false); if (delivery.size() == 1) main(delivery.only());
+            }
+            f.quiet(); f.assertSubmissionInventory();
+        }
+    }
+
     @Test public void newSourceUsesItsOwnScrollBaselineAndOriginalSourcePixels() throws Exception {
         try (Fixture f = new Fixture()) {
             f.image(CensorAppearance.Type.PIXELATE, false); f.prepared();
@@ -1000,6 +1182,12 @@ public class SnapshotCensorSurfaceAndroidTest {
         final CensorTapTracker taps = new CensorTapTracker(); final int[] origin = new int[2];
         final List<SnapshotCensorSurface.Post> posts = Collections.synchronizedList(new ArrayList<>());
         final AtomicInteger failures = new AtomicInteger(); final ActivityScenario<SnapshotSurfaceFixtureActivity> scenario;
+        final AtomicInteger demands = new AtomicInteger();
+        final AtomicInteger mainMotionQueries = new AtomicInteger();
+        final AtomicReference<Runnable> motionQueryHook = new AtomicReference<>();
+        JSONObject demandProbe;
+        JSONObject motionRefusalProbe;
+        JSONObject reverseIsolationProbe;
         final List<SurfaceSubmission> submissions = Collections.synchronizedList(new ArrayList<>());
         final AtomicInteger submissionCallbacks = new AtomicInteger(), submissionOverflow = new AtomicInteger();
         final AtomicReference<Runnable> submissionHook = new AtomicReference<>();
@@ -1047,6 +1235,10 @@ public class SnapshotCensorSurfaceAndroidTest {
                         return (value == null ? 0 : value.revision()) ^ (presentationTime.get() << 16);
                     }
                     @Override public boolean presentationAnimating(long now) {
+                        if (Looper.myLooper() == Looper.getMainLooper()) {
+                            mainMotionQueries.incrementAndGet(); Runnable hook = motionQueryHook.getAndSet(null);
+                            if (hook != null) hook.run();
+                        }
                         ReplacementScrollPresentation value = presentation.get();
                         return presentationTime.get() < 0 && value != null && value.isAnimating(now);
                     }
@@ -1063,6 +1255,7 @@ public class SnapshotCensorSurfaceAndroidTest {
                     @Override public CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long revision, long generation, List<Long> ids, boolean reverse) { return h.engine.acknowledgePaint(scope, revision, generation, ids, reverse); }
                 };
                 SnapshotCensorSurface.Observer observer = new SnapshotCensorSurface.Observer() {
+                    @Override public void drawDemand() { demands.incrementAndGet(); }
                     @Override public boolean collectSubmissions() { return collectSubmissions; }
                     @Override public void submitted(SurfaceSubmission value) {
                         if (surface.surfaceUseCount() != 0 || surface.renderer().activeDrawingCount() != 0) allSubmissionLeasesReleased.set(false);
@@ -1226,12 +1419,15 @@ public class SnapshotCensorSurfaceAndroidTest {
                         .put("renderThreadId", p.renderThreadId).put("postSerial", p.postSerial).put("mainThread", p.mainThread)
                         .put("accepted", p.acceptedPaint != null).put("compositorUptimeMillis", p.compositorAtMillis)); }
                 File file = new File(activity.getExternalFilesDir(null), "censor-tap-fixtures-20261011/native-surface-metrics-" + System.nanoTime() + ".json");
-                JSONObject metrics = new JSONObject().put("schema", collectSubmissions ? 3 : 2)
+                JSONObject metrics = new JSONObject().put("schema", reverseIsolationProbe != null ? 6 : motionRefusalProbe != null ? 5 : demandProbe != null ? 4 : collectSubmissions ? 3 : 2)
                         .put("mainThread", false).put("actualAccessibility", false).put("pixelAcceptance", false)
                         .put("lockAttempts", surface.lockCount()).put("successfulPosts", surface.postCount())
                         .put("postAttempts", surface.postAttempts()).put("postReturns", surface.postReturns())
                         .put("droppedSuccessfulCompletions", surface.droppedSuccessfulCompletionCount())
                         .put("endpointFailures", failures.get()).put("posts", rows);
+                if (demandProbe != null) metrics.put("frameDemandProbe", demandProbe);
+                if (reverseIsolationProbe != null) metrics.put("reverseIsolationProbe", reverseIsolationProbe);
+                if (motionRefusalProbe != null) metrics.put("motionRefusalProbe", motionRefusalProbe);
                 if (collectSubmissions) {
                     JSONArray attempts = new JSONArray(); synchronized (submissions) { for (SurfaceSubmission value : submissions) attempts.put(submissionJson(value)); }
                     metrics.put("submissionCallbacks", submissionCallbacks.get()).put("submissionOverflow", submissionOverflow.get())

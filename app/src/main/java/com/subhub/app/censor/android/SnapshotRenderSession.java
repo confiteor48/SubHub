@@ -147,6 +147,16 @@ public final class SnapshotRenderSession implements AutoCloseable {
     public CensorEngine.ActiveScope activeScope() { return owner.activeScope(); }
     public boolean isScopeCurrent(CensorEngine.ActiveScope scope) { return !closed && owner.isCurrent(scope); }
 
+    /** Advisory scroll demand only; neither a paint acknowledgement nor destination authority. */
+    boolean presentationAnimating(CensorEngine.ActiveScope scope, long configuration, long now) {
+        Binding value = binding;
+        if (closed || value == null || value.generation != configuration || scope == null
+                || value.appearance.isReverseMode() || !owner.isCurrent(scope)) return false;
+        boolean moving = owner.presentationAnimating(now);
+        return moving && !closed && binding == value && owner.isCurrent(scope)
+                && !closed && binding == value;
+    }
+
     /**
      * Fresh owner read at EVERY actual drawing call. No held/pending scene is replayed. The caller
      * supplies observed physical origin and its explicit clip contract; exports set live=false.
