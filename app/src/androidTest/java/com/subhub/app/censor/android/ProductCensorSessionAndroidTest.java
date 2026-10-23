@@ -108,6 +108,7 @@ public final class ProductCensorSessionAndroidTest {
     private final JSONArray productScrollSteps = new JSONArray();
     private Map<String, RectF> productGlyphBaseline;
     private File productScrollEvidence;
+    private File cadenceEvidence;
     private boolean productScrollPassed, ownedLabStarted;
     private boolean sustainedNativeGate, sustainedAddedVisible;
     private boolean windowCostGate;
@@ -173,6 +174,13 @@ public final class ProductCensorSessionAndroidTest {
         assertFalse("No enabled production capture intent may be borrowed", previousEnabled != 0 && previousServices != null
                 && (previousServices.contains("ScreenshotAccessibilityService") || previousServices.contains("ScreenCapture")));
         assertFalse("No live capture owner may be borrowed", ScreenshotAccessibilityService.isRunning());
+        String cadenceRun = InstrumentationRegistry.getArguments().getString("cadence_fixture_session");
+        if (cadenceRun != null) {
+            assertEquals("Only the cadence method owns this namespace", "inactiveReplacementAppliesPresetAccessibilityCadenceOnStartupAndReload", testName.getMethodName());
+            assertTrue(cadenceRun.matches("[a-f0-9]{32}"));
+            cadenceEvidence = new File(context.getFilesDir(), "censor-lab/native-cadence-fixtures/" + cadenceRun);
+            assertFalse("Retain existing cadence evidence", cadenceEvidence.exists()); assertTrue(cadenceEvidence.mkdirs());
+        }
         String scrollRun = InstrumentationRegistry.getArguments().getString("product_scroll_run");
         if (scrollRun != null) {
             assertTrue(scrollRun.matches("[A-Za-z0-9_-]{1,80}"));
@@ -186,7 +194,7 @@ public final class ProductCensorSessionAndroidTest {
         new HardcoreAutoPayManager(context).disable();
         new StatsRepository(context).endSession();
         for (String name : OWNED_STORES) assertTrue(context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit());
-        assertTrue(preferences.edit().putBoolean(AppModeManager.KEY_ARMED, true)
+        assertTrue(preferences.edit().putBoolean(AppModeManager.KEY_ARMED, cadenceEvidence == null)
                 .putStringSet(AppModeManager.KEY_INCLUDED_PACKAGES, Collections.singleton(TARGET))
                 .putBoolean(AppModeManager.KEY_ALL_APPS, false).putBoolean(FeatureModuleManager.KEY_CENSOR_ENABLED, true)
                 .putString(SettingsRepository.KEY_CAPTURE_METHOD, CaptureMethod.APP_MODE.preferenceValue())
@@ -347,6 +355,87 @@ public final class ProductCensorSessionAndroidTest {
         assertEquals(previousEnabled, Settings.Secure.getInt(context.getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, 0));
         if (evidenceFailure instanceof Exception) throw (Exception) evidenceFailure;
         if (evidenceFailure instanceof Error) throw (Error) evidenceFailure;
+    }
+
+    @Test public void inactiveReplacementAppliesPresetAccessibilityCadenceOnStartupAndReload() throws Exception {
+        org.junit.Assume.assumeTrue("Explicit private cadence fixture namespace", cadenceEvidence != null);
+        String policy = InstrumentationRegistry.getArguments().getString("cadence_policy");
+        assertTrue("Exact control or restored policy", "omitted".equals(policy) || "restored".equals(policy));
+        JSONObject result = new JSONObject().put("schema", 1).put("policy", policy)
+                .put("actualBoundServiceInfo", true).put("physicalAcceptance", false).put("scrollPerformanceAcceptance", false);
+        JSONArray observations = new JSONArray(); boolean passed = false;
+        result.put("observations", observations);
+        try {
+            assertFalse(preferences.getBoolean(AppModeManager.KEY_ARMED, true));
+            assertTrue(preferences.edit().putString(SettingsRepository.KEY_DETECTION_PRESET, "high").commit());
+            connect();
+            JSONObject initial = awaitCadencePolicy("startup-high", "restored".equals(policy) ? 0 : 16,
+                    "restored".equals(policy), observations);
+            assertEquals(4, initial.getInt("configuredThreads"));
+            if ("restored".equals(policy)) {
+                assertTrue(preferences.edit().putString(SettingsRepository.KEY_DETECTION_PRESET, "medium").commit());
+                JSONObject medium = awaitCadencePolicy("reload-medium", 16, false, observations);
+                assertEquals(3, medium.getInt("configuredThreads")); assertCadenceIdentity(initial, medium);
+                assertTrue(preferences.edit().putString(SettingsRepository.KEY_DETECTION_PRESET, "high").commit());
+                JSONObject high = awaitCadencePolicy("reload-high", 0, true, observations);
+                assertEquals(4, high.getInt("configuredThreads")); assertCadenceIdentity(initial, high);
+            }
+            assertFalse(session.isActive()); assertEquals(0, models.get()); assertEquals(0, closes.get());
+            assertEquals(0, nativeProviderEntries.get()); assertTrue(batches.isEmpty()); assertTrue(preparations.isEmpty());
+            assertTrue(nativeFrames.isEmpty()); assertTrue(nativeCostStarts.isEmpty()); assertTrue(faults.isEmpty());
+            assertEquals(0, traces.stream().filter(t -> t.stage == CensorEngine.Stage.CAPTURE_DISPATCHED).count());
+            passed = true;
+        } finally {
+            result.put("bodyPassed", passed).put("models", models.get()).put("closes", closes.get())
+                    .put("selectionReads", readCount.get()).put("nativeProviderEntries", nativeProviderEntries.get())
+                    .put("captureDispatches", traces.stream().filter(t -> t.stage == CensorEngine.Stage.CAPTURE_DISPATCHED).count())
+                    .put("batches", batches.size()).put("preparations", preparations.size()).put("nativeFrames", nativeFrames.size())
+                    .put("nativeCostStarts", nativeCostStarts.size()).put("faults", faults.size());
+            File output = new File(cadenceEvidence, "cadence-policy.json");
+            assertTrue("Retain previous cadence evidence", output.createNewFile());
+            try (FileOutputStream stream = new FileOutputStream(output)) { stream.write(result.toString().getBytes(StandardCharsets.UTF_8)); }
+        }
+    }
+    private JSONObject awaitCadencePolicy(String stage, long timeout, boolean include, JSONArray retained) throws Exception {
+        long started = SystemClock.uptimeMillis(); AtomicReference<JSONObject> latest = new AtomicReference<>(); AtomicInteger polls = new AtomicInteger();
+        try {
+            await("Actual bound service cadence " + stage, () -> {
+                main(() -> latest.set(observeCadencePolicy(stage))); polls.incrementAndGet();
+                JSONObject value = latest.get();
+                return value.optLong("notificationTimeoutMillis", -1) == timeout && value.optBoolean("includeNotImportant") == include;
+            });
+            return latest.get();
+        } finally {
+            if (latest.get() != null) retained.put(latest.get().put("phaseStartedAtMillis", started)
+                    .put("actualQueries", polls.get()).put("phaseFinishedAtMillis", SystemClock.uptimeMillis()));
+        }
+    }
+    private JSONObject observeCadencePolicy(String stage) {
+        assertEquals(Looper.getMainLooper(), Looper.myLooper()); assertSame(session, ProductCensorQualification.current());
+        ScreenshotAccessibilityService actual = (ScreenshotAccessibilityService) session.service();
+        android.accessibilityservice.AccessibilityServiceInfo info = actual.getServiceInfo();
+        assertNotNull("Actual bound service info, not UiAutomation info", info); assertBinding();
+        try {
+            return new JSONObject().put("stage", stage).put("queriedAtMillis", SystemClock.uptimeMillis())
+                    .put("mainThread", true).put("serviceIdentity", System.identityHashCode(actual))
+                    .put("ownerIdentity", System.identityHashCode(session)).put("pid", actual.qualificationBoundPid())
+                    .put("instrumentationPid", Process.myPid()).put("serviceClass", info.getResolveInfo().serviceInfo.name)
+                    .put("legacyAbsent", actual.legacyCensorRuntimeAbsentForQualification()).put("active", session.isActive())
+                    .put("preset", preferences.getString(SettingsRepository.KEY_DETECTION_PRESET, ""))
+                    .put("configuredThreads", new SettingsRepository(context).loadDetectorConfig().getInferenceThreads())
+                    .put("notificationTimeoutMillis", info.notificationTimeout).put("flags", info.flags)
+                    .put("nonCadenceFlags", info.flags & ~android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS)
+                    .put("includeNotImportant", (info.flags & android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS) != 0)
+                    .put("eventTypes", info.eventTypes).put("feedbackType", info.feedbackType).put("capabilities", info.getCapabilities())
+                    .put("packageNames", info.packageNames == null ? JSONObject.NULL : new JSONArray(Arrays.asList(info.packageNames)));
+        } catch (org.json.JSONException failure) { throw new AssertionError("Cadence metadata", failure); }
+    }
+    private static void assertCadenceIdentity(JSONObject initial, JSONObject current) throws Exception {
+        for (String key : Arrays.asList("serviceIdentity", "ownerIdentity", "pid", "instrumentationPid", "serviceClass",
+                "nonCadenceFlags", "eventTypes", "feedbackType", "capabilities", "packageNames")) {
+            assertEquals("Unrelated service field " + key, initial.get(key).toString(), current.get(key).toString());
+        }
+        assertTrue(current.getBoolean("mainThread")); assertTrue(current.getBoolean("legacyAbsent")); assertFalse(current.getBoolean("active"));
     }
 
     @Test public void actualServiceScrollRoutePreservesOrdinaryNativeGroupsAndIndependentGlyphPoses() throws Exception {
@@ -2969,6 +3058,7 @@ public final class ProductCensorSessionAndroidTest {
         } finally { if (latest != null) latest.recycle(); }
     }
     private File directory() {
+        if (cadenceEvidence != null) return cadenceEvidence;
         if (productScrollEvidence != null) return productScrollEvidence;
         File directory = context.getExternalFilesDir("censor-tap-fixtures-20261011"); assertNotNull(directory);
         assertTrue(directory.isDirectory() || directory.mkdirs()); return directory;

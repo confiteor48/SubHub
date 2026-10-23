@@ -438,6 +438,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         productQualificationRoute = ProductCensorQualification.enabled(this);
         hardcoreSettingsGuard = new HardcoreSettingsGuard(this);
         subliminalOverlay = new SubliminalOverlayController(this);
+        configureAccessibilityCadence(settings.loadDetectorConfig());
         if (productQualificationRoute && Build.VERSION.SDK_INT >= 34) {
             qualificationBoundPid = Process.myPid();
             settings.preferences().registerOnSharedPreferenceChangeListener(listener);
@@ -452,7 +453,6 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
         motionEstimator = new ScrollFrameMotionEstimator();
         settings.preferences().registerOnSharedPreferenceChangeListener(listener);
         running = true;
-        configureAccessibilityCadence(settings.loadDetectorConfig());
 
         worker = newScheduledWorker("SubHub-capture", Process.THREAD_PRIORITY_DISPLAY);
         rowMotionShadow = BuildConfig.DEBUG && getSharedPreferences("row_motion_experiment", MODE_PRIVATE)
@@ -5112,6 +5112,7 @@ public final class ScreenshotAccessibilityService extends AccessibilityService {
     private void reloadProductSettings(String key) {
         main.post(() -> {
             if (Build.VERSION.SDK_INT < 34 || !running || productSession == null) return;
+            configureAccessibilityCadence(settings.loadDetectorConfig());
             if (key == null) productSession.ownershipChanged(); else productSession.settingsChanged(key);
             PopupStormManager.get().reloadSettings(this);
             if (subliminalOverlay != null) subliminalOverlay.updateSettings();
