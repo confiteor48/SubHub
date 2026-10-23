@@ -98,6 +98,57 @@ public class SnapshotCensorPainterAndroidTest {
         }
     }
 
+    @Test public void expectedFrameRoutesOnlyPoseWhilePaintClocksAndSourceStayActual() throws Exception {
+        try (Harness h = new Harness()) {
+            h.engine.start(42); h.image(0, Color.RED, PixelGeometry.display(320, 320, 320, 320), region(40, 40, 140, 140));
+            java.util.concurrent.atomic.AtomicLong revision = new java.util.concurrent.atomic.AtomicLong(-7);
+            java.util.concurrent.atomic.AtomicLong sampled = new java.util.concurrent.atomic.AtomicLong(-1);
+            SnapshotRenderSession session = new SnapshotRenderSession(new SnapshotRenderSession.Owner() {
+                @Override public CensorEngine.ActiveScope activeScope() { return h.engine.activeScope(); }
+                @Override public boolean isCurrent(CensorEngine.ActiveScope scope) { return h.engine.isCurrent(scope); }
+                @Override public CensorEngine<PixelFrame>.RenderView acquireRenderView() { return h.engine.acquireRenderView(); }
+                @Override public CensorEngine.PaintReceipt acknowledgePaint(CensorEngine.ActiveScope scope, long r,
+                        long g, List<Long> members, boolean reverse) { return h.engine.acknowledgePaint(scope, r, g, members, reverse); }
+                @Override public long presentationRevision() { return revision.get(); }
+                @Override public SnapshotCensorPainter.Pose presentation(SceneEngine.Mask mask, long now) {
+                    sampled.set(now);
+                    return new SnapshotCensorPainter.Pose(mask.displayRegion.translated(0, 40), region(0, 0, 320, 320));
+                }
+            }, (policy, r, obsolete) -> Collections.emptyList(), 1, action -> { action.run(); return true; }, () -> { });
+            Bitmap target = output();
+            try {
+                for (int mode = 0; mode < 6; mode++) {
+                    boolean live = mode != 4, reverse = mode == 5;
+                    session.configure(appearance(CensorAppearance.Type.BOX, reverse),
+                            SnapshotPaintPolicy.from(com.subhub.app.detection.DetectionPreset.LOW), 0);
+                    long began = SystemClock.uptimeMillis(), expected = began + 1000;
+                    PresentationFrame frame = new PresentationFrame(mode == 3 ? expected : began,
+                            mode == 2 ? began - 1 : expected - 100, expected, mode == 1 ? 8 : -7);
+                    sampled.set(-1);
+                    try (SnapshotRenderSession.Drawing drawing = session.draw(new Canvas(target), 0, 0,
+                            new android.graphics.Rect(0, 0, 320, 320), live, true, true, h.engine.activeScope(), frame)) {
+                        assertNotNull(drawing);
+                        long ended = SystemClock.uptimeMillis();
+                        assertTrue(drawing.paint.recordedAtMillis >= began && drawing.paint.recordedAtMillis <= ended);
+                        assertTrue("Fixture's future target is distinct from the actual recording clock", ended < expected - 100);
+                        assertEquals(live && !reverse ? (mode == 0 ? expected : drawing.paint.recordedAtMillis) : -1, sampled.get());
+                        assertTrue(session.isCurrent(drawing.paint));
+                        try (CensorEngine<PixelFrame>.RenderView view = h.engine.acquireRenderView()) {
+                            assertEquals(-1, view.snapshot.destination.pixelAtMillis);
+                            assertEquals(0, h.now);
+                            assertEquals(40, view.snapshot.groups.get(0).members.get(0).displayRegion.top, 0);
+                        }
+                    }
+                    assertEquals(0, session.activeDrawingCount());
+                }
+            } finally { target.recycle(); session.close(); session.finishDrawing(); }
+            long finishBy = SystemClock.uptimeMillis() + 5000;
+            while (!session.preparationTerminated() && SystemClock.uptimeMillis() < finishBy) Thread.sleep(5);
+            assertTrue(session.preparationTerminated());
+            assertTrue(session.managedResourcesDrained());
+        }
+    }
+
     @Test public void changedPresentationCannotMintOrReuseACurrentPaint() {
         try (Harness h = new Harness()) {
             h.engine.start(42); h.image(0, Color.RED, PixelGeometry.display(320, 320, 320, 320), region(40, 40, 140, 140));
@@ -119,7 +170,9 @@ public class SnapshotCensorPainterAndroidTest {
             try {
                 session.configure(appearance(CensorAppearance.Type.BOX, false),
                         SnapshotPaintPolicy.from(com.subhub.app.detection.DetectionPreset.LOW), 0);
-                assertNull(session.draw(new Canvas(target), 0, 0, new android.graphics.Rect(0, 0, 320, 320), true, true, true, h.engine.activeScope()));
+                long callback = SystemClock.uptimeMillis();
+                PresentationFrame frame = new PresentationFrame(callback, callback + 900, callback + 1000, revision.get());
+                assertNull(session.draw(new Canvas(target), 0, 0, new android.graphics.Rect(0, 0, 320, 320), true, true, true, h.engine.activeScope(), frame));
                 try (SnapshotRenderSession.Drawing drawing = session.draw(new Canvas(target), 0, 0,
                         new android.graphics.Rect(0, 0, 320, 320), true, true, true, h.engine.activeScope())) {
                     assertNotNull(drawing); assertTrue(session.isCurrent(drawing.paint)); revision.incrementAndGet();

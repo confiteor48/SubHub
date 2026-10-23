@@ -102,6 +102,138 @@ public class SnapshotCensorSurfaceAndroidTest {
                 Collections.singletonList("BLOCKED"), reverse, 100, "rectangle", "SubHub", "Access blocked.");
     }
 
+    @Test @SdkSuppress(minSdkVersion = 33)
+    public void preferredVsyncTimeMovesActualSurfaceMaskWithoutChangingSourceOrReceiptClock() throws Exception {
+        CountDownLatch posted = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<long[]> selected = new AtomicReference<>();
+        AtomicLong selectedAttempt = new AtomicLong();
+        try (Fixture f = new Fixture(true)) {
+            f.submissionLabel = "expected-frame-moving-mask";
+            try {
+                // One initial image, farther inside the owner so cold first draws do not
+                // lose the distinguishing top strip above the actual Surface clip.
+                main(() -> {
+                    f.surface.getLocationOnScreen(f.origin);
+                    f.h.engine.start(42, ProtectionScope.normal(f.taps.scope()));
+                    f.h.image(1, new int[]{f.origin[0], f.origin[1] + 120}, Color.RED);
+                    f.configure(CensorAppearance.Type.BOX, false, 0); f.surface.requestObservedFrame();
+                });
+                f.quiet();
+                CensorEngine.PaintReceipt baseline = f.lastAccepted().acceptedPaint;
+                assertNotNull(baseline); assertTrue(baseline.scope.same(f.h.engine.activeScope()));
+                assertNotNull(baseline.canvas); assertEquals(1, baseline.canvas.receivedAtMillis); assertFalse(baseline.members.isEmpty());
+                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                ReplacementScrollPresentation presentation = new ReplacementScrollPresentation(); presentation.reset(42, 7);
+                long at = SystemClock.uptimeMillis(), epoch = f.h.engine.currentEpoch();
+                SceneEngine.Mask mask;
+                try (CensorEngine<PixelFrame>.RenderView view = f.h.engine.acquireRenderView()) {
+                    mask = view.snapshot.groups.get(0).members.get(0);
+                }
+                SceneEngine.Region owner = new SceneEngine.Region(f.origin[0], f.origin[1], f.origin[0] + 320, f.origin[1] + 320);
+                try (ScrollMotionLedger ledger = new ScrollMotionLedger(8, 4, 16)) {
+                    ScrollMotionLedger.Scope scope = new ScrollMotionLedger.Scope(epoch, 42, 7, ProtectionScope.normal(f.taps.scope())); ledger.reset(scope);
+                    for (int i = 0; i < 3; i++) {
+                        long source = at - 200 + i * 100;
+                        presentation.observe(ledger.observe(new ScrollMotionLedger.Sample(scope, i + 1, 10, 1,
+                                source, source, source, source, ScrollMotionLedger.Coordinate.absolute(0),
+                                ScrollMotionLedger.Coordinate.absolute(i * 50), owner), source));
+                    }
+                    presentation.captured(epoch, 42, mask.geometrySource.imageRequestIdentity, at, at);
+                    JSONArray queryRows = new JSONArray(); AtomicInteger queryCount = new AtomicInteger();
+                    JSONObject diagnostics = new JSONObject().put("schema", 2).put("setupAtMillis", at)
+                            .put("controlMember", mask.identity).put("controlRequest", mask.geometrySource.imageRequestIdentity)
+                            .put("seedYOffset", 120).put("capacity", 128).put("queryCount", 0).put("overflow", 0)
+                            .put("actualProviderMemberKnown", false).put("queries", queryRows);
+                    f.expectedFrameProbe = new JSONObject().put("schema", 2).put("fixtureDiagnostics", diagnostics);
+                    f.presentationSample.set(sampleAt -> {
+                        long actual = SystemClock.uptimeMillis();
+                        ReplacementScrollPresentation.Pose expected = presentation.pose(mask, sampleAt);
+                        ReplacementScrollPresentation.Pose control = presentation.pose(mask, actual);
+                        boolean upward = expected != null && control != null && control.region.top > expected.region.top;
+                        double interiorStart = expected == null || control == null ? Double.NaN
+                                : upward ? expected.region.top : Math.max(control.region.bottom, expected.region.top);
+                        double interiorEnd = expected == null || control == null ? Double.NaN
+                                : upward ? Math.min(control.region.top, expected.region.bottom) : expected.region.bottom;
+                        int patchY = Double.isNaN(interiorEnd) ? -1 : (int) Math.floor((interiorStart + interiorEnd) * .5 - f.origin[1]);
+                        String reason = sampleAt <= actual ? "NO_FUTURE_AT_PROVIDER" : expected == null || control == null ? "NO_POSE"
+                                : Math.abs(control.region.top - expected.region.top) < 2 ? "INSUFFICIENT_SEPARATION"
+                                : patchY < 0 || patchY >= 320 || patchY < Math.ceil(expected.region.top - f.origin[1] + 1)
+                                || patchY + 1 > expected.region.bottom - f.origin[1] - 1
+                                || (upward ? patchY + 1 > control.region.top - f.origin[1] : patchY < control.region.bottom - f.origin[1])
+                                ? "PATCH_OUTSIDE_CLIP" : "ELIGIBLE";
+                        int query = queryCount.incrementAndGet();
+                        try {
+                            synchronized (diagnostics) {
+                                diagnostics.put("queryCount", query).put("overflow", Math.max(0, query - 128));
+                                if (query <= 128) queryRows.put(new JSONObject().put("query", query)
+                                        .put("prospectiveAttempt", f.surface.postAttempts() + 1).put("sampleAtMillis", sampleAt)
+                                        .put("actualAtMillis", actual).put("expectedRegion", expected == null ? JSONObject.NULL : regionJson(expected.region))
+                                        .put("controlRegion", control == null ? JSONObject.NULL : regionJson(control.region))
+                                        .put("patchY", patchY).put("reason", reason));
+                            }
+                        } catch (Exception failure) { throw new IllegalStateException("Fixture query export", failure); }
+                        if (!"ELIGIBLE".equals(reason)) return;
+                        if (selected.compareAndSet(null, new long[]{sampleAt, actual})) {
+                            f.workerPostHook.set(() -> {
+                                selectedAttempt.set(f.surface.postAttempts());
+                                posted.countDown();
+                                try { assertTrue("Bounded posted moving-mask inspection", release.await(8, TimeUnit.SECONDS)); }
+                                catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new AssertionError(failure); }
+                            });
+                        }
+                    });
+                    f.presentation.set(presentation); main(f.surface::presentationChanged);
+                    assertTrue("Actual preferred frame lead must reach a hardware-locked Surface draw", posted.await(5, TimeUnit.SECONDS));
+                    long[] clocks = selected.get(); assertNotNull(clocks);
+                    assertTrue(queryCount.get() <= 128);
+                    ReplacementScrollPresentation.Pose expected = presentation.pose(mask, clocks[0]);
+                    ReplacementScrollPresentation.Pose control = presentation.pose(mask, clocks[1]);
+                    int x = (int) Math.floor((expected.region.left + expected.region.right) * .5 - f.origin[0]);
+                    boolean upward = control.region.top > expected.region.top;
+                    double interiorStart = upward ? expected.region.top : Math.max(control.region.bottom, expected.region.top);
+                    double interiorEnd = upward ? Math.min(control.region.top, expected.region.bottom) : expected.region.bottom;
+                    int y = (int) Math.floor((interiorStart + interiorEnd) * .5 - f.origin[1]);
+                    f.expectedFrameProbe = new JSONObject().put("schema", 2).put("fixtureDiagnostics", diagnostics).put("attempt", selectedAttempt.get())
+                            .put("member", mask.identity).put("poseSampleUptimeMillis", clocks[0])
+                            .put("providerCallbackUptimeMillis", clocks[1]).put("expectedRegion", regionJson(expected.region))
+                            .put("actualTimeControlRegion", regionJson(control.region)).put("patchX", x).put("patchY", y)
+                            .put("compositorUptimeMillis", -1).put("physicalAcceptance", false);
+                    assertTrue("Opaque center patch distinguishes preferred-time pose from actual-time control", x >= 0 && x < 320
+                            && y >= 0 && y < 320 && y >= Math.ceil(expected.region.top - f.origin[1] + 1)
+                            && y + 1 <= expected.region.bottom - f.origin[1] - 1
+                            && (upward ? y + 1 <= control.region.top - f.origin[1] : y >= control.region.bottom - f.origin[1]));
+                    Bitmap buffer = f.buffer();
+                    try {
+                        export(buffer, "expected-frame-moving-mask-buffer");
+                        f.expectedFrameProbe.put("bufferArgb", buffer.getPixel(x, y));
+                        assertEquals(Color.GREEN, buffer.getPixel(x, y));
+                    }
+                    finally { buffer.recycle(); }
+                    f.composed("expected-frame-moving-mask-composed", x, y, Color.GREEN);
+                    f.expectedFrameProbe.put("composedPatchAsserted", true);
+                    release.countDown();
+                    await(() -> f.surface.executingRenderCount() == 0 && f.surface.completionNoticeCount() == 0);
+                    SurfaceSubmission submission;
+                    synchronized (f.submissions) {
+                        submission = f.submissions.stream().filter(value -> value.attempt == selectedAttempt.get()).findFirst().orElseThrow(AssertionError::new);
+                    }
+                    assertNotNull(submission.paint);
+                    assertTrue(submission.holderReturned && submission.canvasClipValidated && submission.recordingFinished && submission.cleanupSucceeded);
+                    assertTrue(submission.paint.sampledAtMillis <= clocks[1]);
+                    assertTrue(submission.paint.sampledAtMillis < clocks[0]);
+                    assertTrue(submission.paint.sampledAtMillis <= submission.postEndedAtMillis);
+                    SurfaceSubmission.Member drawn = submission.paint.members.stream().filter(value -> value.identity == mask.identity).findFirst().orElseThrow(AssertionError::new);
+                    assertEquals(expected.region.top, drawn.destination.top, .001);
+                    f.expectedFrameProbe.put("postSerial", submission.postSerial)
+                            .put("recordedUptimeMillis", submission.paint.sampledAtMillis)
+                            .put("postEndedUptimeMillis", submission.postEndedAtMillis);
+                    assertEquals(-1, mask.geometrySource.pixelAtMillis);
+                    assertEquals(1, f.h.now); f.assertSubmissionInventory();
+                }
+            } finally { f.presentationSample.set(null); release.countDown(); }
+        }
+    }
+
     @Test public void unrelatedPreAdmissionOriginDuringDrawKeepsActualPostedMask() throws Exception {
         originInsertionDuringDraw(false);
     }
@@ -1144,9 +1276,15 @@ public class SnapshotCensorSurfaceAndroidTest {
         Runnable only() { synchronized (actions) { assertEquals(1, actions.size()); return actions.get(0); } }
     }
 
+    private static File fixtureDirectory(android.content.Context context) {
+        String session = InstrumentationRegistry.getArguments().getString("surface_fixture_session");
+        if (session == null) return new File(context.getExternalFilesDir(null), "censor-tap-fixtures-20261011");
+        if (!session.matches("[a-f0-9]{32}")) throw new IllegalArgumentException("fixture session");
+        return new File(context.getFilesDir(), "censor-lab/native-surface-fixtures/" + session);
+    }
     private static void export(Bitmap bitmap, String label) throws Exception {
         if (!"true".equals(InstrumentationRegistry.getArguments().getString("tap_fixture_capture"))) return;
-        File directory = new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getExternalFilesDir(null), "censor-tap-fixtures-20261011");
+        File directory = fixtureDirectory(InstrumentationRegistry.getInstrumentation().getTargetContext());
         assertTrue(directory.isDirectory() || directory.mkdirs());
         try (FileOutputStream stream = new FileOutputStream(new File(directory, "native-mask-" + label + "-" + System.nanoTime() + ".png"))) {
             assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream));
@@ -1188,6 +1326,7 @@ public class SnapshotCensorSurfaceAndroidTest {
         JSONObject demandProbe;
         JSONObject motionRefusalProbe;
         JSONObject reverseIsolationProbe;
+        JSONObject expectedFrameProbe;
         final List<SurfaceSubmission> submissions = Collections.synchronizedList(new ArrayList<>());
         final AtomicInteger submissionCallbacks = new AtomicInteger(), submissionOverflow = new AtomicInteger();
         final AtomicReference<Runnable> submissionHook = new AtomicReference<>();
@@ -1200,6 +1339,7 @@ public class SnapshotCensorSurfaceAndroidTest {
         final AtomicReference<Thread> lockedCanvasThread = new AtomicReference<>();
         final AtomicReference<ReplacementScrollPresentation> presentation = new AtomicReference<>();
         final AtomicLong presentationTime = new AtomicLong(-1);
+        final AtomicReference<java.util.function.LongConsumer> presentationSample = new AtomicReference<>();
         SnapshotSurfaceFixtureActivity activity; SnapshotCensorSurface surface; Harness h;
         Fixture() throws Exception { this((policy, revision, obsolete) -> Collections.emptyList(), null); }
         Fixture(boolean collect) throws Exception { this((policy, revision, obsolete) -> Collections.emptyList(), null, null, null, collect); }
@@ -1225,6 +1365,7 @@ public class SnapshotCensorSurfaceAndroidTest {
                     @Override public CensorEngine.ActiveScope activeScope() { return h.engine.activeScope(); }
                     @Override public boolean isCurrent(CensorEngine.ActiveScope scope) { return h.engine.isCurrent(scope); }
                     @Override public SnapshotCensorPainter.Pose presentation(SceneEngine.Mask mask, long now) {
+                        java.util.function.LongConsumer sample = presentationSample.get(); if (sample != null) sample.accept(now);
                         ReplacementScrollPresentation value = presentation.get();
                         long fixed = presentationTime.get();
                         ReplacementScrollPresentation.Pose pose = value == null ? null : value.pose(mask, fixed < 0 ? now : fixed);
@@ -1418,8 +1559,8 @@ public class SnapshotCensorSurfaceAndroidTest {
                         .put("uiAdmittedUptimeMillis", p.uiAdmittedAtMillis).put("queuedElapsedNanos", p.queuedNanos)
                         .put("renderThreadId", p.renderThreadId).put("postSerial", p.postSerial).put("mainThread", p.mainThread)
                         .put("accepted", p.acceptedPaint != null).put("compositorUptimeMillis", p.compositorAtMillis)); }
-                File file = new File(activity.getExternalFilesDir(null), "censor-tap-fixtures-20261011/native-surface-metrics-" + System.nanoTime() + ".json");
-                JSONObject metrics = new JSONObject().put("schema", reverseIsolationProbe != null ? 6 : motionRefusalProbe != null ? 5 : demandProbe != null ? 4 : collectSubmissions ? 3 : 2)
+                File file = new File(fixtureDirectory(activity), "native-surface-metrics-" + System.nanoTime() + ".json");
+                JSONObject metrics = new JSONObject().put("schema", expectedFrameProbe != null ? 7 : reverseIsolationProbe != null ? 6 : motionRefusalProbe != null ? 5 : demandProbe != null ? 4 : collectSubmissions ? 3 : 2)
                         .put("mainThread", false).put("actualAccessibility", false).put("pixelAcceptance", false)
                         .put("lockAttempts", surface.lockCount()).put("successfulPosts", surface.postCount())
                         .put("postAttempts", surface.postAttempts()).put("postReturns", surface.postReturns())
@@ -1428,6 +1569,7 @@ public class SnapshotCensorSurfaceAndroidTest {
                 if (demandProbe != null) metrics.put("frameDemandProbe", demandProbe);
                 if (reverseIsolationProbe != null) metrics.put("reverseIsolationProbe", reverseIsolationProbe);
                 if (motionRefusalProbe != null) metrics.put("motionRefusalProbe", motionRefusalProbe);
+                if (expectedFrameProbe != null) metrics.put("expectedFrameProbe", expectedFrameProbe);
                 if (collectSubmissions) {
                     JSONArray attempts = new JSONArray(); synchronized (submissions) { for (SurfaceSubmission value : submissions) attempts.put(submissionJson(value)); }
                     metrics.put("submissionCallbacks", submissionCallbacks.get()).put("submissionOverflow", submissionOverflow.get())

@@ -6,6 +6,7 @@ import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.PorterDuff;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -15,6 +16,8 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewParent;
 import android.widget.FrameLayout;
+
+import androidx.annotation.RequiresApi;
 
 import com.subhub.app.capture.CustomImageManager;
 import com.subhub.app.censor.engine.CensorEngine;
@@ -80,11 +83,13 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
         final Rect visible;
         final boolean paint;
         final CensorEngine.ActiveScope scope;
+        final PresentationFrame frame;
         Pose(long generation, long configuration, int x, int y, int width, int height,
-                Rect visible, boolean paint, CensorEngine.ActiveScope scope) {
+                Rect visible, boolean paint, CensorEngine.ActiveScope scope, PresentationFrame frame) {
             this.generation = generation; this.configuration = configuration; this.x = x; this.y = y;
             this.width = width; this.height = height; this.visible = new Rect(visible); this.paint = paint;
             this.scope = scope; enqueued = SystemClock.elapsedRealtimeNanos();
+            this.frame = frame;
         }
     }
     /** Metadata only: actual reads have already closed after the real post returned. */
@@ -142,7 +147,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
     private boolean surfaceAdmission;
     private volatile boolean closed, faulted;
     private int surfaceWidth, surfaceHeight, surfaceUsers;
-    private long generation, postSerial, replacedPoses, replacedCompletions, droppedSuccessfulCompletions;
+    private long generation, frameGeneration, postSerial, replacedPoses, replacedCompletions, droppedSuccessfulCompletions;
     private volatile long postCount, lockCount, postAttempts, postReturns;
     private volatile long destructionsStarted, destructionsReturned;
     private final boolean collectSubmissions;
@@ -154,7 +159,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
     private CensorEngine.ActiveScope admittedScope; // Immutable pose identity, guarded by gate.
     private final Runnable refresh = () -> { if (!closed) demand(); };
     private final Choreographer.FrameCallback frame = time -> {
-        frameQueued = false; if (!closed && !faulted) enqueueObservedPose();
+        frameQueued = false; if (!closed && !faulted) enqueueObservedPose(null);
     };
     private final SurfaceHolder.Callback lifecycle = new SurfaceHolder.Callback() {
         @Override public void surfaceCreated(SurfaceHolder value) {
@@ -244,11 +249,29 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
         }
         if (poll != null) deliverCompletion(poll);
         if (!frameQueued && ready()) {
-            frameQueued = true; Choreographer.getInstance().postFrameCallback(frame); observer.drawDemand();
+            frameQueued = true;
+            if (Build.VERSION.SDK_INT >= 33) postExpectedFrame(++frameGeneration);
+            else Choreographer.getInstance().postFrameCallback(frame);
+            observer.drawDemand();
         }
+    }
+    @RequiresApi(33)
+    private void postExpectedFrame(long requestedGeneration) {
+        Choreographer.getInstance().postVsyncCallback(data -> {
+            if (!frameQueued || requestedGeneration != frameGeneration) return;
+            frameQueued = false;
+            if (closed || faulted) return;
+            Choreographer.FrameTimeline timeline = data.getPreferredFrameTimeline();
+            PresentationFrame expected = new PresentationFrame(SystemClock.uptimeMillis(),
+                    timeline.getDeadlineNanos() / 1_000_000L,
+                    timeline.getExpectedPresentationTimeNanos() / 1_000_000L,
+                    session.presentationRevision());
+            enqueueObservedPose(expected);
+        });
     }
     private void cancelDemand() {
         main.removeCallbacks(refresh);
+        frameGeneration++;
         if (frameQueued) { Choreographer.getInstance().removeFrameCallback(frame); frameQueued = false; }
     }
     private boolean ready() {
@@ -282,7 +305,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
         synchronized (gate) { return !closed && !faulted && surfaceAdmission
                 && generation == value.pose.generation && postSerial == value.serial; }
     }
-    private void enqueueObservedPose() {
+    private void enqueueObservedPose(PresentationFrame frame) {
         onMain(); if (closed || faulted || !ready()) return;
         boolean geometry = rectangularPose(); surface.getLocationOnScreen(origin);
         long epoch; synchronized (gate) { epoch = generation; }
@@ -293,7 +316,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
         }
         Pose pose = new Pose(epoch, configuration, origin[0], origin[1], surfaceWidth, surfaceHeight,
                 geometry ? visible : new Rect(0, 0, surfaceWidth, surfaceHeight),
-                geometry && allowed && rectangular, scope);
+                geometry && allowed && rectangular, scope, frame);
         // Owner reads/observers above may reenter: do not submit their superseded geometry.
         if (closed || faulted || !ready() || (pose.paint && !poseCurrent(pose))
                 || configuration != session.configurationGeneration()) { demand(); return; }
@@ -360,7 +383,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
                     && canvas.getHeight() == pose.height;
             if (geometry && pose.paint && pose.scope != null && lifetime(pose)
                     && session.configurationGeneration() == pose.configuration) {
-                drawing = session.draw(canvas, pose.x, pose.y, pose.visible, true, true, true, pose.scope);
+                drawing = session.draw(canvas, pose.x, pose.y, pose.visible, true, true, true, pose.scope, pose.frame);
             }
             boolean painted = drawing != null && lifetime(pose) && session.configurationGeneration() == pose.configuration;
             if (!painted) canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
@@ -433,7 +456,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
     }
     private void failSubmission() {
         long epoch; synchronized (gate) { renderingReserved = false; epoch = generation; }
-        Completion value = failed(new Pose(epoch, 0, 0, 0, 0, 0, new Rect(), false, null),
+        Completion value = failed(new Pose(epoch, 0, 0, 0, 0, 0, new Rect(), false, null, null),
                 SystemClock.uptimeMillis(), SystemClock.elapsedRealtimeNanos());
         offerCompletion(value);
     }
@@ -605,7 +628,7 @@ public final class SnapshotCensorSurface extends FrameLayout implements AutoClos
     SurfaceView endpointView() { return surface; }
     void requestFrame() { demand(); }
     // Native queue controls observe real UI geometry but bypass only the Choreographer wait.
-    void requestObservedFrame() { enqueueObservedPose(); }
+    void requestObservedFrame() { enqueueObservedPose(null); }
     boolean demandPending() { onMain(); return frameQueued || changedQueued.get(); }
     long submissionObserverFailures() { return submissionObserverFailures; }
     long submissionObservationNanos() { return submissionObservationNanos; }

@@ -144,6 +144,7 @@ public final class SnapshotRenderSession implements AutoCloseable {
         invalidateResources();
     }
     public long configurationGeneration() { Binding value = binding; return value == null ? 0 : value.generation; }
+    long presentationRevision() { return owner.presentationRevision(); }
     public CensorEngine.ActiveScope activeScope() { return owner.activeScope(); }
     public boolean isScopeCurrent(CensorEngine.ActiveScope scope) { return !closed && owner.isCurrent(scope); }
 
@@ -164,6 +165,11 @@ public final class SnapshotRenderSession implements AutoCloseable {
      */
     public Drawing draw(Canvas canvas, int x, int y, Rect visible, boolean live, boolean geometry,
             boolean rectangular, CensorEngine.ActiveScope expectedScope) {
+        return draw(canvas, x, y, visible, live, geometry, rectangular, expectedScope, null);
+    }
+
+    Drawing draw(Canvas canvas, int x, int y, Rect visible, boolean live, boolean geometry,
+            boolean rectangular, CensorEngine.ActiveScope expectedScope, PresentationFrame frame) {
         onDrawingThread(); draws.incrementAndGet(); Binding config;
         synchronized (this) {
             config = binding; if (closed || config == null || !geometry) return null;
@@ -180,6 +186,7 @@ public final class SnapshotRenderSession implements AutoCloseable {
             if (painter == null) painter = new SnapshotCensorPainter(density);
             view = owner.acquireRenderView(); prepared = resources.acquire();
             SnapshotCensorPainter.Result result = null; long revision = -1, time = SystemClock.uptimeMillis();
+            long presentationTime = frame == null ? time : frame.sampleAt(time, presentationRevision);
             if (view != null && view.snapshot.destination.epoch == scope.epoch && view.snapshot.destination.geometry == scope.geometry) {
                 revision = view.snapshot.revision;
                 if (live) requestPreparation(view, config);
@@ -188,7 +195,8 @@ public final class SnapshotRenderSession implements AutoCloseable {
                 try {
                     canvas.translate(-x, -y); canvas.clipRect(0, 0, view.snapshot.destination.width, view.snapshot.destination.height);
                     result = painter.draw(canvas, view, paint, config.appearance, config.generation, time,
-                            rectangular, live && !config.appearance.isReverseMode() ? owner::presentation : null, recordGeometry);
+                            rectangular, live && !config.appearance.isReverseMode()
+                                    ? (mask, ignored) -> owner.presentation(mask, presentationTime) : null, recordGeometry);
                 } finally { canvas.restoreToCount(saved); }
             } else if (view == null && config.appearance.isReverseMode()) {
                 painter.drawColdReverse(canvas, new RectF(visible), config.appearance, time);
