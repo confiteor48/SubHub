@@ -62,6 +62,9 @@ public final class DetectionEngine implements AutoCloseable {
     private final boolean latencyPriority;
     private final boolean nnapiFp16Relaxation;
     private final ExecutorService preprocessExecutor;
+    private final CpuExecutionBudget executionBudget;
+    private final BoundedRgbInput boundedRgbInput;
+    private boolean budgetRetired;
     private DetectorConfig config;
     private OrtSession session;
     private String inputName = "images";
@@ -100,10 +103,28 @@ public final class DetectionEngine implements AutoCloseable {
             DetectorConfig config,
             boolean latencyPriority,
             boolean nnapiFp16Relaxation) {
+        this(context, config, latencyPriority, nnapiFp16Relaxation, null);
+    }
+
+    /** Test-only explicit resource grant; production constructors preserve their existing policy. */
+    DetectionEngine(Context context, DetectorConfig config, boolean latencyPriority,
+            boolean nnapiFp16Relaxation, CpuExecutionBudget executionBudget) {
+        if (executionBudget != null) executionBudget.validate(latencyPriority, Runtime.getRuntime().availableProcessors());
         this.context = context.getApplicationContext();
         this.config = config;
         this.latencyPriority = latencyPriority;
         this.nnapiFp16Relaxation = nnapiFp16Relaxation;
+        this.executionBudget = executionBudget;
+        this.strictResourceCleanup = executionBudget != null;
+        AtomicLong inputSequence = new AtomicLong();
+        this.boundedRgbInput = executionBudget == null ? null : new BoundedRgbInput(executionBudget.inputWorkers,
+                action -> {
+                    // No throwable Android setup outside ThreadPoolExecutor.Worker.run(): an
+                    // accepted channel must enter the executor's cleanup and latch protocol.
+                    Thread thread = new Thread(action, "Cen-F-in-" + inputSequence.incrementAndGet());
+                    thread.setDaemon(true);
+                    return thread;
+                });
         this.preprocessExecutor = latencyPriority
                 ? REALTIME_PREPROCESS_EXECUTOR : QUALITY_PREPROCESS_EXECUTOR;
         this.environment = OrtEnvironment.getEnvironment();
@@ -118,6 +139,7 @@ public final class DetectionEngine implements AutoCloseable {
     }
 
     public synchronized void initialize() throws IOException, OrtException {
+        if (executionBudget != null) throw new IllegalStateException("Bounded test requires explicit CPU initialization");
         closeSession();
         List<String> candidates = Collections.singletonList(config.getModelFilename());
 
@@ -167,6 +189,7 @@ public final class DetectionEngine implements AutoCloseable {
      */
     public synchronized void initializeWithoutBenchmark(String fallbackProvider)
             throws IOException, OrtException {
+        if (executionBudget != null) throw new IllegalStateException("Bounded test forbids provider fallback");
         closeSession();
         String model = config.getModelFilename();
         byte[] bytes = readAsset(model);
@@ -216,6 +239,10 @@ public final class DetectionEngine implements AutoCloseable {
 
     /** Device benchmark hook: creates one requested EP without provider-selection side effects. */
     public synchronized void initializeForProvider(String provider) throws IOException, OrtException {
+        if (executionBudget != null) {
+            if (budgetRetired) throw new IllegalStateException("Bounded detector is retired");
+            executionBudget.requireProvider(provider);
+        }
         closeSession();
         String model = config.getModelFilename();
         byte[] bytes = readAsset(model);
@@ -556,6 +583,10 @@ public final class DetectionEngine implements AutoCloseable {
     }
 
     public synchronized void setConfig(DetectorConfig value) {
+        if (executionBudget != null) {
+            if (budgetRetired) throw new IllegalStateException("Bounded detector is retired");
+            executionBudget.requireSameSession(config, value);
+        }
         boolean resize = value.getInferenceResolution() != config.getInferenceResolution();
         config = value;
         if (resize) allocateBuffers(value.getInferenceResolution());
@@ -584,6 +615,7 @@ public final class DetectionEngine implements AutoCloseable {
     }
 
     private void configureOptions(OrtSession.SessionOptions options, String provider) throws OrtException {
+        if (executionBudget != null) executionBudget.requireProvider(provider);
         options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
         options.setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL);
         options.setInterOpNumThreads(1);
@@ -592,6 +624,9 @@ public final class DetectionEngine implements AutoCloseable {
         options.addConfigEntry("session.inter_op.allow_spinning", "0");
         int threads = Math.max(1, Math.min(config.getInferenceThreads(),
                 Runtime.getRuntime().availableProcessors()));
+        if (executionBudget != null) {
+            threads = executionBudget.nativeThreads(config.getInferenceThreads(), Runtime.getRuntime().availableProcessors());
+        }
         if ("NNAPI".equals(provider)) {
             options.addConfigEntry("session.intra_op.allow_spinning",
                     latencyPriority ? "1" : "0");
@@ -610,7 +645,7 @@ public final class DetectionEngine implements AutoCloseable {
                     "intra_op_num_threads", Integer.toString(threads)));
         } else {
             options.addConfigEntry("session.intra_op.allow_spinning",
-                    latencyPriority ? "1" : "0");
+                    latencyPriority && (executionBudget == null || executionBudget.allowSpinning) ? "1" : "0");
             options.setIntraOpNumThreads(threads);
             options.addCPU(true);
         }
@@ -726,6 +761,10 @@ public final class DetectionEngine implements AutoCloseable {
     }
 
     private void populateInputValues(int plane) {
+        if (boundedRgbInput != null) {
+            boundedRgbInput.write(pixels, inputValues, plane);
+            return;
+        }
         CountDownLatch finished = new CountDownLatch(3);
         preprocessExecutor.execute(() -> fillChannel(plane, 0, 16, finished));
         preprocessExecutor.execute(() -> fillChannel(plane, plane, 8, finished));
@@ -906,6 +945,20 @@ public final class DetectionEngine implements AutoCloseable {
 
     @Override
     public synchronized void close() {
+        if (executionBudget != null) {
+            budgetRetired = true;
+            CpuExecutionBudget.closeAll(performanceHints::close, this::closeInputTensor,
+                    () -> {
+                        OrtSession retired = session; session = null;
+                        closeQuietly(retired);
+                    },
+                    () -> {
+                        inputValues = null; directInput = null;
+                        Bitmap retired = letterbox; letterbox = null; letterboxCanvas = null;
+                        if (retired != null) retired.recycle();
+                    }, boundedRgbInput::close);
+            return;
+        }
         performanceHints.close();
         closeSession();
         inputValues = null;
