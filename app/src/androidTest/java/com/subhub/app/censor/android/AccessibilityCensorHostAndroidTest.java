@@ -35,6 +35,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -43,7 +44,7 @@ import java.util.function.Consumer;
 @SdkSuppress(minSdkVersion = 30)
 public final class AccessibilityCensorHostAndroidTest {
     private static final CensorEngine.WorkTiming TIMING = new CensorEngine.WorkTiming(1, 2, 1);
-    /** Only the two explicitly synthetic resource-failure fixtures; cleared by process exit, never a fake drain. */
+    /** Only the three explicitly synthetic resource-failure fixtures; cleared by process exit, never a fake drain. */
     private static final List<Harness> EXPECTED_QUARANTINES = new CopyOnWriteArrayList<>();
 
     @Test public void fastReadinessCompletesBeforeTheFirstCaptureCallbackWithoutUsingPixels() throws Exception {
@@ -128,6 +129,40 @@ public final class AccessibilityCensorHostAndroidTest {
             assertEquals(0, h.fastUnavailableNotifications.get()); assertEquals(1, h.fastInitializations.get());
             main(h.host::close); h.failUndelivered();
             h.assertQuarantined();
+        }
+    }
+
+    @Test public void unknownQualityReadinessErrorQuarantinesAfterFastWithoutAnnouncingUnavailableOrDrain() throws Exception {
+        try (Harness h = new Harness(true)) {
+            h.qualityEnabled = true; h.blockQualityInitialization = true; h.errorQualityInitialization = true;
+            h.expectedFastAtQuarantine = 1;
+            h.start(10, config(2, .3f)); Bitmap first = h.next().deliver();
+            assertTrue(h.qualityInitializationEntered.await(5, TimeUnit.SECONDS));
+            assertTrue(h.firstFastBatch.await(5, TimeUnit.SECONDS));
+            assertEquals(1, h.acceptedFast.get());
+            h.next(); // Leave the next fake callback outstanding while readiness fails.
+            h.qualityInitializationRelease.countDown();
+            assertTrue("Unknown QUALITY startup Error must reach resource quarantine", h.resourceFailed.await(5, TimeUnit.SECONDS));
+            assertNull("The Error must not escape its owned executor", h.uncaughtQualityError.get());
+            assertEquals(0, h.qualityUnavailableNotifications.get());
+            assertEquals(1, h.qualityInitializations.get()); assertEquals(1, h.qualityReady.getCount());
+            main(h.host::close); h.failUndelivered(); h.assertQuarantined();
+            awaitRecycled(first);
+        }
+    }
+
+    @Test public void ordinaryQualityReadinessFailureLeavesFastWorkingWithoutResourceQuarantine() throws Exception {
+        try (Harness h = new Harness()) {
+            h.qualityEnabled = true; h.failQualityInitialization = true;
+            h.start(10, config(2, .3f)); h.next().deliver();
+            assertTrue(h.qualityUnavailable.await(5, TimeUnit.SECONDS));
+            h.next().deliver(); assertTrue(h.secondFastBatch.await(5, TimeUnit.SECONDS));
+            main(h.host::close); h.failUndelivered();
+            assertTrue(h.terminated.await(5, TimeUnit.SECONDS)); assertTrue(h.disposed.get());
+            assertEquals(2, h.acceptedFast.get()); assertEquals(1, h.qualityInitializations.get());
+            assertEquals(1, h.qualityUnavailableNotifications.get());
+            assertEquals(0, h.resourceFailureNotifications.get()); assertEquals(1, h.qualityReady.getCount());
+            assertNull(h.uncaughtQualityError.get());
         }
     }
 
@@ -727,6 +762,9 @@ public final class AccessibilityCensorHostAndroidTest {
         final CountDownLatch qualityEntered = new CountDownLatch(1);
         final CountDownLatch qualityRelease = new CountDownLatch(1);
         final CountDownLatch qualityReady = new CountDownLatch(1);
+        final CountDownLatch qualityUnavailable = new CountDownLatch(1);
+        final CountDownLatch firstFastBatch = new CountDownLatch(1);
+        final CountDownLatch secondFastBatch = new CountDownLatch(1);
         final CountDownLatch fastReady = new CountDownLatch(1);
         final CountDownLatch fastUnavailable = new CountDownLatch(1);
         final CountDownLatch resourceFailed = new CountDownLatch(1);
@@ -739,6 +777,9 @@ public final class AccessibilityCensorHostAndroidTest {
         final CountDownLatch secondInferenceRelease = new CountDownLatch(1);
         final AtomicInteger acceptedFast = new AtomicInteger();
         final AtomicInteger fastInitializations = new AtomicInteger();
+        final AtomicInteger qualityInitializations = new AtomicInteger();
+        final AtomicInteger qualityUnavailableNotifications = new AtomicInteger();
+        final AtomicReference<Throwable> uncaughtQualityError = new AtomicReference<>();
         final AtomicInteger fastReadyNotifications = new AtomicInteger();
         final AtomicInteger fastUnavailableNotifications = new AtomicInteger();
         final AtomicInteger acceptedQualityPositives = new AtomicInteger();
@@ -756,6 +797,8 @@ public final class AccessibilityCensorHostAndroidTest {
         volatile boolean blockQuality;
         volatile String qualityProvider = "CPU";
         volatile boolean blockQualityInitialization;
+        volatile boolean errorQualityInitialization, failQualityInitialization;
+        int expectedFastAtQuarantine;
         volatile boolean holdSecondInference;
         volatile boolean failSecondInference;
         volatile boolean mixedEvidence;
@@ -785,8 +828,15 @@ public final class AccessibilityCensorHostAndroidTest {
                             }
                         }
                         if (lane == SceneEngine.Lane.QUALITY) {
+                            qualityInitializations.incrementAndGet();
                             qualityInitializationEntered.countDown();
                             if (blockQualityInitialization) assertTrue(qualityInitializationRelease.await(5, TimeUnit.SECONDS));
+                            if (errorQualityInitialization) {
+                                // Keep a pre-fix failure observable without changing the process-wide handler.
+                                Thread.currentThread().setUncaughtExceptionHandler((thread, error) -> uncaughtQualityError.set(error));
+                                throw new AssertionError("controlled uncertain QUALITY startup Error");
+                            }
+                            if (failQualityInitialization) throw new IllegalStateException("controlled ordinary QUALITY startup failure");
                         }
                         Model model = new Model(this, lane, config); models.add(model);
                         return new VisualDetectorWorker(lane, config, partition, model);
@@ -805,11 +855,14 @@ public final class AccessibilityCensorHostAndroidTest {
                         }
                         @Override public void modelUnavailable(SceneEngine.Lane lane) {
                             if (lane == SceneEngine.Lane.FAST) { fastUnavailableNotifications.incrementAndGet(); fastUnavailable.countDown(); }
+                            if (lane == SceneEngine.Lane.QUALITY) { qualityUnavailableNotifications.incrementAndGet(); qualityUnavailable.countDown(); }
                         }
                         @Override public void batchAccepted(SceneEngine.Batch batch) {
                             if (batch.lane == SceneEngine.Lane.FAST) {
                                 acceptedFastSources.add(batch.source.imageRequestIdentity);
-                                acceptedFast.incrementAndGet();
+                                int accepted = acceptedFast.incrementAndGet();
+                                if (accepted == 1) firstFastBatch.countDown();
+                                if (accepted == 2) secondFastBatch.countDown();
                             }
                             if (batch.lane == SceneEngine.Lane.QUALITY && !batch.observations.isEmpty()) {
                                 acceptedQualitySources.add(batch.source.imageRequestIdentity);
@@ -832,7 +885,7 @@ public final class AccessibilityCensorHostAndroidTest {
                     }));
             if (expectedSyntheticQuarantine) {
                 EXPECTED_QUARANTINES.add(this);
-                assertTrue("unexpected synthetic quarantine inventory", EXPECTED_QUARANTINES.size() <= 2);
+                assertTrue("unexpected synthetic quarantine inventory", EXPECTED_QUARANTINES.size() <= 3);
             }
         }
         void start(long token, DetectorConfig config) { main(() -> host.start(token, config, qualityEnabled)); }
@@ -912,7 +965,7 @@ public final class AccessibilityCensorHostAndroidTest {
             assertEquals(0, drainNotifications.get()); assertFalse(disposed.get());
             assertNull(host.activeScope());
             try (CensorEngine<PixelFrame>.RenderView view = host.acquireRenderView()) { assertNull(view); }
-            assertEquals(0, acceptedFast.get()); assertEquals(0, acceptedQualityPositives.get());
+            assertEquals(expectedFastAtQuarantine, acceptedFast.get()); assertEquals(0, acceptedQualityPositives.get());
             long deadline = SystemClock.uptimeMillis() + 5000;
             while (host.captureInFlight() && SystemClock.uptimeMillis() < deadline) Thread.sleep(10);
             assertFalse("quarantine did not resolve its existing fake callback", host.captureInFlight());
@@ -926,7 +979,7 @@ public final class AccessibilityCensorHostAndroidTest {
             qualityInitializationRelease.countDown();
             main(host::close); failUndelivered();
             if (expectedSyntheticQuarantine) {
-                // These two factories allocate only fake Models. The failed owner intentionally
+                // These three factories allocate only fake Models. The failed owner intentionally
                 // remains quarantined until the owned instrumentation process exits. Never
                 // clear the runtime's fault or invent successful native disposal for teardown.
                 assertQuarantined();

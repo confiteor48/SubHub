@@ -434,8 +434,8 @@ public final class AccessibilityCensorHost implements AutoCloseable {
             long began = SystemClock.uptimeMillis();
             boolean failed = false, resourceFailed = false;
             try { if (!closed && configuration == value) quality.prepare(value); }
-            catch (Exception failure) {
-                failed = true; resourceFailed = cleanupFailure(failure);
+            catch (Exception | Error failure) {
+                failed = true; resourceFailed = failure instanceof Error || cleanupFailure(failure);
                 if (resourceFailed) disposalFailed.set(true);
             }
             boolean unavailable = failed, unsafe = resourceFailed;
